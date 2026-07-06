@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python sr_backtest.py)",
+      "Bash(python -)",
+      "Bash(time python sr_test_slowpath.py)",
+      "Bash(python sr_worst_analysis.py)",
+      "Bash(time python sr_calibration_check.py)",
+      "Bash(python sr_calibration_check.py)",
+      "Bash(ls -la data/sr_daily_log.csv)",
+      "Bash(wc -l data/sr_daily_log.csv)",
+      "Bash(head -3 data/sr_daily_log.csv)",
+      "Bash(python sr_build_reachtable.py RELIANCE.NS TCS.NS SBIN.NS HDFCBANK.NS ITC.NS INFY.NS)",
+      "Bash(python sr_build_reachtable.py)",
+      "Bash(python -c \"import json; d=json.load\\(open\\('data/sr_reach_table.json'\\)\\); print\\('keys:', list\\(d.keys\\(\\)\\)\\); print\\('oos_corr:', d['oos_corr']\\); print\\('base:', d['base_rate']\\)\")",
+      "Bash(python support_resistance.py RELIANCE.NS BEL.NS)",
+      "Bash(python sr_daily_logger.py RELIANCE.NS BEL.NS KAYNES.NS)",
+      "Read(//home/dhrumil/data/**)",
+      "Read(//home/dhrumil/data/price_data/**)",
+      "Bash(python -c \"import json;s=json.load\\(open\\('../data/portfolio_state.json'\\)\\);import sys;print\\(json.dumps\\(list\\(s.get\\('positions',{}\\).items\\(\\)\\)[:2],indent=2,default=str\\)\\)\")",
+      "Bash(grep -v \"\\\\.NS\\\\.csv$\")"
+    ]
+  }
+}

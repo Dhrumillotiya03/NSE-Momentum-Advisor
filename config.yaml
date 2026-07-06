@@ -1,0 +1,22 @@
+capital: 1000000
+
+portfolio:
+  top_n: 10
+  rebalance_days: 21
+  exposure_default: 0.7
+  # NOTE: canonical strategy params (regime exposure, name counts, stops) now
+  # live in scripts/strategy_config.py — the single source of truth shared by the
+  # backtest, live exit engine, and recommender. Keys below are legacy/advisory.
+
+risk:
+  catastrophic_stop: 0.18   # -18% per-name circuit breaker (profit-oriented config B)
+  trend_ma: 50
+  risk_per_trade: 0.01
+
+backtest:
+  initial_capital: 1000000
+  cost: 0.001
+
+data:
+  history_years: 3
+  min_liquidity: 50000000
