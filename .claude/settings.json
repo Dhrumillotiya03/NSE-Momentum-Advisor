@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/dhrumil/stock_ai/scripts && python _import_check.py --hook 2>/dev/null || true",
+            "timeout": 30,
+            "statusMessage": "Checking scripts/ imports across sessions..."
+          }
+        ]
+      }
+    ]
+  }
+}
