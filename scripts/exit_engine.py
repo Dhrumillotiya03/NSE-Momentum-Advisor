@@ -3,18 +3,14 @@ Per-position exit check, monthly-deadline model.
 
 Priority order (first match wins, evaluated in this order):
   (a) Catastrophic stop     - always on. price < entry * CATASTROPHIC_STOP.
-  (b) Early "good exit"     - OFF by default (EARLY_EXIT_ENABLED in
-                              strategy_config.py). Fires only when ALL of:
-                              gain >= EARLY_EXIT_MIN_GAIN, price within
-                              EARLY_EXIT_NEAR_RESISTANCE of a resistance with
-                              strength >= EARLY_EXIT_RSTRENGTH_MIN, RSI(14) >
-                              RSI_OVERBOUGHT, and reach probability to that
-                              resistance <= EARLY_EXIT_REACH_PROB_MAX.
-  (c) Month-end re-qualification gate - always on, fires only on the last
+  (b) Month-end re-qualification gate - always on, fires only on the last
       trading day of the month. Re-scores the universe; SELLS held names
       that no longer pass the momentum filter or dropped out of the
       regime's current top-N. Winners that still qualify are held (this is
       NOT a blind liquidation).
+
+(An early "good exit" resistance-fade rule was tried and rejected — see
+strategy_config.py's Exit engine comment for why.)
 
 Non-strategy holdings (GOLDBEES, RCOM-BE, HARCR, or anything with
 entry_price==0) are detected and only FLAGGED for manual review — never
@@ -26,7 +22,7 @@ import numpy as np
 
 from portfolio_state import load_state, save_state
 import strategy_config as sc
-from core import compute_score, market_regime, scan_universe, sr_levels, sr_reach_probability
+from core import compute_score, market_regime, scan_universe
 
 DATA_DIR = "../data/price_data/"
 
@@ -80,40 +76,6 @@ def check_catastrophic_stop(df, entry_price):
         pct = (price / entry_price - 1) * 100
         return f"Catastrophic stop ({pct:.0f}% from entry)"
     return None
-
-
-def check_early_exit(symbol, df, entry_price):
-    """OFF by default (strategy_config.EARLY_EXIT_ENABLED). Take-profit near
-    a strong resistance with overbought RSI and low reach probability further up."""
-    if not sc.EARLY_EXIT_ENABLED:
-        return None
-    if not entry_price:
-        return None
-
-    price = df["Close"].iloc[-1]
-    gain = price / entry_price - 1
-    if gain < sc.EARLY_EXIT_MIN_GAIN:
-        return None
-
-    support, resistance, s_str, r_str = sr_levels(df, symbol=symbol)
-    if r_str < sc.EARLY_EXIT_RSTRENGTH_MIN:
-        return None
-    dist_to_resistance = (resistance - price) / price
-    if dist_to_resistance > sc.EARLY_EXIT_NEAR_RESISTANCE:
-        return None
-
-    r = compute_score(df)
-    rsi = r["rsi"] if r is not None else np.nan
-    if np.isnan(rsi) or rsi <= sc.RSI_OVERBOUGHT:
-        return None
-
-    prob, n = sr_reach_probability(df, resistance, "up")
-    if prob is None or prob > sc.EARLY_EXIT_REACH_PROB_MAX:
-        return None
-
-    return (f"Early exit: up {gain:.0%}, within {sc.EARLY_EXIT_NEAR_RESISTANCE:.0%} of "
-            f"resistance {resistance:.2f} (strength {r_str}), RSI {rsi:.0f} overbought, "
-            f"low reach prob ({prob}%, n={n}) beyond it")
 
 
 def check_requalification(symbol, df, regime, eligible_scores, top_n_symbols):
@@ -170,11 +132,6 @@ def main():
         reason = check_catastrophic_stop(df, entry_price)
         if reason:
             reasons.append(reason)
-
-        if not reasons:
-            reason = check_early_exit(sym, df, entry_price)
-            if reason:
-                reasons.append(reason)
 
         if not reasons and month_end:
             reason = check_requalification(sym, df, regime, eligible_scores, top_n_symbols)

@@ -20,7 +20,7 @@ import requests
 import strategy_config as sc
 import core
 from exit_engine import (
-    check_catastrophic_stop, check_early_exit, check_requalification,
+    check_catastrophic_stop, check_requalification,
     is_non_strategy_holding, is_last_trading_day_of_month, load_stock as exit_load_stock,
 )
 
@@ -119,10 +119,6 @@ def should_i_sell(symbol):
     regime, _breadth = core.market_regime()
 
     reason = check_catastrophic_stop(df, entry_price)
-    if reason:
-        return {"symbol": symbol, "verdict": "SELL", "reason": reason}
-
-    reason = check_early_exit(symbol, df, entry_price)
     if reason:
         return {"symbol": symbol, "verdict": "SELL", "reason": reason}
 

@@ -50,25 +50,19 @@ RSI_OVERBOUGHT = 80             # advisory cap for the recommender (was 75; loos
 
 # ---- Exit engine ----
 # Priority order (see exit_engine.py): (1) catastrophic stop, always on;
-# (2) early "good exit" take-profit, OFF by default — only enable after
-# backtest_portfolio.py's WITH/WITHOUT comparison shows it helps, since tight
-# intra-hold exits have historically cost Sharpe+CAGR by whipsawing out of
-# momentum trends (see CATASTROPHIC_STOP comment above); (3) month-end
-# re-qualification gate, always on — sells names that no longer pass
-# compute_score's eligibility filter or fell out of the regime's top-N.
-EARLY_EXIT_ENABLED = False      # default OFF — do not enable without walk-forward evidence
-EARLY_EXIT_MIN_GAIN = 0.08      # only consider early exit if position is up >= 8%
-EARLY_EXIT_RSTRENGTH_MIN = 3    # resistance must have >=3 touches (get_levels s/r strength)
-EARLY_EXIT_NEAR_RESISTANCE = 0.01   # price must be within 1% of that resistance
-# "Low" reach probability (%) to the next resistance. NOTE: reach probability is
-# now the empirical reach_probability_v2 (distance x vol base-rate table), whose
-# output is bounded ~57-77% with base rate ~66% — it is NOT the old analog scan
-# that emitted 0-100%. A "low" break-through probability therefore means "below the
-# base rate", not "below 40". 40 is unreachable under v2 (would silently disable
-# this rule and make the with-early-exit backtest show zero early exits). 60 selects
-# the genuinely weak cells (very-close or high-vol resistances that hit ~57-60%).
-# Rebuild the table (sr_build_reachtable.py) and re-check this if base_rate shifts.
-EARLY_EXIT_REACH_PROB_MAX = 60
+# (2) month-end re-qualification gate, always on — sells names that no longer
+# pass compute_score's eligibility filter or fell out of the regime's top-N.
+#
+# An early "good exit" take-profit rule (resistance-fade: sell overbought
+# names near a strong resistance with low further-reach probability) was
+# tried and REJECTED (2026-07) after backtest_portfolio.py --compare-early-exit:
+# CAGR 17.27% vs 17.42%, same Sharpe (0.87), same MaxDD — small but consistent
+# net negative, same conclusion as the CATASTROPHIC_STOP comment above (tight
+# intra-hold exits whipsaw out of momentum trends). Root cause: the empirical
+# reach_probability_v2 table shows momentum names near a resistance still
+# push through ~58-60% of the time — "low continuation odds" is empirically
+# false for this setup, so fading it is backwards for a momentum strategy.
+# Don't re-add this premise without a different hypothesis than resistance-fade.
 
 # Non-strategy holdings: flag for manual review, never auto-sell via the
 # momentum re-qualification gate (gold ETF, delisted/BE-series, manual entries).

@@ -3,7 +3,6 @@ import pandas as pd
 import numpy as np
 
 import strategy_config as sc
-from support_resistance import get_levels, reach_probability_v2
 
 DATA_DIR   = "../data/price_data/"
 INDEX_PATH = "../data/index_data/nifty50.csv"
@@ -129,102 +128,9 @@ def simulate_position_exit(matrix, sym, entry_idx, entry_price, max_hold_days):
     return final_price / entry_price - 1
 
 
-# ---------- OHLC cache for the early-exit simulation ----------
-#
-# Early exit needs High/Low (support_resistance.get_levels) and RSI, which
-# the Close-only `matrix` doesn't carry. Loaded once per symbol, lazily,
-# and reused across the whole backtest.
-
-_OHLC_CACHE = {}
-
-
-def _load_ohlc(sym):
-    if sym in _OHLC_CACHE:
-        return _OHLC_CACHE[sym]
-    path = DATA_DIR + f"{sym}.csv"
-    if not os.path.exists(path):
-        _OHLC_CACHE[sym] = None
-        return None
-    df = pd.read_csv(path, parse_dates=["Date"], low_memory=False)
-    for col in ["Close", "High", "Low"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    df = df.dropna(subset=["Close", "High", "Low"]).sort_values("Date").set_index("Date")
-    _OHLC_CACHE[sym] = df
-    return df
-
-
-def _rsi(close, period=14):
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = (-delta.clip(upper=0)).rolling(period).mean()
-    rs = gain / loss.replace(0, np.nan)
-    return (100 - 100 / (1 + rs)).iloc[-1]
-
-
-def _early_exit_fires(ohlc, as_of_date, entry_price):
-    """Same rule as exit_engine.check_early_exit, using only data up to and
-    including as_of_date (no lookahead). ohlc is the full OHLC frame; sliced
-    here per call so no future bar is ever visible."""
-    df_upto = ohlc[ohlc.index <= as_of_date]
-    if len(df_upto) < 60:
-        return False
-
-    price = df_upto["Close"].iloc[-1]
-    gain = price / entry_price - 1
-    if gain < sc.EARLY_EXIT_MIN_GAIN:
-        return False
-
-    support, resistance, s_str, r_str = get_levels(df_upto, fast=True)
-    if r_str < sc.EARLY_EXIT_RSTRENGTH_MIN:
-        return False
-    dist_to_resistance = (resistance - price) / price
-    if dist_to_resistance > sc.EARLY_EXIT_NEAR_RESISTANCE:
-        return False
-
-    rsi = _rsi(df_upto["Close"])
-    if pd.isna(rsi) or rsi <= sc.RSI_OVERBOUGHT:
-        return False
-
-    prob, n = reach_probability_v2(df_upto, resistance, "up")
-    if prob is None or prob > sc.EARLY_EXIT_REACH_PROB_MAX:
-        return False
-
-    return True
-
-
-def simulate_position_exit_with_early(matrix, sym, entry_idx, entry_price, max_hold_days):
-    """Same as simulate_position_exit but also checks the early "good exit"
-    take-profit rule daily (EARLY_EXIT_* in strategy_config.py), in priority
-    after the catastrophic stop. Used only for the WITH-early-exit backtest
-    arm; the live default (EARLY_EXIT_ENABLED=False) never calls this."""
-    n = len(matrix)
-    ohlc = _load_ohlc(sym)
-
-    for offset in range(1, max_hold_days + 1):
-        idx = entry_idx + offset
-        if idx >= n:
-            break
-        price = matrix[sym].iloc[idx]
-        if pd.isna(price):
-            continue
-        if price < entry_price * CATASTROPHIC_STOP:
-            return price / entry_price - 1
-
-        if ohlc is not None:
-            as_of_date = matrix.index[idx]
-            if _early_exit_fires(ohlc, as_of_date, entry_price):
-                return price / entry_price - 1
-
-    final_idx = min(entry_idx + max_hold_days, n - 1)
-    final_price = matrix[sym].iloc[final_idx]
-    if pd.isna(final_price):
-        return 0.0
-    return final_price / entry_price - 1
-
-
 # ---------- Backtest ----------
 
-def run_backtest(matrix, index, early_exit=False):
+def run_backtest(matrix, index):
 
     dates   = matrix.index
     n_dates = len(dates)
@@ -306,10 +212,7 @@ def run_backtest(matrix, index, early_exit=False):
 
             entry = matrix[sym].iloc[i]
 
-            if early_exit:
-                r = simulate_position_exit_with_early(matrix, sym, i, entry, HOLD)
-            else:
-                r = simulate_position_exit(matrix, sym, i, entry, HOLD)
+            r = simulate_position_exit(matrix, sym, i, entry, HOLD)
             r -= 2 * COST
             new_capital += pos_val * (1 + r)
 
@@ -338,9 +241,6 @@ def performance(equity):
 # ---------- Main ----------
 
 def main():
-    import sys
-    compare = "--compare-early-exit" in sys.argv
-
     print("\n==============================")
     print("📊 REALISTIC PORTFOLIO BACKTEST")
     print("==============================")
@@ -350,43 +250,11 @@ def main():
 
     print(f"Universe: {matrix.shape[1]} stocks | {len(matrix)} trading days")
 
-    if not compare:
-        equity = run_backtest(matrix, index, early_exit=False)
-        if len(equity) == 0:
-            print("⚠️ Not enough data")
-            return
-        _print_single(equity)
-        return
-
-    print(f"\nRunning WITHOUT early exit (current live config, EARLY_EXIT_ENABLED=False)...")
-    equity_base = run_backtest(matrix, index, early_exit=False)
-    print(f"Running WITH early exit (EARLY_EXIT_* rule from strategy_config.py)...")
-    equity_early = run_backtest(matrix, index, early_exit=True)
-
-    if len(equity_base) == 0 or len(equity_early) == 0:
+    equity = run_backtest(matrix, index)
+    if len(equity) == 0:
         print("⚠️ Not enough data")
         return
 
-    perf_base  = performance(equity_base)
-    perf_early = performance(equity_early)
-
-    print(f"\n{'='*60}")
-    print(f"{'Metric':<16}{'WITHOUT early exit':>22}{'WITH early exit':>22}")
-    print(f"{'='*60}")
-    labels = ["Total Return", "Annual Return", "Sharpe", "Max Drawdown"]
-    for i, label in enumerate(labels):
-        b = perf_base[i]
-        e = perf_early[i]
-        if label == "Sharpe":
-            print(f"{label:<16}{b:>22.2f}{e:>22.2f}")
-        else:
-            print(f"{label:<16}{b:>22.2%}{e:>22.2%}")
-    print(f"{'='*60}")
-    print("EARLY_EXIT_ENABLED stays False in strategy_config.py until this")
-    print("comparison is reviewed and a decision is made from the numbers above.")
-
-
-def _print_single(equity):
     total, annual, sharpe, dd, volatility, years = performance(equity)
 
     print(f"\nFinal Capital:  ₹{equity[-1]:,.0f}")
