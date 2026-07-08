@@ -29,6 +29,8 @@ STATE_PATH  = DATA_DIR + "portfolio_state.json"
 LOOKBACK = sc.LOOKBACK
 HOLD     = sc.HOLD
 VOL_WIN  = sc.VOL_WINDOW
+UNIVERSE_TOP_N = sc.UNIVERSE_TOP_N
+UNIVERSE_TURNOVER_WINDOW = sc.UNIVERSE_TURNOVER_WINDOW
 
 
 # ---------- Data ----------
@@ -38,6 +40,10 @@ def load_stock(symbol):
     if not os.path.exists(path):
         return None
     df = pd.read_csv(path, parse_dates=["Date"])
+    # A malformed/truncated CSV row (interrupted download write) can leave a
+    # literal non-date string in Date that parse_dates silently fails on
+    # without producing NaT — guard explicitly (see SUNDARMFIN.NS incident).
+    df = df[pd.to_datetime(df["Date"], errors="coerce").notna()]
     for col in ["Close", "High", "Low", "Open", "Volume"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -166,13 +172,50 @@ def compute_atr(df, period=14):
     return tr.rolling(period).mean().iloc[-1]
 
 
-def scan_universe():
-    """Score every stock in the universe. Returns {symbol: score_dict} for eligible names."""
-    results = {}
+def liquid_universe(as_of=None):
+    """Point-in-time F&O liquidity proxy: top UNIVERSE_TOP_N symbols by trailing
+    median daily turnover (Close x Volume) over UNIVERSE_TURNOVER_WINDOW days,
+    as of `as_of` (defaults to the latest available date per symbol — i.e. "today").
+    Survivorship-free by construction: never looks at any list of F&O names,
+    only at trailing liquidity, so applying this to historical dates doesn't
+    leak future F&O-roster membership. See memory fno-universe-migration.
+
+    Returns a set of symbols (without .csv). Callers scoring historical dates
+    (e.g. backtest_portfolio.py) should NOT call this per-date on live CSVs —
+    use the vectorized turnover-matrix approach there instead; this function is
+    for the LIVE path (recommend.py, ai_assistant.py, full_advisor.py).
+    """
+    turnovers = {}
     for f in os.listdir(PRICE_DIR):
         if not f.endswith(".csv"):
             continue
         sym = f.replace(".csv", "")
+        try:
+            df = pd.read_csv(PRICE_DIR + f, usecols=["Date", "Close", "Volume"], parse_dates=["Date"])
+        except (ValueError, KeyError):
+            continue
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+        df = df.dropna(subset=["Close", "Volume"]).sort_values("Date")
+        if as_of is not None:
+            df = df[df["Date"] <= pd.Timestamp(as_of)]
+        if len(df) < UNIVERSE_TURNOVER_WINDOW:
+            continue
+        turnover = (df["Close"] * df["Volume"]).tail(UNIVERSE_TURNOVER_WINDOW).median()
+        if pd.isna(turnover) or turnover <= 0:
+            continue
+        turnovers[sym] = turnover
+
+    ranked = sorted(turnovers, key=turnovers.get, reverse=True)
+    return set(ranked[:UNIVERSE_TOP_N])
+
+
+def scan_universe():
+    """Score every stock in the F&O-liquidity-gated universe. Returns
+    {symbol: score_dict} for eligible names."""
+    gated = liquid_universe()
+    results = {}
+    for sym in gated:
         df = load_stock(sym)
         if df is None or len(df) < LOOKBACK + 60:
             continue

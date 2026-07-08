@@ -11,6 +11,13 @@ conditional distribution from ~10 years of data, not a fitted/overfit model
 All backward/forward stats are pooled across history purely to DESCRIBE the
 score->outcome relationship; the table is not used to select stocks via any
 lookahead, only to annotate live recommendations with historical base rates.
+
+Setups are additionally gated to the F&O liquidity proxy (top UNIVERSE_TOP_N by
+trailing turnover, POINT IN TIME per date — see strategy_config.py's Universe
+gate comment / memory fno-universe-migration) so the win-rate/median base rates
+shown to the user describe setups they could actually have traded, not the
+full broad universe. Survivorship-free: the gate at each historical date only
+uses trailing turnover up to that date.
 """
 import os
 import json
@@ -25,6 +32,36 @@ OUT_PATH  = "../data/confidence_table.json"
 LOOKBACK = sc.LOOKBACK          # 126
 HOLD     = sc.HOLD              # 21
 VOL_WIN  = sc.VOL_WINDOW        # 63
+UNIVERSE_TOP_N = sc.UNIVERSE_TOP_N
+UNIVERSE_TURNOVER_WINDOW = sc.UNIVERSE_TURNOVER_WINDOW
+
+
+def liquidity_rank_series():
+    """For every (date, symbol), whether that symbol was in the top
+    UNIVERSE_TOP_N by trailing turnover as of that date. Returns a
+    DataFrame (dates x symbols) of booleans, aligned to the union of all
+    price dates. Point-in-time / no lookahead: rank at date d uses only
+    turnover up to and including d."""
+    turnovers = {}
+    for f in os.listdir(PRICE_DIR):
+        if not f.endswith(".csv"):
+            continue
+        sym = f.replace(".csv", "")
+        try:
+            df = pd.read_csv(PRICE_DIR + f, usecols=["Date", "Close", "Volume"], parse_dates=["Date"], low_memory=False)
+        except (ValueError, KeyError):
+            continue
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+        df = df.dropna(subset=["Close", "Volume"]).sort_values("Date").set_index("Date")
+        turnovers[sym] = df["Close"] * df["Volume"]
+
+    matrix = pd.DataFrame(turnovers).sort_index().ffill(limit=5)
+    trailing_median = matrix.rolling(UNIVERSE_TURNOVER_WINDOW, min_periods=UNIVERSE_TURNOVER_WINDOW).median()
+    # rank(axis=1) ranks each row (date) across symbols; top-N by descending turnover
+    ranks = trailing_median.rank(axis=1, ascending=False, method="first")
+    gated = ranks <= UNIVERSE_TOP_N
+    return gated
 
 
 def regime_map():
@@ -79,12 +116,14 @@ def score_series(close):
 
 def build():
     reg = regime_map()
+    liquidity = liquidity_rank_series()
     rows_score = []
     rows_fwd = []
     rows_reg = []
     files = [f for f in os.listdir(PRICE_DIR) if f.endswith(".csv")]
     for f in files:
         try:
+            sym = f.replace(".csv", "")
             df = pd.read_csv(PRICE_DIR + f, parse_dates=["Date"], low_memory=False)
             df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
             c = df.dropna(subset=["Close"]).sort_values("Date").set_index("Date")["Close"]
@@ -92,7 +131,11 @@ def build():
                 continue
             score, elig = score_series(c)
             fwd = c.shift(-HOLD) / c - 1
-            mask = elig & score.notna() & fwd.notna()
+            if sym in liquidity.columns:
+                liquid_mask = liquidity[sym].reindex(c.index).fillna(False)
+            else:
+                liquid_mask = pd.Series(False, index=c.index)
+            mask = elig & score.notna() & fwd.notna() & liquid_mask
             rows_score.append(score[mask].values)
             rows_fwd.append(fwd[mask].values)
             rows_reg.append(reg.reindex(c.index[mask]).values)

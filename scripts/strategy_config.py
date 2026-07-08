@@ -17,6 +17,28 @@ HOLD     = 21           # rebalance / holding period (trading days)
 VOL_WINDOW = 63         # window for inverse-vol sizing & the ret/vol score
 COST     = 0.001        # one-way transaction cost (0.1%)
 
+# ---- Universe gate (F&O liquidity proxy) ----
+# User only wants to trade names liquid/large enough to have listed F&O
+# (futures & options) — for hedgeability and tight spreads, still trading
+# cash equity (not the derivatives themselves). Rather than a static F&O
+# symbol list (survivorship-biased if applied backward — NSE's F&O roster
+# changes twice a year, so today's list didn't exist in 2015), the universe
+# is gated by a POINT-IN-TIME liquidity proxy: top UNIVERSE_TOP_N names by
+# trailing median daily turnover (Close x Volume) as of each date. This is
+# self-updating and survivorship-free by construction — see memory
+# fno-universe-migration for the full rationale. Applies to SELECTION only;
+# market_breadth_pct()/compute_breadth_series() stay on the full broad
+# universe (regime is a market-wide concept, not scoped to what you buy).
+UNIVERSE_TOP_N = 200            # approx size of the real NSE F&O roster (~180-190
+                                 # as of 2024-2025 SEBI review cycles + small buffer).
+                                 # Set by this real-world constraint, NOT tuned for
+                                 # backtest performance — walk-forward sensitivity to
+                                 # this number is noisy/non-monotonic (150->13.8% CAGR,
+                                 # 200->17.0%, 250->14.4%, 300->17.0%), so picking
+                                 # whichever N backtests best would be curve-fitting.
+                                 # Don't re-tune this off backtest results.
+UNIVERSE_TURNOVER_WINDOW = 20   # trading days for the trailing turnover rank
+
 # ---- Regime exposure & breadth ----
 # Exposure = fraction of capital deployed; rest held as cash.
 REGIME_EXPOSURE = {
@@ -26,14 +48,29 @@ REGIME_EXPOSURE = {
     "UNKNOWN":  0.60,
 }
 # Number of names held per regime.
+# SIDEWAYS = 3 (was 6, changed 2026-07): SIDEWAYS-regime picks contribute much
+# less than BULL's (momentum signal itself is weaker in choppy markets), so
+# spreading across 6 names diluted the few genuinely good setups. Walk-forward
+# tested (19 overlapping 3y windows): 3 names beats/matches 6 in 16/19 windows,
+# lower mean drawdown, fewer negative-Sharpe windows (1 vs 2). A more
+# aggressive 2-name version was also tested and REJECTED — higher average
+# return but genuinely worse tail risk (a new negative-Sharpe window appeared,
+# drawdowns ballooned to 30% in weak windows) — that's concentration risk
+# materializing, not a free lunch. Don't re-tune below 3 without new evidence.
 REGIME_NAMES = {
     "BULL":     10,
-    "SIDEWAYS": 6,
+    "SIDEWAYS": 3,
     "BEAR":     2,
     "UNKNOWN":  6,
 }
 MAX_WEIGHT = 0.20               # single-name cap (diversification vs concentration)
 BREADTH_BULL_MIN = 0.50         # need >=50% of universe above 200DMA to allow BULL
+MAX_PER_SECTOR = 2               # diversification cap on top-N selection (was
+                                 # documented in CLAUDE.md but not actually enforced
+                                 # anywhere in code until the F&O universe migration
+                                 # found unenforced concentration up to 8/10 names in
+                                 # one sector during BULL rebalances — see sectors.json
+                                 # and memory fno-universe-migration)
 
 # ---- Risk control ----
 # Profit-oriented: no tight intra-hold exits (they cost ~0.3 Sharpe and CAGR by

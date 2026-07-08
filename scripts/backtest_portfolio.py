@@ -1,11 +1,13 @@
 import os
+import json
 import pandas as pd
 import numpy as np
 
 import strategy_config as sc
 
-DATA_DIR   = "../data/price_data/"
-INDEX_PATH = "../data/index_data/nifty50.csv"
+DATA_DIR    = "../data/price_data/"
+INDEX_PATH  = "../data/index_data/nifty50.csv"
+SECTOR_FILE = "../data/sectors.json"
 
 INITIAL_CAPITAL = 1_000_000
 LOOKBACK        = sc.LOOKBACK
@@ -13,6 +15,9 @@ HOLD            = sc.HOLD
 COST            = sc.COST
 
 CATASTROPHIC_STOP = sc.CATASTROPHIC_STOP   # wide tail circuit breaker (-18%)
+
+UNIVERSE_TOP_N = sc.UNIVERSE_TOP_N
+UNIVERSE_TURNOVER_WINDOW = sc.UNIVERSE_TURNOVER_WINDOW
 
 
 # ---------- Load aligned price matrix ----------
@@ -31,6 +36,10 @@ def load_price_matrix():
                 low_memory=False
             )
             df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+            # A malformed/truncated CSV row (interrupted download write) can
+            # leave a literal non-date string in Date that parse_dates
+            # silently fails on without producing NaT — guard explicitly.
+            df = df[pd.to_datetime(df["Date"], errors="coerce").notna()]
             df = df.dropna(subset=["Close"]).sort_values("Date")
             df = df.set_index("Date")["Close"]
             if len(df) > LOOKBACK + HOLD + 50:
@@ -57,6 +66,76 @@ def load_price_matrix():
     matrix = matrix.loc[:, matrix.isna().mean() <= 0.20]
 
     return matrix
+
+
+# ---------- Load aligned turnover matrix (Close x Volume, for the F&O liquidity gate) ----------
+#
+# Point-in-time proxy for "would this name have had listed F&O" — see
+# strategy_config.py's Universe gate comment and memory fno-universe-migration.
+# Survivorship-free: at each historical rebalance date, only trailing turnover
+# up to that date is used (no knowledge of which names are liquid in the future).
+
+def load_turnover_matrix(price_matrix):
+    frames = {}
+    for sym in price_matrix.columns:
+        path = DATA_DIR + f"{sym}.csv"
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path, usecols=["Date", "Close", "Volume"], parse_dates=["Date"], low_memory=False)
+        except (ValueError, KeyError):
+            continue
+        df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+        df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce")
+        df = df.dropna(subset=["Close", "Volume"]).sort_values("Date").set_index("Date")
+        turnover = df["Close"] * df["Volume"]
+        frames[sym] = turnover
+
+    matrix = pd.DataFrame(frames).reindex(price_matrix.index)
+    matrix = matrix.ffill(limit=5)
+    return matrix
+
+
+def liquid_symbols_at(turnover_matrix, idx, window=None, top_n=None):
+    """Top-N symbols by trailing median turnover, using only rows up to and
+    including idx (no lookahead). idx is a positional index into turnover_matrix."""
+    window = window or UNIVERSE_TURNOVER_WINDOW
+    top_n = top_n or UNIVERSE_TOP_N
+    start = max(0, idx - window + 1)
+    trailing = turnover_matrix.iloc[start:idx + 1]
+    medians = trailing.median(skipna=True)
+    medians = medians.dropna()
+    ranked = medians.sort_values(ascending=False)
+    return set(ranked.index[:top_n])
+
+
+# ---------- Sector map (for the diversification cap) ----------
+
+def load_sector_map():
+    if not os.path.exists(SECTOR_FILE):
+        return {}
+    with open(SECTOR_FILE) as f:
+        raw = json.load(f)
+    return {sym: sec for sec, syms in raw.items() for sym in syms}
+
+
+def select_top_n_capped(scores, n, sector_map, max_per_sector):
+    """Greedy top-N selection by descending score, skipping names once their
+    sector has hit max_per_sector, then continuing further down the ranked
+    list to still fill n slots. Unmapped symbols are grouped into a single
+    'UNMAPPED' bucket so they can't dominate the book uncapped either."""
+    ranked = sorted(scores, key=scores.get, reverse=True)
+    sector_count = {}
+    selected = []
+    for sym in ranked:
+        if len(selected) >= n:
+            break
+        sec = sector_map.get(sym, "UNMAPPED")
+        if sector_count.get(sec, 0) >= max_per_sector:
+            continue
+        selected.append(sym)
+        sector_count[sec] = sector_count.get(sec, 0) + 1
+    return selected
 
 
 # ---------- Load index ----------
@@ -130,24 +209,34 @@ def simulate_position_exit(matrix, sym, entry_idx, entry_price, max_hold_days):
 
 # ---------- Backtest ----------
 
-def run_backtest(matrix, index):
+def run_backtest(matrix, index, turnover_matrix=None):
 
     dates   = matrix.index
     n_dates = len(dates)
     capital = float(INITIAL_CAPITAL)
     equity  = []
     breadth = compute_breadth_series(matrix)
+    sector_map = load_sector_map()
+
+    if turnover_matrix is None:
+        turnover_matrix = load_turnover_matrix(matrix)
 
     for i in range(LOOKBACK + 21, n_dates - HOLD, HOLD):
 
         date   = dates[i]
         regime = get_regime(index, date, breadth)
 
+        # ---- F&O liquidity gate: only trailing-liquid names as of `date` ----
+        # Intersect with matrix.columns — a sliced/windowed price matrix (e.g.
+        # walk_forward.py's per-window sub_matrix) may have dropped a symbol
+        # the turnover matrix still ranks (different NaN-coverage filters).
+        gated_symbols = liquid_symbols_at(turnover_matrix, i) & set(matrix.columns)
+
         # ---- Score all stocks at this exact calendar date ----
         scores = {}
         vols   = {}
 
-        for sym in matrix.columns:
+        for sym in gated_symbols:
 
             # Need valid price now, LOOKBACK ago, and at exit
             price_now  = matrix[sym].iloc[i]
@@ -192,7 +281,14 @@ def run_backtest(matrix, index):
             equity.append(capital)
             continue
 
-        top = sorted(scores, key=scores.get, reverse=True)[:n]
+        # Sector-capped top-N: greedy by score, skip once a sector hits
+        # MAX_PER_SECTOR, backfill further down the ranked list. May return
+        # fewer than n if too few distinct sectors are eligible — the rest of
+        # the loop handles any length of `top` correctly.
+        top = select_top_n_capped(scores, n, sector_map, sc.MAX_PER_SECTOR)
+        if not top:
+            equity.append(capital)
+            continue
 
         # ---- Inverse vol weighting ----
         inv_vols    = {s: 1.0 / vols[s] for s in top}
@@ -247,10 +343,12 @@ def main():
 
     matrix = load_price_matrix()
     index  = load_index()
+    turnover_matrix = load_turnover_matrix(matrix)
 
     print(f"Universe: {matrix.shape[1]} stocks | {len(matrix)} trading days")
+    print(f"F&O liquidity gate: top {UNIVERSE_TOP_N} by trailing {UNIVERSE_TURNOVER_WINDOW}d turnover")
 
-    equity = run_backtest(matrix, index)
+    equity = run_backtest(matrix, index, turnover_matrix)
     if len(equity) == 0:
         print("⚠️ Not enough data")
         return

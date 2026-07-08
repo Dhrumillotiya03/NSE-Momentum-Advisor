@@ -23,7 +23,7 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from backtest_portfolio import load_price_matrix, load_index, run_backtest, performance
+from backtest_portfolio import load_price_matrix, load_index, load_turnover_matrix, run_backtest, performance
 
 
 def make_windows(matrix, window_years, step_months):
@@ -53,12 +53,13 @@ def make_windows(matrix, window_years, step_months):
     return windows
 
 
-def run_window(matrix, index, start, end):
+def run_window(matrix, index, turnover_matrix, start, end):
     sub_matrix = matrix[(matrix.index >= start) & (matrix.index <= end)]
     sub_matrix = sub_matrix.loc[:, sub_matrix.isna().mean() <= 0.20]
     if len(sub_matrix) < 300:
         return None
-    equity = run_backtest(sub_matrix, index)
+    sub_turnover = turnover_matrix.reindex(sub_matrix.index)
+    equity = run_backtest(sub_matrix, index, sub_turnover)
     if len(equity) < 2:
         return None
     return performance(equity)
@@ -76,6 +77,7 @@ def main():
 
     matrix = load_price_matrix()
     index = load_index()
+    turnover_matrix = load_turnover_matrix(matrix)
     print(f"Full history: {matrix.index[0].date()} to {matrix.index[-1].date()} ({len(matrix)} days, {matrix.shape[1]} stocks)")
 
     windows = make_windows(matrix, args.years, args.step)
@@ -83,7 +85,7 @@ def main():
 
     rows = []
     for start, end in windows:
-        result = run_window(matrix, index, start, end)
+        result = run_window(matrix, index, turnover_matrix, start, end)
         if result is None:
             continue
         total, annual, sharpe, dd, vol, yrs = result

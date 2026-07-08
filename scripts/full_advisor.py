@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 import yaml
-from core import load_stock, market_regime as _core_market_regime, compute_atr, SECTOR_FILE
+from core import load_stock, market_regime as _core_market_regime, compute_atr, SECTOR_FILE, liquid_universe
 from support_resistance import get_levels, strength_label
 with open("../config.yaml") as f:
     cfg = yaml.safe_load(f)
@@ -141,6 +141,14 @@ def compute_rsi(close, period=14):
 def main():
     regime = market_regime()
     sectors = load_sectors()
+
+    # F&O liquidity gate (see strategy_config.py's Universe gate comment /
+    # memory fno-universe-migration) — restrict both sector scoring and the
+    # buy scan to names liquid enough to have listed F&O, so recommendations
+    # match what's actually tradeable/hedgeable.
+    gated = liquid_universe()
+    sectors = {sec: [s for s in syms if s in gated] for sec, syms in sectors.items()}
+    sectors = {sec: syms for sec, syms in sectors.items() if syms}
 
     sec_scores = sector_scores(sectors)
     ranked_sec = sorted(sec_scores.items(), key=lambda x: x[1], reverse=True)
