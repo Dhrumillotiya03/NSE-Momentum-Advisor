@@ -97,6 +97,9 @@ def stock_status(symbol):
 
 
 def should_i_sell(symbol):
+    if not symbol or not symbol.strip():
+        return {"error": "symbol is required. To review ALL holdings at once, "
+                          "call the what_to_sell tool instead (it takes no arguments)."}
     if not symbol.upper().endswith(".NS"):
         symbol = symbol.upper() + ".NS"
     else:
@@ -105,7 +108,8 @@ def should_i_sell(symbol):
     state = core.load_portfolio_state()
     pos = state["positions"].get(symbol)
     if pos is None:
-        return {"error": f"No open position in {symbol}"}
+        held = list(state["positions"].keys())
+        return {"error": f"No open position in {symbol}", "currently_held_symbols": held}
 
     if is_non_strategy_holding(symbol, pos):
         return {"symbol": symbol, "verdict": "MANUAL REVIEW",
@@ -117,26 +121,36 @@ def should_i_sell(symbol):
 
     entry_price = pos.get("entry_price", 0)
     regime, _breadth = core.market_regime()
+    from live_quotes import get_quote
+    live_price, stale = get_quote(symbol)
 
-    reason = check_catastrophic_stop(df, entry_price)
+    reason = check_catastrophic_stop(df, entry_price, live_price=None if stale else live_price)
     if reason:
         return {"symbol": symbol, "verdict": "SELL", "reason": reason}
 
     import pandas as pd
     index_dates = pd.read_csv("../data/index_data/nifty50.csv", parse_dates=["Date"])["Date"].sort_values()
     if is_last_trading_day_of_month(index_dates):
+        # Hard monthly close: EVERY strategy position is sold at month-end.
+        # check_requalification only decides whether it's re-bought next session.
         eligible_scores = core.scan_universe()
         n_names = sc.REGIME_NAMES[regime]
         ranked = sorted(eligible_scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
         top_n_symbols = {sym for sym, _ in ranked[:n_names]}
-        reason = check_requalification(symbol, df, regime, eligible_scores, top_n_symbols)
-        if reason:
-            return {"symbol": symbol, "verdict": "SELL", "reason": reason}
+        requal = check_requalification(symbol, df, regime, eligible_scores, top_n_symbols)
+        if requal is None:
+            return {"symbol": symbol, "verdict": "SELL",
+                    "reason": "Month-end liquidation (hard monthly close) — but it RE-QUALIFIES "
+                              "for the new book: sell at close, re-buy next session"}
+        return {"symbol": symbol, "verdict": "SELL",
+                "reason": f"Month-end liquidation (hard monthly close) — {requal}"}
 
-    price = float(df["Close"].iloc[-1])
+    price = live_price if live_price else float(df["Close"].iloc[-1])
     gain = (price / entry_price - 1) if entry_price else None
-    return {"symbol": symbol, "verdict": "HOLD", "current_gain": gain,
-            "reason": "no exit condition currently fires"}
+    return {"symbol": symbol, "verdict": "HOLD", "current_price": price,
+            "price_is_live": not stale, "current_gain": gain,
+            "reason": "no exit condition fires; intra-month the only exit is the -18% "
+                      "catastrophic stop — otherwise positions run to the month-end close"}
 
 
 def what_to_sell():
@@ -147,7 +161,14 @@ def what_to_sell():
     urgent = [r for r in results if r.get("verdict") == "SELL"]
     review = [r for r in results if r.get("verdict") == "MANUAL REVIEW"]
     holds = [r for r in results if r.get("verdict") == "HOLD"]
-    return {"sell": urgent, "manual_review": review, "hold": holds}
+    # Key names must be unambiguous for the LLM: an empty list under a key
+    # like "hold" was misread as "no holdings at all" in testing.
+    return {
+        "total_open_positions": len(results),
+        "positions_to_SELL_now": urgent,
+        "positions_needing_manual_review": review,
+        "positions_fine_to_keep_holding": holds,
+    }
 
 
 def buy_candidates():
@@ -176,19 +197,20 @@ def buy_candidates():
 
 
 def portfolio_summary():
+    from live_quotes import get_quote
     state = core.load_portfolio_state()
     total = state["cash"]
     positions = []
     for sym, pos in state["positions"].items():
-        df = core.load_stock(sym)
-        price = float(df["Close"].iloc[-1]) if df is not None else None
+        price, stale = get_quote(sym)
         value = price * pos["qty"] if price else None
         pnl = (price / pos["entry_price"] - 1) if price and pos.get("entry_price") else None
         if value:
             total += value
         positions.append({
             "symbol": sym, "qty": pos["qty"], "entry_price": pos.get("entry_price"),
-            "current_price": price, "value": value, "pnl_pct": pnl,
+            "current_price": price, "price_is_live": (not stale) if price else False,
+            "value": value, "pnl_pct": pnl,
         })
     return {"cash": state["cash"], "positions": positions, "total_value": total}
 
@@ -219,16 +241,21 @@ TOOL_SCHEMAS = [
     }},
     {"type": "function", "function": {
         "name": "should_i_sell",
-        "description": "Runs the exit hierarchy (catastrophic stop, early exit, month-end "
-                        "re-qualification) for one currently-held symbol and returns a verdict.",
+        "description": "Sell verdict for ONE specific, named holding (runs the exit "
+                        "hierarchy: catastrophic stop, month-end re-qualification). Only "
+                        "use when the user names a specific stock. If the user asks about "
+                        "their holdings in general ('what should I sell?', 'review my "
+                        "portfolio'), use what_to_sell instead.",
         "parameters": {"type": "object", "properties": {
-            "symbol": {"type": "string", "description": "NSE ticker of a held position"},
+            "symbol": {"type": "string", "description": "NSE ticker of a held position, e.g. AARTIIND"},
         }, "required": ["symbol"]},
     }},
     {"type": "function", "function": {
         "name": "what_to_sell",
-        "description": "Scans all current holdings and ranks exit urgency — which to sell now, "
-                        "which need manual review, which to hold.",
+        "description": "USE THIS for any general 'which of my holdings should I sell / "
+                        "review my portfolio for exits' question. Scans ALL current "
+                        "holdings and returns which to sell now, which need manual review, "
+                        "and which are fine to keep. Takes no arguments.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
     {"type": "function", "function": {
@@ -276,6 +303,7 @@ def run_turn(messages):
             args = call["function"].get("arguments", {})
             if isinstance(args, str):
                 args = json.loads(args) if args else {}
+            print(f"  [tool: {name}({', '.join(f'{k}={v}' for k, v in args.items())})]")
             impl = TOOL_IMPLS.get(name)
             result = impl(args) if impl else {"error": f"unknown tool {name}"}
             messages.append({"role": "tool", "content": json.dumps(result, default=str)})

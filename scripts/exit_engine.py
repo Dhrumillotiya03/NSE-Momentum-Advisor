@@ -1,20 +1,28 @@
 """
-Per-position exit check, monthly-deadline model.
+Per-position exit check, hard monthly-close model.
 
-Priority order (first match wins, evaluated in this order):
-  (a) Catastrophic stop     - always on. price < entry * CATASTROPHIC_STOP.
-  (b) Month-end re-qualification gate - always on, fires only on the last
-      trading day of the month. Re-scores the universe; SELLS held names
-      that no longer pass the momentum filter or dropped out of the
-      regime's current top-N. Winners that still qualify are held (this is
-      NOT a blind liquidation).
+The book is FULLY LIQUIDATED at every month-end (last trading day): the user's
+mandate is that the portfolio goes flat each month and the fresh top-N for the
+current regime is bought back the next session. A name that re-qualifies is
+sold and immediately re-bought — economically a hold, but executed as two
+trades so the journal and broker statements match reality. This is also
+exactly what backtest_portfolio.py has always modeled (2 x COST per cycle).
+
+Priority order for intra-month checks (first match wins):
+  (a) Catastrophic stop — always on. price < entry * CATASTROPHIC_STOP,
+      checked against the LIVE quote when available (live_quotes.py,
+      ~15-min delayed), falling back to the last downloaded close.
+  (b) Month-end liquidation — on the last trading day, every strategy
+      position is a SELL. The report annotates which names re-qualify for
+      the new book (sell + re-buy) and which don't (sell, gone).
 
 (An early "good exit" resistance-fade rule was tried and rejected — see
-strategy_config.py's Exit engine comment for why.)
+strategy_config.py's Exit engine comment. Intra-month, the only exit is
+the catastrophic stop; "a suitable price to sell" is the month-end close.)
 
 Non-strategy holdings (GOLDBEES, RCOM-BE, HARCR, or anything with
 entry_price==0) are detected and only FLAGGED for manual review — never
-auto-sold by the momentum gate.
+auto-sold.
 """
 import os
 import pandas as pd
@@ -23,6 +31,7 @@ import numpy as np
 from portfolio_state import load_state, save_state
 import strategy_config as sc
 from core import compute_score, market_regime, scan_universe
+from live_quotes import get_quote
 
 DATA_DIR = "../data/price_data/"
 
@@ -70,24 +79,40 @@ def is_last_trading_day_of_month(dates, as_of=None):
 
 # ---------- Exit checks ----------
 
-def check_catastrophic_stop(df, entry_price):
-    price = df["Close"].iloc[-1]
+def check_catastrophic_stop(df, entry_price, live_price=None):
+    """Stop check against the live quote when supplied, else last close."""
+    price = live_price if live_price else df["Close"].iloc[-1]
     if entry_price and price < entry_price * sc.CATASTROPHIC_STOP:
         pct = (price / entry_price - 1) * 100
-        return f"Catastrophic stop ({pct:.0f}% from entry)"
+        return f"Catastrophic stop ({pct:.0f}% from entry, price {price:.2f})"
     return None
 
 
 def check_requalification(symbol, df, regime, eligible_scores, top_n_symbols):
-    """Only meaningful on month-end. Sells if the name no longer passes the
-    momentum eligibility filter, or fell out of the regime's current top-N."""
+    """Month-end classifier: does this name make the NEW book?
+    Returns None if it re-qualifies (sell at close, re-buy next session);
+    otherwise a reason string explaining why it drops out."""
     r = compute_score(df)
     if r is None:
-        return "Month-end re-qualification: no longer passes momentum filter (eligibility lost)"
+        return "does NOT re-qualify: fails the momentum filter (no re-buy)"
     if symbol not in top_n_symbols:
-        return (f"Month-end re-qualification: eligible but dropped out of top-{len(top_n_symbols)} "
-                f"for current regime ({regime})")
+        return (f"does NOT re-qualify: eligible but outside top-{len(top_n_symbols)} "
+                f"for current regime ({regime}) (no re-buy)")
     return None
+
+
+def _already_journaled_today(symbol, action):
+    """Avoid duplicate journal rows when the engine is run multiple times a day."""
+    path = "../data/trade_history.csv"
+    if not os.path.exists(path):
+        return False
+    try:
+        df = pd.read_csv(path)
+        today = pd.Timestamp.now().strftime("%Y-%m-%d")
+        return bool(((df.iloc[:, 0] == today) & (df.iloc[:, 1] == symbol)
+                     & (df.iloc[:, 2] == action)).any())
+    except Exception:
+        return False
 
 
 # ---------- Main ----------
@@ -112,9 +137,10 @@ def main():
         eligible_scores = scan_universe()
         ranked = sorted(eligible_scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
         top_n_symbols = {sym for sym, _ in ranked[:n_names]}
-        print(f"\n(Month-end re-qualification gate active — regime={regime}, top-{n_names})")
+        print(f"\n(MONTH-END: full liquidation — book goes flat, fresh top-{n_names} "
+              f"for regime {regime} re-entered next session)")
 
-    exit_list = []
+    exit_list = []   # (symbol, reasons, live_price)
     flag_list = []
 
     for sym, pos in positions.items():
@@ -127,24 +153,33 @@ def main():
             continue
 
         entry_price = pos.get("entry_price", 0)
+        live_price, stale = get_quote(sym)
         reasons = []
 
-        reason = check_catastrophic_stop(df, entry_price)
+        reason = check_catastrophic_stop(df, entry_price, live_price=None if stale else live_price)
         if reason:
             reasons.append(reason)
 
         if not reasons and month_end:
-            reason = check_requalification(sym, df, regime, eligible_scores, top_n_symbols)
-            if reason:
-                reasons.append(reason)
+            requal = check_requalification(sym, df, regime, eligible_scores, top_n_symbols)
+            if requal is None:
+                reasons.append("Month-end liquidation — RE-QUALIFIES for the new book: sell at close, re-buy next session")
+            else:
+                reasons.append(f"Month-end liquidation — {requal}")
 
         if reasons:
-            exit_list.append((sym, reasons))
+            exit_list.append((sym, reasons, live_price))
 
     if flag_list:
         print("\nFLAGGED FOR MANUAL REVIEW (excluded from auto-exit):")
         for sym, reason in flag_list:
             print(f"  {sym}: {reason}")
+
+    if month_end and eligible_scores:
+        ranked = sorted(eligible_scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
+        print(f"\nNEW BOOK to enter next session (top-{n_names}, {regime} regime):")
+        for sym, r in ranked[:n_names]:
+            print(f"  {sym:16s} score {r['score']:.2f}")
 
     if not exit_list:
         print("\nNo exit signals detected")
@@ -152,9 +187,9 @@ def main():
 
     from trade_journal import log_trade
 
-    print("\nSELL / REDUCE POSITIONS:")
+    print("\nSELL POSITIONS:")
 
-    for sym, reasons in exit_list:
+    for sym, reasons, live_price in exit_list:
         print(f"\n{sym}")
         for r in reasons:
             print(f"  - {r}")
@@ -162,10 +197,15 @@ def main():
         pos = positions.get(sym, {})
         qty = pos.get("qty", 0)
         entry = pos.get("entry_price", 0)
-        df = load_stock(sym)
-        price = df["Close"].iloc[-1] if df is not None else 0
+        price = live_price
+        if price is None:
+            df = load_stock(sym)
+            price = df["Close"].iloc[-1] if df is not None else 0
         pnl = round((price - entry) * qty, 2) if entry and qty else 0
-        log_trade(sym, "SELL", price, qty, regime, "N/A", ", ".join(reasons), pnl=pnl)
+        if _already_journaled_today(sym, "SELL"):
+            print("  (already journaled today — skipping duplicate log entry)")
+        else:
+            log_trade(sym, "SELL", price, qty, regime, "N/A", ", ".join(reasons), pnl=pnl)
 
 
 if __name__ == "__main__":

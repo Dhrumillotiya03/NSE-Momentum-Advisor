@@ -21,23 +21,11 @@ def save_state(state):
 # ---------- Latest Price ----------
 
 def latest_price(symbol):
-    # Try live price first
-    try:
-        import yfinance as yf
-        ticker = yf.Ticker(symbol)
-        data = ticker.fast_info
-        live = data.last_price
-        if live and live > 0:
-            return float(live)
-    except:
-        pass
-
-    # Fallback to last downloaded price
-    path = PRICE_DIR + f"{symbol}.csv"
-    if not os.path.exists(path):
-        return None
-    df = pd.read_csv(path)
-    return float(df["Close"].iloc[-1])
+    """Live-ish price via live_quotes (yfinance ~15min delayed, cached,
+    CSV-close fallback). Returns None if no price is available at all."""
+    from live_quotes import get_quote
+    price, _stale = get_quote(symbol)
+    return price
 
 
 # ---------- Portfolio Valuation ----------
