@@ -3,7 +3,12 @@ sr_daily_logger.py
 -------------------
 Logs one row per stock per day: Symbol, Date, CMP, S1, S1_prob, S1_n,
 R1, R1_prob, R1_n — plus S2/R2 (+prob+n) only when that level's reach
-probability is above 50%.
+probability beats the empirical base rate (~66%) from sr_reach_table.json.
+
+WATCHLIST is a FIXED validation panel — deliberately hardcoded so the same
+stocks are logged every day and sr_monthend_analysis.py measures model
+accuracy on a consistent panel. Do NOT make it dynamic (holdings/top-N);
+changing names day-to-day undermines the accuracy analysis.
 
 Run this once daily (after 3:30pm IST, after download_data.py).
 

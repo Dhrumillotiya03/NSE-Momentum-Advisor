@@ -41,7 +41,11 @@ def load_log():
 def load_price(symbol):
     path = os.path.join(PRICE_DIR, f"{symbol}.NS.csv")
     if not os.path.exists(path):
-        return None
+        # ETFs (GOLDBEES) live in etf_data/, not price_data/ — see
+        # support_resistance.load_stock for why they must stay separate.
+        path = os.path.join("../data/etf_data/", f"{symbol}.NS.csv")
+        if not os.path.exists(path):
+            return None
     df = pd.read_csv(path, parse_dates=["Date"])
     df = df.sort_values("Date").set_index("Date")
     for col in ["High", "Low", "Close"]:
@@ -290,10 +294,15 @@ def analyse_distance(log_df, res_df):
 # ──────────────────────────────────────────────
 
 def main():
-    global TOUCH_PCT
+    global TOUCH_PCT, LOG_PATH
     if "--touch-pct" in sys.argv:
         idx = sys.argv.index("--touch-pct")
         TOUCH_PCT = float(sys.argv[idx + 1]) / 100
+    # --log <path>: analyse an alternate log, e.g. ../data/sr_dynamic_log.csv
+    # (built by sr_dynamic_logger.py). Default stays the fixed-panel log.
+    if "--log" in sys.argv:
+        idx = sys.argv.index("--log")
+        LOG_PATH = sys.argv[idx + 1]
 
     log_df = load_log()
 

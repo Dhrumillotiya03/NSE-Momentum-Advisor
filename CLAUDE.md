@@ -69,7 +69,20 @@ stock_ai/
 - Current accuracy: ~65-68% combined S/R hit rate on 21-day forward window — this is
   close to the practical ceiling for price-only daily S/R, don't chase higher without
   a clear new hypothesis
-- `sr_daily_logger.py` logs daily S1/R1 always, S2/R2 only if reach-prob >50%
+- `sr_daily_logger.py` logs daily S1/R1 always, S2/R2 only if reach-prob beats the
+  empirical base rate (~66%, from sr_reach_table.json). WATCHLIST is a FIXED
+  hardcoded validation panel — same stocks every day so sr_monthend_analysis.py
+  measures accuracy on a consistent panel; do NOT make it dynamic. Runs via cron
+  weekdays 6pm (scripts/run_daily_log.sh)
+- `sr_dynamic_logger.py` — SEPARATE dynamic watchlist (holdings + top-10 F&O-gated
+  momentum) logging to sr_dynamic_log.csv, for extra forward calibration data on
+  deployment-relevant names. Never merge it with the fixed panel above. Analyse via
+  `python sr_monthend_analysis.py --log ../data/sr_dynamic_log.csv`
+- ETF data (GOLDBEES) lives in `data/etf_data/` (download_etf.py), NOT price_data/ —
+  price_data is globbed as the universe by core.market_breadth_pct/liquid_universe,
+  and a high-turnover ETF there would enter the tradable top-200 and could get bought
+  by the strategy. support_resistance.load_stock and sr_monthend_analysis fall back
+  to etf_data/ automatically
 - `sr_monthend_analysis.py` checks hit-rate, level drift, probability calibration,
   n-sensitivity, distance-vs-accuracy — run only after 2-3+ weeks of logged data
 

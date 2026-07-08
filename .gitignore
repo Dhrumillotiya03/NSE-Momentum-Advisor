@@ -2,6 +2,10 @@
 data/price_data/
 data/delivery_data/
 data/fo_data/
+data/etf_data/
+
+# Daily pipeline run log — append-only output of run_daily_log.sh
+data/cron_daily_log.log
 
 # Backfill resume-progress logs — regenerated, not meaningful history
 data/bhavcopy_backfill_progress.txt

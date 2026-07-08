@@ -4,6 +4,7 @@ import pandas as pd
 
 PRICE_DIR    = "../data/price_data/"
 DELIVERY_DIR = "../data/delivery_data/"
+ETF_DIR      = "../data/etf_data/"
 
 
 # ──────────────────────────────────────────────
@@ -12,7 +13,13 @@ DELIVERY_DIR = "../data/delivery_data/"
 
 def load_stock(symbol):
     path = os.path.join(PRICE_DIR, f"{symbol}.csv")
-    if not os.path.exists(path): return None
+    if not os.path.exists(path):
+        # ETFs (e.g. GOLDBEES) live in etf_data/, NOT price_data/ — price_data
+        # is globbed as the universe by core.market_breadth_pct and
+        # core.liquid_universe, and a high-turnover ETF placed there would
+        # enter the tradable top-200 and could get bought by the strategy.
+        path = os.path.join(ETF_DIR, f"{symbol}.csv")
+        if not os.path.exists(path): return None
     df = pd.read_csv(path, parse_dates=["Date"])
     df = df.sort_values("Date").set_index("Date")
     for col in ["Open", "Close", "High", "Low"]:
