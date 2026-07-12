@@ -133,8 +133,13 @@ def main():
     top_n_symbols = set()
     if month_end:
         eligible_scores = scan_universe()
-        ranked = sorted(eligible_scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        top_n_symbols = {sym for sym, _ in ranked[:n_names]}
+        # sector-capped greedy selection — the SAME rule the backtest
+        # validates (a plain ranked[:n] here let live books breach the
+        # 2-per-sector cap the backtest enforces)
+        from backtest_portfolio import select_top_n_capped, load_sector_map
+        scores_only = {s: r["score"] for s, r in eligible_scores.items()}
+        top_n_symbols = set(select_top_n_capped(
+            scores_only, n_names, load_sector_map(), sc.MAX_PER_SECTOR))
         print(f"\n(MONTH-END: full liquidation — book goes flat, fresh top-{n_names} "
               f"for regime {regime} re-entered next session)")
 
@@ -174,10 +179,10 @@ def main():
             print(f"  {sym}: {reason}")
 
     if month_end and eligible_scores:
-        ranked = sorted(eligible_scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        print(f"\nNEW BOOK to enter next session (top-{n_names}, {regime} regime):")
-        for sym, r in ranked[:n_names]:
-            print(f"  {sym:16s} score {r['score']:.2f}")
+        print(f"\nNEW BOOK to enter next session (top-{n_names} sector-capped, {regime} regime):")
+        ranked = sorted(top_n_symbols, key=lambda s: eligible_scores[s]["score"], reverse=True)
+        for sym in ranked:
+            print(f"  {sym:16s} score {eligible_scores[sym]['score']:.2f}")
 
     if not exit_list:
         print("\nNo exit signals detected")
