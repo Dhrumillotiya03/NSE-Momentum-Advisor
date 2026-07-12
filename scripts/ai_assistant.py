@@ -129,7 +129,9 @@ def should_i_sell(symbol):
         return {"symbol": symbol, "verdict": "SELL", "reason": reason}
 
     import pandas as pd
-    index_dates = pd.read_csv("../data/index_data/nifty50.csv", parse_dates=["Date"])["Date"].sort_values()
+    index_dates = pd.to_datetime(
+        pd.read_csv("../data/index_data/nifty50.csv")["Date"], errors="coerce"
+    ).dropna().sort_values()
     if is_last_trading_day_of_month(index_dates):
         # Hard monthly close: EVERY strategy position is sold at month-end.
         # check_requalification only decides whether it's re-bought next session.

@@ -24,6 +24,12 @@ def main():
         print("❌ Failed to download index data")
         return
 
+    # newer yfinance returns MultiIndex columns -> to_csv would emit a second
+    # ",^NSEI,^NSEI,..." header row whose Date parses as NaT and (sorted last)
+    # made exit_engine's is_last_trading_day_of_month() ALWAYS True
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+
     df = df.reset_index()
     df.to_csv(OUTPUT_DIR + "nifty50.csv", index=False)
 
