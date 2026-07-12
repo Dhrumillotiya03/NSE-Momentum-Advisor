@@ -69,6 +69,14 @@ stock_ai/
   2026-07 after a walk-forward study found 6 names diluted the few genuinely
   good SIDEWAYS setups — 3 names beats/matches 6 in 16/19 windows; 2 names was
   tested and rejected for worse tail risk, don't re-tune below 3).
+  REGIME_NAMES BEAR=4 (was 2, changed 2026-07): BEAR=2 was never
+  independently tested and MAX_WEIGHT=0.20 turned out to be a dead letter
+  at n=2 — the cap-then-renormalize logic has no 3rd+ name to push excess
+  weight into, so 100% of historical BEAR rebalances ended up at ~50/50
+  weighting, not ≤20%. BEAR=4 restores the cap to 96% functional and roughly
+  halves single-name gap/halt exposure (5.6-13.1% of total capital at n=2
+  vs 3.4-8.0% at n=4) for a negligible, mixed-sign return cost. See memory
+  concentration-risk-2026-07.
 - HARD MONTHLY CLOSE: the book goes fully flat at every month-end (exit_engine.py)
   — user mandate, not just a rebalance. Month-end is the MAXIMUM hold: the user's
   objection is to INTER-month holding (holding across month boundaries), NOT to
@@ -80,13 +88,17 @@ stock_ai/
 - REGIME_EXPOSURE boosted 2026-07-12 (user decision after VIX-overlay study's
   control run — a risk-appetite dial, NOT alpha): BULL 1.0 / SIDEWAYS 0.75 /
   BEAR 0.375 / UNKNOWN 0.75 (old values x1.25 capped at 1.0, no leverage).
-- Current backtest (F&O-gated universe, SIDEWAYS=3, boosted exposure,
-  no-lookahead engine, full 2015-2026 history): 19.15% CAGR, Sharpe 0.89,
-  max DD 39.0%. Walk-forward (19 overlapping 3y windows): mean CAGR 23.8%,
-  median 22.9%, mean Sharpe 1.05, 17/19 windows Sharpe-positive. Post-tax
-  net ≈ 15% CAGR (research_net_returns.py). Trust the walk-forward
-  distribution (python walk_forward.py), not any single backtest run — see
-  memory feedback-quant-researcher-role for why.
+- Current backtest (F&O-gated universe, SIDEWAYS=3, BEAR=4, boosted
+  exposure, no-lookahead engine, full 2015-2026 history): 16.24% CAGR,
+  Sharpe 0.78, max DD 40.6%. Walk-forward (19 overlapping 3y windows):
+  mean CAGR 23.7%, median 24.1%, mean Sharpe 1.06, 16/19 windows
+  Sharpe-positive. The BEAR=2→4 change costs ~3pp full-history CAGR (a
+  single-path number dominated by how few BEAR stretches occurred) but
+  ~0pp on the walk-forward mean — see memory concentration-risk-2026-07
+  for why this trade was made anyway (BEAR=2's MAX_WEIGHT cap didn't
+  actually bind). Trust the walk-forward distribution (python
+  walk_forward.py), not any single backtest run — see memory
+  feedback-quant-researcher-role for why.
 - SURVIVORSHIP AUDIT (2026-07-12, research_survivorship.py): price_data is
   built from TODAY'S index membership, so 2015-2026 departures were absent.
   A 34-name heavyweight departure cohort (HDFC, CAIRN, MINDTREE, DHFL, PSU

@@ -64,10 +64,22 @@ REGIME_EXPOSURE = {
 # return but genuinely worse tail risk (a new negative-Sharpe window appeared,
 # drawdowns ballooned to 30% in weak windows) — that's concentration risk
 # materializing, not a free lunch. Don't re-tune below 3 without new evidence.
+# BEAR = 4 (was 2, changed 2026-07): BEAR=2 was never independently tested —
+# it just inherited the "fewer names in weak regimes" pattern. Audit
+# (research_concentration.py) found MAX_WEIGHT=0.20 is a cap-then-
+# renormalize: with only 2 names there's no 3rd+ name for excess weight to
+# flow into, so it renormalizes right back to ~50/50 — the cap silently
+# didn't bind in 100% of historical BEAR rebalances. Single-name gap/halt
+# stress (fraud disclosure, regulatory halt — invisible to any close-based
+# backtest): BEAR=2 exposed 5.6-13.1% of TOTAL capital to one name;
+# BEAR=4 cuts that to 3.4-8.0% and restores the cap to 96% functional.
+# Return cost of widening was negligible and mixed-sign (mean CAGR delta
+# -0.4 to -0.5pp across BEAR in {3,4,5}, ~half of windows even preferred
+# wider). Don't lower back to 2 without re-addressing the cap-defeat finding.
 REGIME_NAMES = {
     "BULL":     10,
     "SIDEWAYS": 3,
-    "BEAR":     2,
+    "BEAR":     4,
     "UNKNOWN":  6,
 }
 MAX_WEIGHT = 0.20               # single-name cap (diversification vs concentration)
