@@ -80,13 +80,25 @@ stock_ai/
 - REGIME_EXPOSURE boosted 2026-07-12 (user decision after VIX-overlay study's
   control run — a risk-appetite dial, NOT alpha): BULL 1.0 / SIDEWAYS 0.75 /
   BEAR 0.375 / UNKNOWN 0.75 (old values x1.25 capped at 1.0, no leverage).
-- Current backtest (F&O-gated universe, SIDEWAYS=3, boosted exposure, full
-  2015-2026 history): 19.6% CAGR, Sharpe 0.91, max DD 39.1%. Walk-forward
-  (19 overlapping 3y windows): mean CAGR 25.1%, median 23.0%, mean Sharpe
-  1.07, 17/19 windows Sharpe-positive. Post-tax net ≈ 15-16% CAGR (see
-  research_net_returns.py). Trust the walk-forward distribution
-  (python walk_forward.py), not any single backtest run — see memory
-  feedback-quant-researcher-role for why.
+- Current backtest (F&O-gated universe, SIDEWAYS=3, boosted exposure,
+  no-lookahead engine, full 2015-2026 history): 19.15% CAGR, Sharpe 0.89,
+  max DD 39.0%. Walk-forward (19 overlapping 3y windows): mean CAGR 23.8%,
+  median 22.9%, mean Sharpe 1.05, 17/19 windows Sharpe-positive. Post-tax
+  net ≈ 15% CAGR (research_net_returns.py). Trust the walk-forward
+  distribution (python walk_forward.py), not any single backtest run — see
+  memory feedback-quant-researcher-role for why.
+- SURVIVORSHIP AUDIT (2026-07-12, research_survivorship.py): price_data is
+  built from TODAY'S index membership, so 2015-2026 departures were absent.
+  A 34-name heavyweight departure cohort (HDFC, CAIRN, MINDTREE, DHFL, PSU
+  banks, KWALITY... rebuilt from NSE bhavcopy archives via
+  download_delisted.py into data/price_data_delisted/ — NEVER merge into
+  price_data, the live pipeline must not see dead names) was spliced in:
+  the extended panel performs BETTER (+1.6pp full-history, +1.1pp wf mean),
+  because among top-200-liquid names the dominant departure mode is mergers
+  of good companies (HDFC/MINDTREE/GRUH), not fraud deaths, and the entry
+  filters (double momentum + 50MA) never select a name in its death spiral
+  (worst dead pick: -22%, stop-truncated). The edge is NOT a survivorship
+  artifact; survivor-panel numbers are, if anything, slightly conservative.
 
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
@@ -142,6 +154,13 @@ stock_ai/
   backtest_portfolio.load_price_matrix now guard against this explicitly
   (pd.to_datetime(..., errors="coerce") + filter); other CSV loaders in the
   repo don't yet — if you hit a sort_index TypeError, check for this first
+- backtest_portfolio's scoring used to require a valid price at i+HOLD — a
+  LOOKAHEAD (peeks 21 days ahead; systematically excludes names that stop
+  trading mid-hold). Removed 2026-07-12; was worth ~+0.4pp phantom CAGR.
+  simulate_position_exit also treated a terminated series as "money back"
+  (return 0.0) — now exits at last traded price. If other scripts replicate
+  the old scoring block (confidence_table.py etc.), check them for the same
+  price_exit lookahead before trusting their numbers
 - UNIVERSE_TOP_N (~200) is anchored to NSE's real F&O roster size, NOT tuned for
   backtest performance — sensitivity to this number is noisy/non-monotonic
   (150→13.8% CAGR, 200→17.0%, 250→14.4%, 300→17.0%), so don't re-tune it off

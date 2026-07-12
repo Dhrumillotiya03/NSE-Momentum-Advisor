@@ -189,21 +189,27 @@ def get_regime(index, date, breadth=None):
 
 def simulate_position_exit(matrix, sym, entry_idx, entry_price, max_hold_days):
     n = len(matrix)
+    col = matrix[sym]
+    last_price = entry_price
 
     for offset in range(1, max_hold_days + 1):
         idx = entry_idx + offset
         if idx >= n:
             break
-        price = matrix[sym].iloc[idx]
+        price = col.iloc[idx]
         if pd.isna(price):
             continue
+        last_price = price
         if price < entry_price * CATASTROPHIC_STOP:
             return price / entry_price - 1
 
     final_idx = min(entry_idx + max_hold_days, n - 1)
-    final_price = matrix[sym].iloc[final_idx]
+    final_price = col.iloc[final_idx]
     if pd.isna(final_price):
-        return 0.0
+        # series terminated mid-hold (suspension/delisting/merger/halt):
+        # exit at the last traded price, NOT flat (0.0 was "money back",
+        # which understated terminal losses)
+        return last_price / entry_price - 1
     return final_price / entry_price - 1
 
 
@@ -241,12 +247,16 @@ def run_backtest(matrix, index, turnover_matrix=None, exposure_fn=None):
 
         for sym in gated_symbols:
 
-            # Need valid price now, LOOKBACK ago, and at exit
+            # Need valid price now and LOOKBACK ago. (An older version also
+            # required a valid price at i+HOLD — a LOOKAHEAD: it peeked 21
+            # days into the future and silently excluded names that stop
+            # trading mid-hold, i.e. exactly the delisting/suspension
+            # blow-ups. Removing it costs ~0.4pp CAGR on the survivor panel
+            # — that was phantom return. See research_survivorship.py.)
             price_now  = matrix[sym].iloc[i]
             price_past = matrix[sym].iloc[i - LOOKBACK]
-            price_exit = matrix[sym].iloc[i + HOLD]
 
-            if pd.isna(price_now) or pd.isna(price_past) or pd.isna(price_exit):
+            if pd.isna(price_now) or pd.isna(price_past):
                 continue
             if price_past == 0:
                 continue
