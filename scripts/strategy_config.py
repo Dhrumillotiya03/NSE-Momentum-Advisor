@@ -41,11 +41,18 @@ UNIVERSE_TURNOVER_WINDOW = 20   # trading days for the trailing turnover rank
 
 # ---- Regime exposure & breadth ----
 # Exposure = fraction of capital deployed; rest held as cash.
+# 2026-07-12 boost (user decision, profit-oriented): previous values
+# (BULL .95 / SIDEWAYS .60 / BEAR .30 / UNKNOWN .60) scaled x1.25 capped at
+# 1.0 — no leverage. Surfaced by the VIX-overlay study's control run: NOT
+# alpha, a pure risk-appetite dial. Full-history 17.6%/0.96/DD 35.6% ->
+# 19.6%/0.91/DD 39.1%; CAGR improves in 79% of walk-forward windows. The
+# user explicitly accepted the deeper drawdown for the extra CAGR — see
+# memory research-verdicts-2026-07.
 REGIME_EXPOSURE = {
-    "BULL":     0.95,
-    "SIDEWAYS": 0.60,
-    "BEAR":     0.30,
-    "UNKNOWN":  0.60,
+    "BULL":     1.00,
+    "SIDEWAYS": 0.75,
+    "BEAR":     0.375,
+    "UNKNOWN":  0.75,
 }
 # Number of names held per regime.
 # SIDEWAYS = 3 (was 6, changed 2026-07): SIDEWAYS-regime picks contribute much

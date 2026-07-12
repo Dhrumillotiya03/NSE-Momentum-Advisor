@@ -40,8 +40,9 @@ stock_ai/
   scripts/run_exit_check.sh (logs to data/exit_check.log, notify-send on SELL
   signal); run_daily_log.sh also runs exit_engine.py each evening as a backstop.
 - Deployment expectation-setting: hard monthly close ⇒ ALL gains are short-term
-  capital gains (20%); realistic net CAGR ≈ gross − STCG drag (≈16% gross → ~13%
-  net). COST=0.001/side ≈ Zerodha delivery cost stack, excludes slippage.
+  capital gains (20%); realistic net CAGR ≈ gross − STCG drag (≈19.6% gross →
+  ~15-16% net; run scripts/research_net_returns.py for the current table).
+  COST=0.001/side ≈ Zerodha delivery cost stack, excludes slippage.
 
 ## Strategy (currently backtested, don't casually re-tune without re-running full backtest)
 - Cash equity only (no derivatives), vol-adjusted momentum, monthly rebalance (21 trading days).
@@ -76,11 +77,16 @@ stock_ai/
   (except the -18% stop) because both tested early-exit variants were price-based
   and lost in walk-forward. Non-price exit overlays (delivery/OI on holdings) are
   an open, untested research branch — see memory trading-mandate-constraints.
-- Current backtest (F&O-gated universe, SIDEWAYS=3, full 2015-2026 history):
-  16.2% CAGR, Sharpe 0.88, max DD 36.8%. Walk-forward (19 overlapping 3y
-  windows): mean CAGR 21.2%, median 22.4%, mean Sharpe 1.09, 18/19 windows
-  Sharpe-positive. Trust the walk-forward distribution (python walk_forward.py),
-  not any single backtest run — see memory feedback-quant-researcher-role for why.
+- REGIME_EXPOSURE boosted 2026-07-12 (user decision after VIX-overlay study's
+  control run — a risk-appetite dial, NOT alpha): BULL 1.0 / SIDEWAYS 0.75 /
+  BEAR 0.375 / UNKNOWN 0.75 (old values x1.25 capped at 1.0, no leverage).
+- Current backtest (F&O-gated universe, SIDEWAYS=3, boosted exposure, full
+  2015-2026 history): 19.6% CAGR, Sharpe 0.91, max DD 39.1%. Walk-forward
+  (19 overlapping 3y windows): mean CAGR 25.1%, median 23.0%, mean Sharpe
+  1.07, 17/19 windows Sharpe-positive. Post-tax net ≈ 15-16% CAGR (see
+  research_net_returns.py). Trust the walk-forward distribution
+  (python walk_forward.py), not any single backtest run — see memory
+  feedback-quant-researcher-role for why.
 
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
