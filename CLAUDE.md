@@ -26,6 +26,23 @@ stock_ai/
 │   └── sr_daily_log.csv  ← daily S/R snapshot log, stock-wise grouped
 └── scripts/               ← everything runs from here
 
+## Live ops / books (2026-07-12 rework — deployment accounting)
+- `record_fill.py` is the ONLY writer of portfolio_state.json + trade_history.csv.
+  Workflow: exit_engine.py / full_advisor.py print SIGNALS only (they never touch
+  the books) → user executes on Zerodha → `python record_fill.py buy|sell SYM ...`
+  records the actual fill, updating positions/avg-entry/cash/realized-P&L and the
+  journal atomically, with a duplicate-fill guard. Never journal a signal as a trade
+  — that's what corrupted the books before the rework.
+- Books were reset 2026-07-12 to a clean baseline (cash ₹10L, no positions) — user
+  confirmed everything prior was simulation, no real Zerodha positions exist yet.
+  Pre-reset originals archived in data/_quarantine/*_pre_cleanup_2026-07-12.*.
+- -18% stop watch is automated: cron weekdays 14:40 IST runs
+  scripts/run_exit_check.sh (logs to data/exit_check.log, notify-send on SELL
+  signal); run_daily_log.sh also runs exit_engine.py each evening as a backstop.
+- Deployment expectation-setting: hard monthly close ⇒ ALL gains are short-term
+  capital gains (20%); realistic net CAGR ≈ gross − STCG drag (≈16% gross → ~13%
+  net). COST=0.001/side ≈ Zerodha delivery cost stack, excludes slippage.
+
 ## Strategy (currently backtested, don't casually re-tune without re-running full backtest)
 - Cash equity only (no derivatives), vol-adjusted momentum, monthly rebalance (21 trading days).
 - TRADING UNIVERSE (2026-07 migration): gated to F&O-liquid names only — top
@@ -88,6 +105,12 @@ stock_ai/
 
 ## Known gotchas — do not rediscover these the hard way
 - yfinance miscategorizes RELIANCE as IT sector — always trust sectors.json
+- Newer yfinance returns MultiIndex columns; naive df.to_csv writes a second
+  ",^NSEI,^NSEI,..." header row whose Date parses as NaT. In nifty50.csv this made
+  exit_engine's is_last_trading_day_of_month() TRUE every day (NaT sorts last,
+  NaT.month != NaT.month) → false month-end liquidation signals mid-month (July
+  2026). Fixed: download_index.py flattens columns (download_data/download_etf
+  already did); raw Date readers hardened with errors="coerce"+dropna
 - Midcap150 was tried and removed — caused survivorship bias, don't re-add
 - ADANIENT.NS.NS.csv-style double-suffix bugs have happened before in build_universe.py —
   watch for `.NS.NS` when adding new download logic
