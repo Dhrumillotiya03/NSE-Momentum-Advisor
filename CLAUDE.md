@@ -121,6 +121,17 @@ stock_ai/
   40.6% full-history. Trust the walk-forward distribution (python
   walk_forward.py), not any single backtest run — see memory
   feedback-quant-researcher-role for why.
+- STATISTICAL HYGIENE (2026-07-12, research_statistical_hygiene.py): with
+  ~128 rebalance periods (~10.7y), Sharpe confidence intervals are WIDE —
+  autocorrelation-adjusted (Lo 2002) 95% CI on the current 0.85 point
+  Sharpe is [0.01, 1.69]. The strategy's core edge clears significance
+  easily (P(true Sharpe≤0)=0.9%), but NONE of this session's 3 adopted
+  deltas (BEAR=4, laggards-only, exposure boost) individually clear 95%
+  significance on a paired block-bootstrap — treat 1-2pp CAGR deltas
+  between configs as suggestive, not proven, unless backed by a causal
+  mechanism (tax rules, structural risk) rather than pattern alone. See
+  memory statistical-hygiene-2026-07 before adopting future config changes
+  off point estimates.
 - SURVIVORSHIP AUDIT (2026-07-12, research_survivorship.py): price_data is
   built from TODAY'S index membership, so 2015-2026 departures were absent.
   A 34-name heavyweight departure cohort (HDFC, CAIRN, MINDTREE, DHFL, PSU
