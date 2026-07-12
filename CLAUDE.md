@@ -43,6 +43,18 @@ stock_ai/
   capital gains (20%); realistic net CAGR ≈ gross − STCG drag (≈19.6% gross →
   ~15-16% net; run scripts/research_net_returns.py for the current table).
   COST=0.001/side ≈ Zerodha delivery cost stack, excludes slippage.
+- SLIPPAGE (2026-07-12, research_slippage.py): COST never modeled market
+  impact. Square-root impact model against real historical turnover: at
+  current ₹10L capital, median order is 0.01% of 20d ADV — small but a
+  representative K=5-20 impact still erodes CAGR 0.7-2.7pp / Sharpe
+  0.03-0.13 when folded in, a real secondary drag COST alone misses.
+  %ADV consumed scales ~linearly with capital, so at 50x current capital
+  (₹5Cr) the same impact model erodes returns much more severely —
+  slippage becomes a first-order CAPACITY constraint, not just a cost
+  line, well before the strategy could scale far past ₹10L-1Cr. NOT
+  folded into production COST (K isn't NSE-calibrated, would launder an
+  assumption into a validated number) — re-run before any material
+  capital increase.
 
 ## Strategy (currently backtested, don't casually re-tune without re-running full backtest)
 - Cash equity only (no derivatives), vol-adjusted momentum, monthly rebalance (21 trading days).
