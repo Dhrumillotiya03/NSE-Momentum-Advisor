@@ -17,11 +17,11 @@ def init_journal():
             writer.writeheader()
 
 
-def log_trade(symbol, action, price, qty, regime, sector, reason, pnl=None):
+def log_trade(symbol, action, price, qty, regime, sector, reason, pnl=None, date=None):
     init_journal()
     value = round(price * qty, 2)
     row = {
-        "date":    datetime.today().strftime("%Y-%m-%d"),
+        "date":    date or datetime.today().strftime("%Y-%m-%d"),
         "symbol":  symbol,
         "action":  action,        # BUY or SELL
         "price":   round(price, 2),

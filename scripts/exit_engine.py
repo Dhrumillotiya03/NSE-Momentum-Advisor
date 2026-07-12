@@ -23,12 +23,18 @@ the catastrophic stop; "a suitable price to sell" is the month-end close.)
 Non-strategy holdings (GOLDBEES, RCOM-BE, HARCR, or anything with
 entry_price==0) are detected and only FLAGGED for manual review — never
 auto-sold.
+
+This script emits SIGNALS only. It never writes trade_history.csv or
+portfolio_state.json — actual fills are recorded via record_fill.py after
+executing on Zerodha. (It used to journal signals directly, which produced
+duplicate rows every day a signal persisted and let the state drift from
+the journal.)
 """
 import os
 import pandas as pd
 import numpy as np
 
-from portfolio_state import load_state, save_state
+from portfolio_state import load_state
 import strategy_config as sc
 from core import compute_score, market_regime, scan_universe
 from live_quotes import get_quote
@@ -101,20 +107,6 @@ def check_requalification(symbol, df, regime, eligible_scores, top_n_symbols):
     return None
 
 
-def _already_journaled_today(symbol, action):
-    """Avoid duplicate journal rows when the engine is run multiple times a day."""
-    path = "../data/trade_history.csv"
-    if not os.path.exists(path):
-        return False
-    try:
-        df = pd.read_csv(path)
-        today = pd.Timestamp.now().strftime("%Y-%m-%d")
-        return bool(((df.iloc[:, 0] == today) & (df.iloc[:, 1] == symbol)
-                     & (df.iloc[:, 2] == action)).any())
-    except Exception:
-        return False
-
-
 # ---------- Main ----------
 
 def main():
@@ -128,7 +120,9 @@ def main():
     regime, _breadth = market_regime()
     n_names = sc.REGIME_NAMES[regime]
 
-    index_dates = pd.read_csv("../data/index_data/nifty50.csv", parse_dates=["Date"])["Date"].sort_values()
+    index_dates = pd.to_datetime(
+        pd.read_csv("../data/index_data/nifty50.csv")["Date"], errors="coerce"
+    ).dropna().sort_values()
     month_end = is_last_trading_day_of_month(index_dates)
 
     eligible_scores = None
@@ -185,9 +179,7 @@ def main():
         print("\nNo exit signals detected")
         return
 
-    from trade_journal import log_trade
-
-    print("\nSELL POSITIONS:")
+    print("\nSELL SIGNALS (signals only — books are NOT updated here):")
 
     for sym, reasons, live_price in exit_list:
         print(f"\n{sym}")
@@ -202,10 +194,9 @@ def main():
             df = load_stock(sym)
             price = df["Close"].iloc[-1] if df is not None else 0
         pnl = round((price - entry) * qty, 2) if entry and qty else 0
-        if _already_journaled_today(sym, "SELL"):
-            print("  (already journaled today — skipping duplicate log entry)")
-        else:
-            log_trade(sym, "SELL", price, qty, regime, "N/A", ", ".join(reasons), pnl=pnl)
+        print(f"  ~₹{price:.2f} x {qty} (est. P&L ₹{pnl:,.2f})")
+        print(f"  After executing on Zerodha, record the ACTUAL fill:")
+        print(f"    python record_fill.py sell {sym.replace('.NS', '')} <FILL_PRICE>")
 
 
 if __name__ == "__main__":
