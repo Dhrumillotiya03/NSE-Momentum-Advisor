@@ -69,8 +69,13 @@ stock_ai/
   good SIDEWAYS setups — 3 names beats/matches 6 in 16/19 windows; 2 names was
   tested and rejected for worse tail risk, don't re-tune below 3).
 - HARD MONTHLY CLOSE: the book goes fully flat at every month-end (exit_engine.py)
-  — user mandate, not just a rebalance. No intra-month profit-taking beyond the
-  -18% stop (tested and rejected twice — see memory trading-mandate-constraints).
+  — user mandate, not just a rebalance. Month-end is the MAXIMUM hold: the user's
+  objection is to INTER-month holding (holding across month boundaries), NOT to
+  selling early within the month. Early intra-month exits are PERMITTED in
+  principle (clarified 2026-07-12) but the current config holds to month-end
+  (except the -18% stop) because both tested early-exit variants were price-based
+  and lost in walk-forward. Non-price exit overlays (delivery/OI on holdings) are
+  an open, untested research branch — see memory trading-mandate-constraints.
 - Current backtest (F&O-gated universe, SIDEWAYS=3, full 2015-2026 history):
   16.2% CAGR, Sharpe 0.88, max DD 36.8%. Walk-forward (19 overlapping 3y
   windows): mean CAGR 21.2%, median 22.4%, mean Sharpe 1.09, 18/19 windows

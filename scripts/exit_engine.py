@@ -16,9 +16,13 @@ Priority order for intra-month checks (first match wins):
       position is a SELL. The report annotates which names re-qualify for
       the new book (sell + re-buy) and which don't (sell, gone).
 
-(An early "good exit" resistance-fade rule was tried and rejected — see
-strategy_config.py's Exit engine comment. Intra-month, the only exit is
-the catastrophic stop; "a suitable price to sell" is the month-end close.)
+(Early intra-month exits are permitted by the user — the mandate only forbids
+holding ACROSS month boundaries; month-end flat is the maximum hold. The
+engine still holds to month-end because every tested early-exit rule was
+price-based and lost in walk-forward: tight trailing/50MA exits cost ~0.3
+Sharpe, a resistance-fade rule was net-negative. Non-price exit overlays
+on holdings are untested and open — any new rule needs walk-forward evidence
+before it lands here.)
 
 Non-strategy holdings (GOLDBEES, RCOM-BE, HARCR, or anything with
 entry_price==0) are detected and only FLAGGED for manual review — never
