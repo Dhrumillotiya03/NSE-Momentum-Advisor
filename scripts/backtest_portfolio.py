@@ -209,7 +209,10 @@ def simulate_position_exit(matrix, sym, entry_idx, entry_price, max_hold_days):
 
 # ---------- Backtest ----------
 
-def run_backtest(matrix, index, turnover_matrix=None):
+def run_backtest(matrix, index, turnover_matrix=None, exposure_fn=None):
+    """exposure_fn(date, regime, exp) -> exp: optional hook to modify the
+    regime exposure at each rebalance (e.g. VIX overlay research). Default
+    None = exact original behavior."""
 
     dates   = matrix.index
     n_dates = len(dates)
@@ -276,6 +279,8 @@ def run_backtest(matrix, index, turnover_matrix=None):
         # ---- Regime-based sizing (from strategy_config) ----
         n   = sc.REGIME_NAMES[regime]
         exp = sc.REGIME_EXPOSURE[regime]
+        if exposure_fn is not None:
+            exp = exposure_fn(date, regime, exp)
 
         if len(scores) < n:
             equity.append(capital)
