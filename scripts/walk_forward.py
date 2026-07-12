@@ -23,7 +23,10 @@ import argparse
 import numpy as np
 import pandas as pd
 
-from backtest_portfolio import load_price_matrix, load_index, load_turnover_matrix, run_backtest, performance
+from backtest_portfolio import (load_price_matrix, load_index, load_turnover_matrix,
+                                run_backtest, run_backtest_laggards_only, performance)
+
+ENGINES = {"hard_close": run_backtest, "laggards_only": run_backtest_laggards_only}
 
 
 def make_windows(matrix, window_years, step_months):
@@ -53,13 +56,13 @@ def make_windows(matrix, window_years, step_months):
     return windows
 
 
-def run_window(matrix, index, turnover_matrix, start, end):
+def run_window(matrix, index, turnover_matrix, start, end, engine=run_backtest):
     sub_matrix = matrix[(matrix.index >= start) & (matrix.index <= end)]
     sub_matrix = sub_matrix.loc[:, sub_matrix.isna().mean() <= 0.20]
     if len(sub_matrix) < 300:
         return None
     sub_turnover = turnover_matrix.reindex(sub_matrix.index)
-    equity = run_backtest(sub_matrix, index, sub_turnover)
+    equity = engine(sub_matrix, index, sub_turnover)
     if len(equity) < 2:
         return None
     return performance(equity)
@@ -69,10 +72,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--years", type=int, default=3, help="window length in years")
     parser.add_argument("--step", type=int, default=6, help="step between windows in months")
+    parser.add_argument("--engine", choices=list(ENGINES), default="laggards_only",
+                        help="hard_close (legacy, full sell+rebuy every rebalance) or "
+                             "laggards_only (current production default, adopted 2026-07-12)")
     args = parser.parse_args()
+    engine = ENGINES[args.engine]
 
     print("\n==============================")
-    print(f"WALK-FORWARD VALIDATION — {args.years}y windows, {args.step}mo step")
+    print(f"WALK-FORWARD VALIDATION — {args.years}y windows, {args.step}mo step, engine={args.engine}")
     print("==============================")
 
     matrix = load_price_matrix()
@@ -85,7 +92,7 @@ def main():
 
     rows = []
     for start, end in windows:
-        result = run_window(matrix, index, turnover_matrix, start, end)
+        result = run_window(matrix, index, turnover_matrix, start, end, engine=engine)
         if result is None:
             continue
         total, annual, sharpe, dd, vol, yrs = result

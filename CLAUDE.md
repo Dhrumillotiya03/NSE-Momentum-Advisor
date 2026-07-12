@@ -77,26 +77,36 @@ stock_ai/
   halves single-name gap/halt exposure (5.6-13.1% of total capital at n=2
   vs 3.4-8.0% at n=4) for a negligible, mixed-sign return cost. See memory
   concentration-risk-2026-07.
-- HARD MONTHLY CLOSE: the book goes fully flat at every month-end (exit_engine.py)
-  — user mandate, not just a rebalance. Month-end is the MAXIMUM hold: the user's
-  objection is to INTER-month holding (holding across month boundaries), NOT to
-  selling early within the month. Early intra-month exits are PERMITTED in
-  principle (clarified 2026-07-12) but the current config holds to month-end
-  (except the -18% stop) because both tested early-exit variants were price-based
-  and lost in walk-forward. Non-price exit overlays (delivery/OI on holdings) are
-  an open, untested research branch — see memory trading-mandate-constraints.
+- HARD MONTHLY CLOSE ⇒ LAGGARDS-ONLY REBALANCE (2026-07-12, was: sell
+  EVERYTHING at month-end, re-buy next session): the book is fully
+  RE-EVALUATED every month-end (exit_engine.py / run_backtest_laggards_only)
+  — user mandate is no INTER-month drift (a position silently carried 2-3
+  months with no review), NOT a forced full liquidation. A name still in
+  the new sector-capped top-N is HELD (rebalanced to its new target weight
+  only, cost on the delta, no realized gain/tax event); a name dropping out
+  is SOLD; new names are bought next session. Early intra-month exits
+  beyond the -18% stop are still not built in (both tested price-based
+  variants lost in walk-forward; non-price overlays on holdings tested via
+  corporate announcements 2026-07-12 and REJECTED — see memory
+  exit-announcements-rejected). Adopting laggards-only itself: costs ~0.8pp
+  gross CAGR (fewer round-trips lose a little raw return) but SAVES ~3pp/yr
+  NET CAGR — fewer taxable events, NOT LTCG conversion (that barely fires:
+  momentum's own turnover displaces names from top-N well before 365 days).
+  See memory monthly-close-cost-2026-07 and trading-mandate-constraints.
 - REGIME_EXPOSURE boosted 2026-07-12 (user decision after VIX-overlay study's
   control run — a risk-appetite dial, NOT alpha): BULL 1.0 / SIDEWAYS 0.75 /
   BEAR 0.375 / UNKNOWN 0.75 (old values x1.25 capped at 1.0, no leverage).
 - Current backtest (F&O-gated universe, SIDEWAYS=3, BEAR=4, boosted
-  exposure, no-lookahead engine, full 2015-2026 history): 16.24% CAGR,
-  Sharpe 0.78, max DD 40.6%. Walk-forward (19 overlapping 3y windows):
-  mean CAGR 23.7%, median 24.1%, mean Sharpe 1.06, 16/19 windows
-  Sharpe-positive. The BEAR=2→4 change costs ~3pp full-history CAGR (a
-  single-path number dominated by how few BEAR stretches occurred) but
-  ~0pp on the walk-forward mean — see memory concentration-risk-2026-07
-  for why this trade was made anyway (BEAR=2's MAX_WEIGHT cap didn't
-  actually bind). Trust the walk-forward distribution (python
+  exposure, LAGGARDS-ONLY engine — run_backtest_laggards_only is now the
+  production default in backtest_portfolio.main()/walk_forward.py, full
+  2015-2026 history): 16.86% CAGR, Sharpe 0.80, max DD 40.5%. Walk-forward
+  (19 overlapping 3y windows): mean CAGR 24.7%, median 23.9%, mean Sharpe
+  1.10, 17/19 windows Sharpe-positive. Post-tax net ≈ 13.7% CAGR at
+  10bps/side (research_net_returns.py — this script's tax model
+  slightly OVERSTATES drag under laggards-only since it assumes every
+  period fully realizes; treat as conservative). Legacy hard-close engine
+  (run_backtest / --engine hard_close) kept for comparison: 16.24%/0.78/
+  40.6% full-history. Trust the walk-forward distribution (python
   walk_forward.py), not any single backtest run — see memory
   feedback-quant-researcher-role for why.
 - SURVIVORSHIP AUDIT (2026-07-12, research_survivorship.py): price_data is

@@ -1,20 +1,25 @@
 """
-Per-position exit check, hard monthly-close model.
+Per-position exit check, LAGGARDS-ONLY monthly re-evaluation model.
 
-The book is FULLY LIQUIDATED at every month-end (last trading day): the user's
-mandate is that the portfolio goes flat each month and the fresh top-N for the
-current regime is bought back the next session. A name that re-qualifies is
-sold and immediately re-bought — economically a hold, but executed as two
-trades so the journal and broker statements match reality. This is also
-exactly what backtest_portfolio.py has always modeled (2 x COST per cycle).
+ADOPTED 2026-07-12 (was: hard close — sell EVERYTHING at month-end, re-buy
+next session). The book is FULLY RE-EVALUATED at every month-end (last
+trading day) — the user's mandate is no INTER-month drift (a position
+silently carried 2-3 months with no re-evaluation), not a forced full
+liquidation. A name that STILL ranks in the new sector-capped top-N is
+HELD (no sell, no re-buy, no realized gain/tax event) — only its target
+WEIGHT may need a top-up/trim, which record_fill.py handles as a buy/sell
+of the delta. A name that drops OUT of the new top-N is sold. This matches
+backtest_portfolio.run_backtest_laggards_only exactly (see
+monthly-close-cost-2026-07: saves ~3pp/yr net CAGR, mostly fewer taxable
+events, vs the old hard-close engine).
 
 Priority order for intra-month checks (first match wins):
   (a) Catastrophic stop — always on. price < entry * CATASTROPHIC_STOP,
       checked against the LIVE quote when available (live_quotes.py,
       ~15-min delayed), falling back to the last downloaded close.
-  (b) Month-end liquidation — on the last trading day, every strategy
-      position is a SELL. The report annotates which names re-qualify for
-      the new book (sell + re-buy) and which don't (sell, gone).
+  (b) Month-end re-evaluation — on the last trading day, every strategy
+      position is re-scored. Re-qualifying names are HELD (flagged, not a
+      sell signal); non-re-qualifying names are a SELL.
 
 (Early intra-month exits are permitted by the user — the mandate only forbids
 holding ACROSS month boundaries; month-end flat is the maximum hold. The
@@ -100,14 +105,14 @@ def check_catastrophic_stop(df, entry_price, live_price=None):
 
 def check_requalification(symbol, df, regime, eligible_scores, top_n_symbols):
     """Month-end classifier: does this name make the NEW book?
-    Returns None if it re-qualifies (sell at close, re-buy next session);
-    otherwise a reason string explaining why it drops out."""
+    Returns None if it re-qualifies (HOLD — no trade needed);
+    otherwise a reason string explaining why it must be sold."""
     r = compute_score(df)
     if r is None:
-        return "does NOT re-qualify: fails the momentum filter (no re-buy)"
+        return "does NOT re-qualify: fails the momentum filter (SELL, no re-buy)"
     if symbol not in top_n_symbols:
         return (f"does NOT re-qualify: eligible but outside top-{len(top_n_symbols)} "
-                f"for current regime ({regime}) (no re-buy)")
+                f"for current regime ({regime}) (SELL, no re-buy)")
     return None
 
 
@@ -144,6 +149,7 @@ def main():
               f"for regime {regime} re-entered next session)")
 
     exit_list = []   # (symbol, reasons, live_price)
+    hold_list = []   # (symbol,) — re-qualified, no trade needed
     flag_list = []
 
     for sym, pos in positions.items():
@@ -166,9 +172,9 @@ def main():
         if not reasons and month_end:
             requal = check_requalification(sym, df, regime, eligible_scores, top_n_symbols)
             if requal is None:
-                reasons.append("Month-end liquidation — RE-QUALIFIES for the new book: sell at close, re-buy next session")
+                hold_list.append(sym)
             else:
-                reasons.append(f"Month-end liquidation — {requal}")
+                reasons.append(f"Month-end re-evaluation — {requal}")
 
         if reasons:
             exit_list.append((sym, reasons, live_price))
@@ -179,10 +185,21 @@ def main():
             print(f"  {sym}: {reason}")
 
     if month_end and eligible_scores:
-        print(f"\nNEW BOOK to enter next session (top-{n_names} sector-capped, {regime} regime):")
+        print(f"\nNEW BOOK for next session (top-{n_names} sector-capped, {regime} regime):")
         ranked = sorted(top_n_symbols, key=lambda s: eligible_scores[s]["score"], reverse=True)
         for sym in ranked:
-            print(f"  {sym:16s} score {eligible_scores[sym]['score']:.2f}")
+            tag = " [ALREADY HELD — no trade]" if sym in hold_list else " [NEW]"
+            print(f"  {sym:16s} score {eligible_scores[sym]['score']:.2f}{tag}")
+
+        new_names = top_n_symbols - set(hold_list)
+        if new_names:
+            print(f"\n  BUY (new entries, not currently held):")
+            for sym in sorted(new_names, key=lambda s: eligible_scores[s]["score"], reverse=True):
+                print(f"    python record_fill.py buy {sym.replace('.NS', '')} <QTY> <FILL_PRICE>")
+
+        print(f"\n  All held names still in the new top-N are UNCHANGED (laggards-only —")
+        print(f"  no sell+rebuy). If a held name's weight has drifted from its inverse-vol")
+        print(f"  target, a manual top-up/trim is optional, not required by the mandate.")
 
     if not exit_list:
         print("\nNo exit signals detected")

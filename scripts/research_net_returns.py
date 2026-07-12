@@ -1,9 +1,15 @@
 """
 Post-tax / post-cost net-return calibration.
 
-The hard monthly close means EVERY gain is short-term capital gains (20% in
-India post-July-2024). This script converts the gross backtest equity curve
-into a realistic net-of-tax path so deployment expectations are honest:
+Uses the PRODUCTION engine (run_backtest_laggards_only, adopted 2026-07-12).
+This script's tax model treats every period's mark-to-market move as a
+realized STCG event, which is exact for the legacy hard-close engine (it
+really does realize everything every 21 days) but is an OVERSTATEMENT of
+tax drag under laggards-only, which has FEWER realize events (see
+research_monthly_close_cost.py — 613 vs 738 over the full history) because
+carried positions aren't sold and rebought. Treat this script's net-CAGR
+as a CONSERVATIVE (slightly too pessimistic) estimate under laggards_only;
+research_monthly_close_cost.py has the precise lot-level tax accounting.
 
   - Realized P&L netted within each Indian financial year (Apr-Mar):
     losses offset gains in the same FY; a net FY loss carries forward
@@ -86,7 +92,7 @@ def main():
           f"{'grossFinal':>12s} {'netFinal':>12s}")
     for cost in [0.001, 0.0015, 0.002]:
         bp.COST = cost
-        eq = bp.run_backtest(matrix, index, turnover)
+        eq = bp.run_backtest_laggards_only(matrix, index, turnover)
         dates = rdates[:len(eq)]
         gross = cagr_of(eq, len(eq))
         taxed = apply_stcg(eq, dates)

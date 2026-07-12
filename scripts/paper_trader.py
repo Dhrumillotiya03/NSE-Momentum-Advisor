@@ -2,16 +2,21 @@
 Forward paper-trading loop — out-of-sample-in-time evidence accrual.
 
 Runs a simulated ₹10L book under the EXACT live mandate, daily, using only
-data available at run time (evening, after the download pipeline):
+data available at run time (evening, after the download pipeline).
 
-  - month-end (last trading day): sell the whole book at close; compute the
-    new regime top-N (sector-capped, same greedy rule as the backtest) and
-    queue it; queued buys execute at the NEXT session's close ("re-enter
-    next session", mirroring exit_engine's live instruction)
-  - daily: -18% catastrophic stop vs today's close
+LAGGARDS-ONLY mechanics (adopted 2026-07-12, matches
+backtest_portfolio.run_backtest_laggards_only — was: full liquidation
+every month-end):
+  - month-end (last trading day): re-score the universe. Names still in the
+    new sector-capped top-N are HELD (rebalanced to the new target weight,
+    cost on the delta only — skipped if drift is <1% of position value).
+    Names dropping out are SOLD. New names not already held are queued and
+    bought at the NEXT session's close.
+  - daily: -18% catastrophic stop vs today's close (fires on ANY held name,
+    carried or freshly bought).
   - sizing: inverse-vol weights capped at MAX_WEIGHT, regime exposure —
-    identical to backtest_portfolio.run_backtest
-  - costs: COST per side embedded in cash movements
+    identical to backtest_portfolio.run_backtest_laggards_only.
+  - costs: COST per side, charged only on the actual delta traded.
 
 Completely SEPARATE from the real books (portfolio_state.json /
 trade_history.csv are never touched). State: ../data/paper_state.json.
@@ -138,37 +143,81 @@ def step():
             log_fill(today_str, sym, "SELL", px, pos["qty"], "catastrophic stop", pnl)
             del state["positions"][sym]
 
-    # 3. month-end: liquidate everything, queue next book
+    # 3. month-end: LAGGARDS-ONLY re-evaluation (adopted 2026-07-12, was
+    # full liquidation). Names still in the new top-N are HELD (rebalanced
+    # to their new target weight, cost on the delta only) — only names that
+    # drop out are sold. Non-strategy holdings (entry_price==0, e.g. any
+    # manually-added test position) are left untouched.
     month_end = is_last_trading_day_of_month(pd.Series(index_dates))
     if month_end:
-        for sym in list(state["positions"]):
-            pos = state["positions"][sym]
-            px = close_on(sym, today) or pos["entry_price"]
-            proceeds = pos["qty"] * px * (1 - sc.COST)
-            pnl = round(proceeds - pos["qty"] * pos["entry_price"], 2)
-            state["cash"] += proceeds
-            log_fill(today_str, sym, "SELL", px, pos["qty"], "month-end liquidation", pnl)
-            del state["positions"][sym]
-
         regime, _ = market_regime()
         n = sc.REGIME_NAMES[regime]
         exposure = sc.REGIME_EXPOSURE[regime]
         eligible = scan_universe()
+
+        strategy_syms = {s for s, p in state["positions"].items() if p.get("entry_price", 0) > 0}
+
         if len(eligible) >= n:
             scores = {s: r["score"] for s, r in eligible.items()}
-            top = select_top_n_capped(scores, n, load_sector_map(), sc.MAX_PER_SECTOR)
+            top = set(select_top_n_capped(scores, n, load_sector_map(), sc.MAX_PER_SECTOR))
             inv = {s: 1.0 / eligible[s]["vol_63"] for s in top}
             tot = sum(inv.values())
-            inv = {s: min(v / tot, sc.MAX_WEIGHT) * tot for s, v in inv.items()}
-            tot = sum(inv.values())
-            invest = state["cash"] * exposure
+            w = {s: min(v / tot, sc.MAX_WEIGHT) * tot for s, v in inv.items()}
+            tot2 = sum(w.values())
+            w = {s: v / tot2 for s, v in w.items()}
+
+            drop = strategy_syms - top
+            keep = strategy_syms & top
+            new_names = top - strategy_syms
+
+            for sym in drop:
+                pos = state["positions"][sym]
+                px = close_on(sym, today) or pos["entry_price"]
+                proceeds = pos["qty"] * px * (1 - sc.COST)
+                pnl = round(proceeds - pos["qty"] * pos["entry_price"], 2)
+                state["cash"] += proceeds
+                log_fill(today_str, sym, "SELL", px, pos["qty"], "month-end: dropped out of top-N", pnl)
+                del state["positions"][sym]
+
+            total_equity = state["cash"] + sum(
+                state["positions"][s]["qty"] * (close_on(s, today) or state["positions"][s]["entry_price"])
+                for s in keep)
+            invest_target = total_equity * exposure
+
+            for sym in keep:
+                pos = state["positions"][sym]
+                px = close_on(sym, today) or pos["entry_price"]
+                cur_val = pos["qty"] * px
+                target_val = invest_target * w[sym]
+                delta = target_val - cur_val
+                if abs(delta) < 0.01 * cur_val:
+                    continue  # negligible drift, skip the noise trade
+                if delta > 0:
+                    add_qty = int(delta // px)
+                    if add_qty <= 0:
+                        continue  # rounds to a zero-share trade, nothing to do
+                    cost = add_qty * px * (1 + sc.COST)
+                    state["cash"] -= cost
+                    new_qty = pos["qty"] + add_qty
+                    pos["entry_price"] = (pos["qty"] * pos["entry_price"] + add_qty * px) / new_qty
+                    pos["qty"] = new_qty
+                    log_fill(today_str, sym, "BUY", px, add_qty, "month-end: weight top-up")
+                else:
+                    trim_qty = min(pos["qty"], int((-delta) // px))
+                    if trim_qty <= 0:
+                        continue
+                    proceeds = trim_qty * px * (1 - sc.COST)
+                    state["cash"] += proceeds
+                    pos["qty"] -= trim_qty
+                    log_fill(today_str, sym, "SELL", px, trim_qty, "month-end: weight trim")
+
             state["pending_buys"] = [
-                {"sym": s, "rupees": round(invest * inv[s] / tot, 2)} for s in top]
-            print(f"[paper] month-end: queued {len(top)} buys for {regime} "
-                  f"(exposure {exposure:.0%})")
+                {"sym": s, "rupees": round(invest_target * w[s], 2)} for s in new_names]
+            print(f"[paper] month-end (laggards-only): {len(keep)} held, {len(drop)} sold, "
+                  f"{len(new_names)} new for {regime} (exposure {exposure:.0%})")
         else:
             state["pending_buys"] = []
-            print(f"[paper] month-end: only {len(eligible)} eligible < {n}, staying in cash")
+            print(f"[paper] month-end: only {len(eligible)} eligible < {n}, no new entries queued")
         mtm_regime = regime
     else:
         mtm_regime = ""

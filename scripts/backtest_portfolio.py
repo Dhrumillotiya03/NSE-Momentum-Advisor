@@ -333,6 +333,157 @@ def run_backtest(matrix, index, turnover_matrix=None, exposure_fn=None):
     return np.array(equity)
 
 
+# ---------- Laggards-only rebalance ----------
+#
+# ADOPTED 2026-07-12 (was: hard close — sell+rebuy EVERY name every month
+# even if still top-ranked). Satisfies the user's actual mandate (no
+# INTER-month drift — a position silently carried 2-3 months with no
+# re-evaluation) WITHOUT the pointless full round-trip on names that were
+# going to be bought right back: still re-scores the ENTIRE universe every
+# 21 days, still enforces the sector cap, still checks the -18% stop daily
+# on every held name — only difference is a name still in the new top-N is
+# rebalanced to its new target weight (cost on the DELTA only) instead of
+# sold-and-rebought. See research_monthly_close_cost.py /
+# monthly-close-cost-2026-07: costs ~0.8pp gross CAGR but SAVES ~3pp/yr net
+# CAGR (fewer taxable events — NOT LTCG conversion, which barely fires:
+# momentum's own turnover displaces names from top-N well before 365 days).
+
+def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=None):
+    """Same selection/sizing/regime logic as run_backtest, but positions
+    still in the new top-N carry over (rebalanced to target weight, cost on
+    the delta only) instead of being sold and rebought every 21 days."""
+    dates = matrix.index
+    n_dates = len(dates)
+    breadth = compute_breadth_series(matrix)
+    sector_map = load_sector_map()
+    if turnover_matrix is None:
+        turnover_matrix = load_turnover_matrix(matrix)
+
+    capital = float(INITIAL_CAPITAL)
+    equity = []
+    book = {}   # sym -> {entry_price, shares, last_price, cur_value}
+
+    for i in range(LOOKBACK + 21, n_dates - HOLD, HOLD):
+        date = dates[i]
+        regime = get_regime(index, date, breadth)
+        gated_symbols = liquid_symbols_at(turnover_matrix, i) & set(matrix.columns)
+
+        scores, vols = {}, {}
+        for sym in gated_symbols:
+            price_now = matrix[sym].iloc[i]
+            price_past = matrix[sym].iloc[i - LOOKBACK]
+            if pd.isna(price_now) or pd.isna(price_past) or price_past == 0:
+                continue
+            ret = price_now / price_past - 1
+            price_3m = matrix[sym].iloc[i - 63]
+            if pd.isna(price_3m) or price_3m == 0:
+                continue
+            ret_3m = price_now / price_3m - 1
+            if ret <= 0 or ret_3m <= 0:
+                continue
+            ma50 = matrix[sym].iloc[i - 50:i].mean()
+            if pd.isna(ma50) or price_now < ma50:
+                continue
+            window = matrix[sym].iloc[i - 63:i].pct_change(fill_method=None).dropna()
+            if len(window) < 40:
+                continue
+            vol = window.std()
+            if vol == 0 or np.isnan(vol):
+                continue
+            scores[sym] = ret / vol
+            vols[sym] = vol
+
+        n = sc.REGIME_NAMES[regime]
+        exp = sc.REGIME_EXPOSURE[regime]
+        if exposure_fn is not None:
+            exp = exposure_fn(date, regime, exp)
+
+        # mark existing book to today's price
+        for s, pos in book.items():
+            px = matrix[s].iloc[i]
+            pos["last_price"] = px if not pd.isna(px) else pos["last_price"]
+            pos["cur_value"] = pos["shares"] * pos["last_price"]
+        book_value = sum(p["cur_value"] for p in book.values())
+
+        if len(scores) < n:
+            equity.append(capital + book_value)
+            continue
+
+        top = set(select_top_n_capped(scores, n, sector_map, sc.MAX_PER_SECTOR))
+        if not top:
+            equity.append(capital + book_value)
+            continue
+
+        held = set(book)
+        drop, keep, new_names = held - top, held & top, top - held
+
+        for s in drop:
+            pos = book.pop(s)
+            proceeds = pos["cur_value"] * (1 - COST)
+            capital += proceeds
+
+        inv = {s: 1.0 / vols[s] for s in top}
+        tot = sum(inv.values())
+        w = {s: min(v / tot, sc.MAX_WEIGHT) * tot for s, v in inv.items()}
+        tot2 = sum(w.values())
+        w = {s: v / tot2 for s, v in w.items()}
+
+        total_equity = capital + sum(book[s]["cur_value"] for s in keep)
+        invested_target = total_equity * exp
+
+        for s in keep:
+            pos = book[s]
+            target_val = invested_target * w[s]
+            delta = target_val - pos["cur_value"]
+            capital -= delta + abs(delta) * COST
+            if delta > 0 and pos["last_price"] > 0:
+                new_shares = pos["shares"] + delta / pos["last_price"]
+                pos["entry_price"] = (pos["shares"] * pos["entry_price"] + delta) / new_shares
+                pos["shares"] = new_shares
+            elif pos["last_price"] > 0:
+                pos["shares"] -= (-delta) / pos["last_price"]
+            pos["cur_value"] = pos["shares"] * pos["last_price"]
+
+        for s in new_names:
+            target_val = invested_target * w[s]
+            px = matrix[s].iloc[i]
+            if pd.isna(px) or px <= 0:
+                continue
+            capital -= target_val * (1 + COST)
+            book[s] = {"entry_price": px, "shares": target_val / px,
+                       "last_price": px, "cur_value": target_val}
+
+        # simulate the hold window: -18% stop can fire on any held name
+        for s in list(book):
+            pos = book[s]
+            col = matrix[s]
+            entry_ref = pos["entry_price"]
+            stopped = False
+            for off in range(1, HOLD + 1):
+                idx = i + off
+                if idx >= n_dates:
+                    break
+                p = col.iloc[idx]
+                if pd.isna(p):
+                    continue
+                if p < entry_ref * CATASTROPHIC_STOP:
+                    proceeds = pos["shares"] * p * (1 - COST)
+                    capital += proceeds
+                    del book[s]
+                    stopped = True
+                    break
+            if not stopped:
+                final_idx = min(i + HOLD, n_dates - 1)
+                fp = col.iloc[final_idx]
+                if not pd.isna(fp):
+                    pos["last_price"] = fp
+                    pos["cur_value"] = pos["shares"] * fp
+
+        equity.append(capital + sum(p["cur_value"] for p in book.values()))
+
+    return np.array(equity)
+
+
 # ---------- Performance ----------
 
 def performance(equity):
@@ -352,8 +503,13 @@ def performance(equity):
 # ---------- Main ----------
 
 def main():
+    import sys
+    use_hard_close = "--hard-close" in sys.argv
+    engine = run_backtest if use_hard_close else run_backtest_laggards_only
+
     print("\n==============================")
-    print("📊 REALISTIC PORTFOLIO BACKTEST")
+    print("📊 REALISTIC PORTFOLIO BACKTEST"
+          f"  (engine: {'hard_close (legacy)' if use_hard_close else 'laggards_only (production default)'})")
     print("==============================")
 
     matrix = load_price_matrix()
@@ -363,7 +519,7 @@ def main():
     print(f"Universe: {matrix.shape[1]} stocks | {len(matrix)} trading days")
     print(f"F&O liquidity gate: top {UNIVERSE_TOP_N} by trailing {UNIVERSE_TURNOVER_WINDOW}d turnover")
 
-    equity = run_backtest(matrix, index, turnover_matrix)
+    equity = engine(matrix, index, turnover_matrix)
     if len(equity) == 0:
         print("⚠️ Not enough data")
         return
