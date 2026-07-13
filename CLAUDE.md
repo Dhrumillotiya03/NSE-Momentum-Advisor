@@ -125,17 +125,32 @@ stock_ai/
   idle (unexposed) cash accrues a liquid-ETF yield in engines + paper
   trader (+1.57pp CAGR of accounting realism) — OPS MANDATE: real idle cash
   must actually be parked in LIQUIDCASE-type ETF or the backtest overstates.
+- INTERNATIONAL SLEEVE (ADOPTED 2026-07-13, research_intl_sleeve.py):
+  INTL_ALLOC=0.10 in MON100 (Nasdaq-100 INR ETF), same construction and
+  evidence bar as gold — production is now a 75/15/10 three-sleeve book
+  (momentum/gold/intl). Corr to momentum +0.10; Sharpe delta vs the 85/15
+  baseline +0.14 [CI +0.05,+0.23] SIGNIFICANT, better Sharpe 16/16 windows.
+  Same exceptional-decade caveat as gold (Nasdaq 2015-26 + INR depreciation
+  tailwind): durable claim is correlation/currency, not return level. 0.10
+  is the mildest tested weight — anti-creep rule applies; momentum stays
+  >=70%, don't stack more sleeves (next one reinvents an index fund).
+- SKIP-MONTH MOMENTUM (research_skip_month.py, 2026-07-13): the academic
+  12-2 construction (momentum legs ending at i-21) tested and REJECTED —
+  -3.5 to -5.1pp CAGR, worse in 13/16 wf windows. US-style last-month
+  reversal does NOT hold for this NSE setup; recent-month strength is
+  signal here. Engine's skip_days param stays 0 in production.
 - Current backtest (F&O-gated universe, SIDEWAYS=3, BEAR=4, boosted
-  exposure, GOLD-BLEND engine — run_backtest_gold_blend is the production
-  default in backtest_portfolio.main()/walk_forward.py, full 2015-2026
-  history): 18.75% CAGR, Sharpe 1.04, max DD 29.2%. Walk-forward (19
-  overlapping 3y windows): mean CAGR 24.7%, median 22.5%, mean Sharpe 1.32,
-  18/19 windows Sharpe-positive, worst window DD 24.4%. Momentum sleeve
-  alone (--no-gold / --engine laggards_only): 18.71%/0.90/37.9%. Post-tax
-  net model (research_net_returns.py) predates the gold sleeve/cash yield —
-  tax treatment of gold ETF gains (12.5% LTCG >12m under current rules) and
-  liquid-fund interest (slab) differ from equity STCG; re-run/extend before
-  quoting a net number. Legacy hard-close engine (run_backtest /
+  exposure, THREE-SLEEVE engine — run_backtest_gold_blend [name kept for
+  compat, now blends gold+intl] is the production default in
+  backtest_portfolio.main()/walk_forward.py, full 2015-2026 history):
+  19.88% CAGR, Sharpe 1.21, max DD 24.8%. Walk-forward (19 overlapping 3y
+  windows): mean CAGR 24.8%, median 23.5%, mean Sharpe 1.48, worst window
+  DD 23.5%, 0/19 negative windows (first config with none). Momentum
+  sleeve alone (--no-gold / --engine laggards_only): 18.71%/0.90/37.9%
+  (includes cash yield). Post-tax net ≈ 16.8% CAGR
+  (research_net_returns.py, extended 2026-07-13 for per-sleeve tax:
+  momentum 20% STCG FY-netted, gold/intl 12.5% — disclosed conservative
+  approximations). Legacy hard-close engine (run_backtest /
   --engine hard_close) kept for comparison. Trust the walk-forward
   distribution (python walk_forward.py), not any single backtest run — see
   memory feedback-quant-researcher-role for why.
@@ -181,7 +196,19 @@ stock_ai/
   momentum) logging to sr_dynamic_log.csv, for extra forward calibration data on
   deployment-relevant names. Never merge it with the fixed panel above. Analyse via
   `python sr_monthend_analysis.py --log ../data/sr_dynamic_log.csv`
-- ETF data (GOLDBEES) lives in `data/etf_data/` (download_etf.py), NOT price_data/ —
+- Ops/monitoring scripts (all in run_daily_log.sh unless noted):
+  `data_integrity_check.py` — nightly scan of all data CSVs for the three
+  corruption classes that have actually bitten (bad-Date rows, decimal-shift
+  price glitches, stale series); notify-send on WARN. `news_watchdog.py` —
+  ALERT-ONLY LLM (Ollama qwen2.5:7b, keyword fallback) severity-classifies
+  fresh NSE announcements on held names, notify-send on HIGH; it is NOT a
+  trading signal and must never be wired into exit_engine/paper_trader
+  (the automated announcement exit veto was backtested and REJECTED — see
+  memory exit-announcements-rejected). `gate_report.py` (manual, monthly) —
+  scores each completed paper month at its percentile of the production
+  backtest's 21d-return distribution; this is the deployment gate made
+  quantitative (2+ months below p10 = live path diverges, investigate).
+- ETF data (GOLDBEES, MON100) lives in `data/etf_data/` (download_etf.py), NOT price_data/ —
   price_data is globbed as the universe by core.market_breadth_pct/liquid_universe,
   and a high-turnover ETF there would enter the tradable top-200 and could get bought
   by the strategy. support_resistance.load_stock and sr_monthend_analysis fall back
