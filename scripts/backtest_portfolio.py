@@ -484,6 +484,59 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     return np.array(equity)
 
 
+# ---------- Gold sleeve blend (production default since 2026-07-13) ----------
+#
+# GOLD_ALLOC of total capital sits in GOLDBEES, rebalanced back to target
+# each rebalance; momentum runs on the rest. Blended at the period-return
+# level (equivalent to sleeve-level capital accounting when both sleeves are
+# marked on the same grid), with COST charged on the approximate inter-sleeve
+# rebalancing turnover. See strategy_config.GOLD_ALLOC comment +
+# research_lowvol_sleeve.py for the evidence and the gold-return caveat.
+
+GOLD_PATH = f"../data/etf_data/{sc.GOLD_SYMBOL}.csv"
+
+
+def load_gold_period_returns(matrix):
+    """Gold marked at each rebalance grid point + HOLD (where the engines'
+    equity points sit), so returns align 1:1 with equity[k+1]/equity[k]."""
+    df = pd.read_csv(GOLD_PATH, parse_dates=["Date"], low_memory=False)
+    df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+    df = df[pd.to_datetime(df["Date"], errors="coerce").notna()]
+    df = df.dropna(subset=["Close"]).sort_values("Date").set_index("Date")["Close"]
+    # Spike guard: a failed split-adjustment in a refetched CSV (seen once,
+    # 2019-12-19/20 at exactly 1/100th price) injects fake -99%/+10000%
+    # returns that blow up any blend using this series. Drop days deviating
+    # >3x from the centered 11-day rolling median before using the series.
+    med = df.rolling(11, center=True, min_periods=3).median()
+    ratio = df / med
+    df = df[(ratio < 3) & (ratio > 1 / 3)]
+    gold = df.reindex(matrix.index).ffill()
+
+    marks = []
+    for i in range(LOOKBACK + 21, len(matrix) - HOLD, HOLD):
+        marks.append(gold.iloc[min(i + HOLD, len(matrix) - 1)])
+    marks = pd.Series(marks).ffill().bfill()
+    return marks.values[1:] / marks.values[:-1] - 1
+
+
+def run_backtest_gold_blend(matrix, index, turnover_matrix=None, exposure_fn=None):
+    """Production engine: (1-GOLD_ALLOC) momentum laggards-only + GOLD_ALLOC
+    GOLDBEES, rebalanced to target weights each period."""
+    eq_m = run_backtest_laggards_only(matrix, index, turnover_matrix, exposure_fn)
+    if len(eq_m) < 2:
+        return eq_m
+    r_m = eq_m[1:] / eq_m[:-1] - 1
+    r_g = load_gold_period_returns(matrix)
+    n = min(len(r_m), len(r_g))
+    r_m, r_g = r_m[:n], r_g[:n]
+
+    w_g = sc.GOLD_ALLOC
+    r = (1 - w_g) * r_m + w_g * r_g
+    turnover = (1 - w_g) * np.abs(r_m - r) + w_g * np.abs(r_g - r)
+    r = r - turnover * COST
+    return INITIAL_CAPITAL * np.concatenate([[1.0], np.cumprod(1 + r)])
+
+
 # ---------- Performance ----------
 
 def performance(equity):
@@ -504,12 +557,15 @@ def performance(equity):
 
 def main():
     import sys
-    use_hard_close = "--hard-close" in sys.argv
-    engine = run_backtest if use_hard_close else run_backtest_laggards_only
+    if "--hard-close" in sys.argv:
+        engine, label = run_backtest, "hard_close (legacy)"
+    elif "--no-gold" in sys.argv:
+        engine, label = run_backtest_laggards_only, "laggards_only, momentum sleeve only"
+    else:
+        engine, label = run_backtest_gold_blend, f"laggards_only + {sc.GOLD_ALLOC:.0%} gold (production default)"
 
     print("\n==============================")
-    print("📊 REALISTIC PORTFOLIO BACKTEST"
-          f"  (engine: {'hard_close (legacy)' if use_hard_close else 'laggards_only (production default)'})")
+    print(f"📊 REALISTIC PORTFOLIO BACKTEST  (engine: {label})")
     print("==============================")
 
     matrix = load_price_matrix()

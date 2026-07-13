@@ -145,8 +145,8 @@ def main():
         scores_only = {s: r["score"] for s, r in eligible_scores.items()}
         top_n_symbols = set(select_top_n_capped(
             scores_only, n_names, load_sector_map(), sc.MAX_PER_SECTOR))
-        print(f"\n(MONTH-END: full liquidation — book goes flat, fresh top-{n_names} "
-              f"for regime {regime} re-entered next session)")
+        print(f"\n(MONTH-END: full re-evaluation, laggards-only — re-qualifying names "
+              f"held, drop-outs sold, fresh top-{n_names} for regime {regime})")
 
     exit_list = []   # (symbol, reasons, live_price)
     hold_list = []   # (symbol,) — re-qualified, no trade needed
@@ -200,6 +200,36 @@ def main():
         print(f"\n  All held names still in the new top-N are UNCHANGED (laggards-only —")
         print(f"  no sell+rebuy). If a held name's weight has drifted from its inverse-vol")
         print(f"  target, a manual top-up/trim is optional, not required by the mandate.")
+
+        # ---- Gold sleeve rebalance (GOLD_ALLOC of TOTAL equity, adopted 2026-07-13) ----
+        from portfolio_state import portfolio_value
+        total_eq = portfolio_value(state)
+        gold_target = total_eq * sc.GOLD_ALLOC
+        gold_pos = positions.get(sc.GOLD_SYMBOL, {})
+        gold_qty = gold_pos.get("qty", 0)
+        gold_px, gold_stale = get_quote(sc.GOLD_SYMBOL)
+        if gold_px is None:
+            etf_path = f"../data/etf_data/{sc.GOLD_SYMBOL}.csv"
+            if os.path.exists(etf_path):
+                gdf = pd.read_csv(etf_path, parse_dates=["Date"], low_memory=False)
+                gdf["Close"] = pd.to_numeric(gdf["Close"], errors="coerce")
+                gold_px = gdf.dropna(subset=["Close"]).sort_values("Date")["Close"].iloc[-1]
+        print(f"\n  GOLD SLEEVE ({sc.GOLD_SYMBOL}, target {sc.GOLD_ALLOC:.0%} of total equity):")
+        if gold_px is None:
+            print(f"    no price available for {sc.GOLD_SYMBOL} — resolve manually")
+        else:
+            gold_val = gold_qty * gold_px
+            delta = gold_target - gold_val
+            print(f"    total equity ₹{total_eq:,.0f} -> target ₹{gold_target:,.0f} | "
+                  f"held {gold_qty} x ₹{gold_px:.2f} = ₹{gold_val:,.0f} | delta ₹{delta:+,.0f}")
+            if abs(delta) < 0.01 * total_eq:
+                print(f"    within 1% drift band — no trade needed")
+            else:
+                side = "buy" if delta > 0 else "sell"
+                qty = int(abs(delta) / gold_px)
+                print(f"    {side.upper()} ~{qty} units, then record the actual fill:")
+                print(f"      python record_fill.py {side} {sc.GOLD_SYMBOL.replace('.NS','')} "
+                      f"{qty if side == 'buy' else ''} <FILL_PRICE>".rstrip())
 
     if not exit_list:
         print("\nNo exit signals detected")

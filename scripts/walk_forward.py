@@ -24,9 +24,11 @@ import numpy as np
 import pandas as pd
 
 from backtest_portfolio import (load_price_matrix, load_index, load_turnover_matrix,
-                                run_backtest, run_backtest_laggards_only, performance)
+                                run_backtest, run_backtest_laggards_only,
+                                run_backtest_gold_blend, performance)
 
-ENGINES = {"hard_close": run_backtest, "laggards_only": run_backtest_laggards_only}
+ENGINES = {"hard_close": run_backtest, "laggards_only": run_backtest_laggards_only,
+           "gold_blend": run_backtest_gold_blend}
 
 
 def make_windows(matrix, window_years, step_months):
@@ -72,9 +74,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--years", type=int, default=3, help="window length in years")
     parser.add_argument("--step", type=int, default=6, help="step between windows in months")
-    parser.add_argument("--engine", choices=list(ENGINES), default="laggards_only",
-                        help="hard_close (legacy, full sell+rebuy every rebalance) or "
-                             "laggards_only (current production default, adopted 2026-07-12)")
+    parser.add_argument("--engine", choices=list(ENGINES), default="gold_blend",
+                        help="hard_close (legacy, full sell+rebuy every rebalance), "
+                             "laggards_only (momentum sleeve only, was production 2026-07-12), or "
+                             "gold_blend (laggards_only + GOLD_ALLOC gold sleeve — "
+                             "production default since 2026-07-13)")
     args = parser.parse_args()
     engine = ENGINES[args.engine]
 

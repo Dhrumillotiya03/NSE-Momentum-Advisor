@@ -91,6 +91,32 @@ MAX_PER_SECTOR = 2               # diversification cap on top-N selection (was
                                  # one sector during BULL rebalances — see sectors.json
                                  # and memory fno-universe-migration)
 
+# ---- Gold sleeve (ADOPTED 2026-07-13, research_lowvol_sleeve.py) ----
+# GOLD_ALLOC of TOTAL capital is held in GOLD_SYMBOL (GOLDBEES ETF,
+# data/etf_data/), rebalanced back to target at each month-end alongside the
+# momentum book; the momentum engine runs on the remaining (1 - GOLD_ALLOC)
+# as its own sub-capital with regime exposure unchanged. Mechanism is
+# DIVERSIFICATION, not alpha: gold's 21d-return correlation to the momentum
+# book is +0.01 over 2015-2026. Evidence (held to the statistical-hygiene
+# bar): 85/15 blend vs 100% momentum — Sharpe 0.85 -> 0.98, MaxDD 40.5% ->
+# 31.4%, CAGR 17.00% -> 17.33% (point estimate; treat as ~flat); paired
+# block-bootstrap Sharpe delta +0.14, 95% CI [+0.06, +0.22] — the FIRST
+# config delta in this project to clear 95% significance — and better
+# Sharpe AND MaxDD in 16/16 rolling 3y walk-forward windows.
+# HONEST CAVEAT: gold's 2015-2026 INR CAGR (15.9%, incl. +74% in 2025) is
+# historically exceptional and should NOT be extrapolated — the durable part
+# of this decision is the ~zero correlation (structural), not gold's return.
+# If gold mean-reverts to ~6-8% nominal, expect the sleeve to COST ~1-1.5pp
+# gross CAGR in exchange for the drawdown/Sharpe benefit. Sized at 0.15
+# (the mildest gold blend tested) partly for that reason and partly to keep
+# multiple-comparisons debt low — do not creep this up because a bigger gold
+# number backtests better over this gold-friendly decade.
+# (A low-vol equity sleeve was tested in the same study and NOT adopted:
+# +0.52 correlation to momentum, costs CAGR, and doubles the manual monthly
+# trading workload for a marginal Sharpe gain beyond what gold provides.)
+GOLD_ALLOC = 0.15
+GOLD_SYMBOL = "GOLDBEES.NS"
+
 # ---- Risk control ----
 # Profit-oriented: no tight intra-hold exits (they cost ~0.3 Sharpe and CAGR by
 # whipsawing out of momentum trends). Only a WIDE catastrophic circuit breaker

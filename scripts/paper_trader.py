@@ -17,6 +17,11 @@ every month-end):
   - sizing: inverse-vol weights capped at MAX_WEIGHT, regime exposure —
     identical to backtest_portfolio.run_backtest_laggards_only.
   - costs: COST per side, charged only on the actual delta traded.
+  - GOLD SLEEVE (adopted 2026-07-13): GOLD_ALLOC of TOTAL equity held in
+    GOLD_SYMBOL (GOLDBEES), rebalanced to target each month-end (1% drift
+    band); momentum book runs on the remaining (1 - GOLD_ALLOC) sub-capital.
+    Gold is exempt from the -18% stop and the momentum re-qualification —
+    matches backtest_portfolio.run_backtest_gold_blend.
 
 Completely SEPARATE from the real books (portfolio_state.json /
 trade_history.csv are never touched). State: ../data/paper_state.json.
@@ -84,8 +89,16 @@ def log_fill(date, sym, action, price, qty, reason, pnl=""):
 
 def close_on(sym, date):
     """Close price for sym on `date` from the freshly-downloaded CSVs.
-    None if the stock didn't print that day."""
+    None if the stock didn't print that day. Falls back to etf_data/ for
+    the gold sleeve (GOLDBEES lives there, never in price_data/)."""
     df = load_stock(sym)
+    if df is None:
+        etf_path = f"../data/etf_data/{sym}.csv"
+        if os.path.exists(etf_path):
+            df = pd.read_csv(etf_path, parse_dates=["Date"], low_memory=False)
+            df = df[pd.to_datetime(df["Date"], errors="coerce").notna()]
+            df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
+            df = df.dropna(subset=["Close"]).sort_values("Date").set_index("Date")
     if df is None:
         return None
     row = df[df.index == date] if df.index.name == "Date" else df[df["Date"] == date]
@@ -130,8 +143,11 @@ def step():
         log_fill(today_str, order["sym"], "BUY", px, qty, "month-start entry")
     state["pending_buys"] = still_pending
 
-    # 2. -18% stop check at close
+    # 2. -18% stop check at close (gold sleeve exempt — it's a strategic
+    # allocation rebalanced monthly, not a momentum bet with a stop)
     for sym in list(state["positions"]):
+        if sym == sc.GOLD_SYMBOL:
+            continue
         pos = state["positions"][sym]
         px = close_on(sym, today)
         if px is None:
@@ -155,7 +171,8 @@ def step():
         exposure = sc.REGIME_EXPOSURE[regime]
         eligible = scan_universe()
 
-        strategy_syms = {s for s, p in state["positions"].items() if p.get("entry_price", 0) > 0}
+        strategy_syms = {s for s, p in state["positions"].items()
+                         if p.get("entry_price", 0) > 0 and s != sc.GOLD_SYMBOL}
 
         if len(eligible) >= n:
             scores = {s: r["score"] for s, r in eligible.items()}
@@ -179,10 +196,49 @@ def step():
                 log_fill(today_str, sym, "SELL", px, pos["qty"], "month-end: dropped out of top-N", pnl)
                 del state["positions"][sym]
 
-            total_equity = state["cash"] + sum(
+            gold_pos = state["positions"].get(sc.GOLD_SYMBOL)
+            gold_px = close_on(sc.GOLD_SYMBOL, today) or (gold_pos["entry_price"] if gold_pos else None)
+            gold_val = gold_pos["qty"] * gold_px if (gold_pos and gold_px) else 0.0
+
+            total_equity = state["cash"] + gold_val + sum(
                 state["positions"][s]["qty"] * (close_on(s, today) or state["positions"][s]["entry_price"])
                 for s in keep)
-            invest_target = total_equity * exposure
+
+            # ---- gold sleeve rebalance (GOLD_ALLOC of TOTAL equity, adopted 2026-07-13) ----
+            if gold_px:
+                gold_target = total_equity * sc.GOLD_ALLOC
+                delta = gold_target - gold_val
+                if abs(delta) >= 0.01 * total_equity:
+                    if delta > 0:
+                        add_qty = int(delta // (gold_px * (1 + sc.COST)))
+                        if add_qty > 0:
+                            state["cash"] -= add_qty * gold_px * (1 + sc.COST)
+                            if gold_pos:
+                                new_qty = gold_pos["qty"] + add_qty
+                                gold_pos["entry_price"] = (gold_pos["qty"] * gold_pos["entry_price"]
+                                                           + add_qty * gold_px) / new_qty
+                                gold_pos["qty"] = new_qty
+                            else:
+                                state["positions"][sc.GOLD_SYMBOL] = {
+                                    "qty": add_qty, "entry_price": gold_px, "entry_date": today_str}
+                            log_fill(today_str, sc.GOLD_SYMBOL, "BUY", gold_px, add_qty,
+                                     "gold sleeve rebalance to target")
+                    elif gold_pos:
+                        trim_qty = min(gold_pos["qty"], int((-delta) // gold_px))
+                        if trim_qty > 0:
+                            proceeds = trim_qty * gold_px * (1 - sc.COST)
+                            pnl = round(proceeds - trim_qty * gold_pos["entry_price"], 2)
+                            state["cash"] += proceeds
+                            gold_pos["qty"] -= trim_qty
+                            log_fill(today_str, sc.GOLD_SYMBOL, "SELL", gold_px, trim_qty,
+                                     "gold sleeve rebalance to target", pnl)
+                            if gold_pos["qty"] == 0:
+                                del state["positions"][sc.GOLD_SYMBOL]
+
+            # momentum book runs on the remaining (1 - GOLD_ALLOC) as its own
+            # sub-capital, regime exposure unchanged — matches
+            # backtest_portfolio.run_backtest_gold_blend
+            invest_target = total_equity * (1 - sc.GOLD_ALLOC) * exposure
 
             for sym in keep:
                 pos = state["positions"][sym]
