@@ -30,6 +30,18 @@ def main():
             continue
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        # Drop decimal-shift glitch rows BEFORE writing (yfinance has served
+        # GOLDBEES 2019-12-19/20 at exactly 1/100th price — a failed split
+        # adjustment; this file is fully rewritten daily, so the glitch would
+        # come back every night if only patched in the CSV). Same 3x-vs-
+        # rolling-median rule as backtest_portfolio.load_gold_period_returns.
+        med = df["Close"].rolling(11, center=True, min_periods=3).median()
+        ratio = df["Close"] / med
+        glitch = (ratio >= 3) | (ratio <= 1 / 3)
+        if glitch.any():
+            print(f"⚠️ {sym}: dropped {int(glitch.sum())} decimal-shift glitch row(s): "
+                  f"{[d.date() for d in df.index[glitch]]}")
+            df = df[~glitch]
         df = df.reset_index()
         df["Symbol"] = sym
         out_path = f"{ETF_DIR}{sym}.csv"
