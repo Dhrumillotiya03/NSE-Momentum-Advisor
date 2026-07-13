@@ -350,10 +350,16 @@ def run_backtest(matrix, index, turnover_matrix=None, exposure_fn=None):
 # CAGR (fewer taxable events — NOT LTCG conversion, which barely fires:
 # momentum's own turnover displaces names from top-N well before 365 days).
 
-def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=None):
+def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=None,
+                               skip_days=0):
     """Same selection/sizing/regime logic as run_backtest, but positions
     still in the new top-N carry over (rebalanced to target weight, cost on
-    the delta only) instead of being sold and rebought every 21 days."""
+    the delta only) instead of being sold and rebought every 21 days.
+
+    skip_days: measure the momentum legs up to i - skip_days instead of i
+    (the academic '12-2' construction — the most recent month contains
+    short-term reversal, not momentum). 0 = production behavior; nonzero is
+    research-only (research_skip_month.py) unless explicitly adopted."""
     dates = matrix.index
     n_dates = len(dates)
     breadth = compute_breadth_series(matrix)
@@ -379,11 +385,16 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
             price_past = matrix[sym].iloc[i - LOOKBACK]
             if pd.isna(price_now) or pd.isna(price_past) or price_past == 0:
                 continue
-            ret = price_now / price_past - 1
+            price_ref = price_now
+            if skip_days:
+                price_ref = matrix[sym].iloc[i - skip_days]
+                if pd.isna(price_ref) or price_ref <= 0:
+                    continue
+            ret = price_ref / price_past - 1
             price_3m = matrix[sym].iloc[i - 63]
             if pd.isna(price_3m) or price_3m == 0:
                 continue
-            ret_3m = price_now / price_3m - 1
+            ret_3m = price_ref / price_3m - 1
             if ret <= 0 or ret_3m <= 0:
                 continue
             ma50 = matrix[sym].iloc[i - 50:i].mean()
