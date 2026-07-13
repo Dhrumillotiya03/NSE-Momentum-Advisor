@@ -19,6 +19,7 @@ LOG=../data/cron_daily_log.log
     "$PYTHON" sr_dynamic_logger.py
     "$PYTHON" exit_engine.py
     "$PYTHON" paper_trader.py
+    "$PYTHON" news_watchdog.py
 
     echo "----- done $(date) -----"
 } 2>&1 | tee -a "$LOG"
