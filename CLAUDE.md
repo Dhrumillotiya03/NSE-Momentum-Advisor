@@ -108,19 +108,37 @@ stock_ai/
 - REGIME_EXPOSURE boosted 2026-07-12 (user decision after VIX-overlay study's
   control run — a risk-appetite dial, NOT alpha): BULL 1.0 / SIDEWAYS 0.75 /
   BEAR 0.375 / UNKNOWN 0.75 (old values x1.25 capped at 1.0, no leverage).
+- GOLD SLEEVE + IDLE-CASH YIELD (ADOPTED 2026-07-13, research_lowvol_sleeve.py
+  — see memory gold-sleeve-2026-07): GOLD_ALLOC=0.15 of TOTAL capital in
+  GOLDBEES, rebalanced to target each month-end (1% drift band); the
+  momentum book runs on the other 85% as its own sub-capital with regime
+  exposure unchanged. Mechanism is DIVERSIFICATION (21d-return correlation
+  to the momentum book +0.01), NOT alpha — the FIRST config delta to clear
+  95% significance (paired-bootstrap Sharpe +0.14, CI [+0.06,+0.22]; better
+  Sharpe AND MaxDD in 16/16 rolling 3y windows). Caveat: gold's 2015-26
+  15.9% INR CAGR is exceptional — the durable benefit is the correlation;
+  don't upsize the sleeve because bigger gold backtests better this decade.
+  Crash autopsy: the old 40.5% max DD was the 2018-2020 GRIND (two flat/down
+  years in a row), not a rebound crash — exactly what gold diversifies.
+  A LOW-VOL equity sleeve was tested in the same study and REJECTED (+0.52
+  corr to momentum, costs CAGR, doubles manual workload). CASH_YIELD=0.06:
+  idle (unexposed) cash accrues a liquid-ETF yield in engines + paper
+  trader (+1.57pp CAGR of accounting realism) — OPS MANDATE: real idle cash
+  must actually be parked in LIQUIDCASE-type ETF or the backtest overstates.
 - Current backtest (F&O-gated universe, SIDEWAYS=3, BEAR=4, boosted
-  exposure, LAGGARDS-ONLY engine — run_backtest_laggards_only is now the
-  production default in backtest_portfolio.main()/walk_forward.py, full
-  2015-2026 history): 16.86% CAGR, Sharpe 0.80, max DD 40.5%. Walk-forward
-  (19 overlapping 3y windows): mean CAGR 24.7%, median 23.9%, mean Sharpe
-  1.10, 17/19 windows Sharpe-positive. Post-tax net ≈ 13.7% CAGR at
-  10bps/side (research_net_returns.py — this script's tax model
-  slightly OVERSTATES drag under laggards-only since it assumes every
-  period fully realizes; treat as conservative). Legacy hard-close engine
-  (run_backtest / --engine hard_close) kept for comparison: 16.24%/0.78/
-  40.6% full-history. Trust the walk-forward distribution (python
-  walk_forward.py), not any single backtest run — see memory
-  feedback-quant-researcher-role for why.
+  exposure, GOLD-BLEND engine — run_backtest_gold_blend is the production
+  default in backtest_portfolio.main()/walk_forward.py, full 2015-2026
+  history): 18.75% CAGR, Sharpe 1.04, max DD 29.2%. Walk-forward (19
+  overlapping 3y windows): mean CAGR 24.7%, median 22.5%, mean Sharpe 1.32,
+  18/19 windows Sharpe-positive, worst window DD 24.4%. Momentum sleeve
+  alone (--no-gold / --engine laggards_only): 18.71%/0.90/37.9%. Post-tax
+  net model (research_net_returns.py) predates the gold sleeve/cash yield —
+  tax treatment of gold ETF gains (12.5% LTCG >12m under current rules) and
+  liquid-fund interest (slab) differ from equity STCG; re-run/extend before
+  quoting a net number. Legacy hard-close engine (run_backtest /
+  --engine hard_close) kept for comparison. Trust the walk-forward
+  distribution (python walk_forward.py), not any single backtest run — see
+  memory feedback-quant-researcher-role for why.
 - STATISTICAL HYGIENE (2026-07-12, research_statistical_hygiene.py): with
   ~128 rebalance periods (~10.7y), Sharpe confidence intervals are WIDE —
   autocorrelation-adjusted (Lo 2002) 95% CI on the current 0.85 point
@@ -173,6 +191,18 @@ stock_ai/
 
 ## Known gotchas — do not rediscover these the hard way
 - yfinance miscategorizes RELIANCE as IT sector — always trust sectors.json
+- GOLDBEES.NS.csv arrived with two rows (2019-12-19/20) at exactly 1/100th
+  price (failed yfinance split-adjustment) → fake -99%/+10400% returns that
+  blew one walk-forward window up to +330% annualized. CSV patched;
+  bp.load_gold_period_returns has a 3x-vs-rolling-median spike guard so a
+  refetch can't silently reintroduce it. If a blended metric ever looks
+  impossibly good, check the component series for a decimal-shift glitch
+  FIRST — a blend of bounded sleeves cannot outperform all its components
+- Testing paper_trader changes: NEVER call step() against the real
+  ../data/paper_state.json mid-day — it consumes the once-per-date
+  idempotency slot and tonight's cron run would then skip. Sandbox by
+  monkeypatching paper_trader.STATE_PATH/LOG_PATH/EQUITY_PATH to scratch
+  copies first
 - Newer yfinance returns MultiIndex columns; naive df.to_csv writes a second
   ",^NSEI,^NSEI,..." header row whose Date parses as NaT. In nifty50.csv this made
   exit_engine's is_last_trading_day_of_month() TRUE every day (NaT sorts last,
