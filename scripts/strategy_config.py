@@ -131,6 +131,27 @@ CASH_YIELD = 0.06
 GOLD_ALLOC = 0.15
 GOLD_SYMBOL = "GOLDBEES.NS"
 
+# ---- International sleeve (ADOPTED 2026-07-13, research_intl_sleeve.py) ----
+# Same construction and evidence bar as the gold sleeve: INTL_ALLOC of TOTAL
+# capital in an INR-denominated Nasdaq-100 ETF (MON100), rebalanced to
+# target each month-end; momentum runs on the remaining
+# (1 - GOLD_ALLOC - INTL_ALLOC). Mechanism: different equity market +
+# implicit USD exposure (INR tends to depreciate in Indian risk-off, so the
+# INR value of a US asset cushions exactly when the domestic book bleeds).
+# Correlation of 21d returns to the momentum sleeve: +0.10; to gold +0.19.
+# Evidence (paired bootstrap vs the 85/15 gold-only production): Sharpe
+# delta +0.14, 95% CI [+0.05, +0.23] — significant; CAGR point +0.7pp
+# (NOT significant, P=77%); better Sharpe in 16/16 rolling 3y windows,
+# MaxDD 29.2% -> 24.8%. HONEST CAVEAT: Nasdaq 2015-2026 (plus the INR
+# depreciation tailwind) was an exceptional decade — do NOT size this off
+# its backtested CAGR; 0.10 is the MILDEST tested intl weight, same
+# anti-creep rule as GOLD_ALLOC. Deeper blends (up to 60/20/20) backtest
+# "better" — that is exactly the trap; momentum is the alpha engine and
+# stays >= 70%. Tax: MON100 is non-equity-oriented for tax (LTCG 12.5%
+# only after 24m, STCG slab) — reflected in research_net_returns.
+INTL_ALLOC = 0.10
+INTL_SYMBOL = "MON100.NS"
+
 # ---- Risk control ----
 # Profit-oriented: no tight intra-hold exits (they cost ~0.3 Sharpe and CAGR by
 # whipsawing out of momentum trends). Only a WIDE catastrophic circuit breaker
@@ -163,4 +184,4 @@ RSI_OVERBOUGHT = 80             # advisory cap for the recommender (was 75; loos
 # Non-strategy holdings: flag for manual review, never auto-sell via the
 # momentum re-qualification gate (gold ETF, delisted/BE-series, manual entries).
 EXIT_EXCLUDE_SUFFIXES = ["-BE.NS", "-BE"]
-EXIT_EXCLUDE_SYMBOLS = ["GOLDBEES.NS", "HARCR.NS"]
+EXIT_EXCLUDE_SYMBOLS = ["GOLDBEES.NS", "MON100.NS", "HARCR.NS"]

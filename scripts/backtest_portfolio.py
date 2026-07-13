@@ -492,22 +492,24 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     return np.array(equity)
 
 
-# ---------- Gold sleeve blend (production default since 2026-07-13) ----------
+# ---------- ETF sleeve blend (production default since 2026-07-13) ----------
 #
-# GOLD_ALLOC of total capital sits in GOLDBEES, rebalanced back to target
-# each rebalance; momentum runs on the rest. Blended at the period-return
-# level (equivalent to sleeve-level capital accounting when both sleeves are
-# marked on the same grid), with COST charged on the approximate inter-sleeve
-# rebalancing turnover. See strategy_config.GOLD_ALLOC comment +
-# research_lowvol_sleeve.py for the evidence and the gold-return caveat.
+# GOLD_ALLOC of total capital sits in GOLDBEES and INTL_ALLOC in MON100
+# (Nasdaq-100 INR), each rebalanced back to target every rebalance; momentum
+# runs on the rest. Blended at the period-return level (equivalent to
+# sleeve-level capital accounting when all sleeves are marked on the same
+# grid), with COST charged on the approximate inter-sleeve rebalancing
+# turnover. See strategy_config.GOLD_ALLOC / INTL_ALLOC comments +
+# research_lowvol_sleeve.py / research_intl_sleeve.py for the evidence and
+# the exceptional-decade caveats on both sleeves' returns.
 
 GOLD_PATH = f"../data/etf_data/{sc.GOLD_SYMBOL}.csv"
 
 
-def load_gold_period_returns(matrix):
-    """Gold marked at each rebalance grid point + HOLD (where the engines'
+def load_etf_period_returns(path, matrix):
+    """ETF marked at each rebalance grid point + HOLD (where the engines'
     equity points sit), so returns align 1:1 with equity[k+1]/equity[k]."""
-    df = pd.read_csv(GOLD_PATH, parse_dates=["Date"], low_memory=False)
+    df = pd.read_csv(path, parse_dates=["Date"], low_memory=False)
     df["Close"] = pd.to_numeric(df["Close"], errors="coerce")
     df = df[pd.to_datetime(df["Date"], errors="coerce").notna()]
     df = df.dropna(subset=["Close"]).sort_values("Date").set_index("Date")["Close"]
@@ -527,20 +529,30 @@ def load_gold_period_returns(matrix):
     return marks.values[1:] / marks.values[:-1] - 1
 
 
+def load_gold_period_returns(matrix):
+    return load_etf_period_returns(GOLD_PATH, matrix)
+
+
 def run_backtest_gold_blend(matrix, index, turnover_matrix=None, exposure_fn=None):
-    """Production engine: (1-GOLD_ALLOC) momentum laggards-only + GOLD_ALLOC
-    GOLDBEES, rebalanced to target weights each period."""
+    """Production engine: momentum laggards-only on
+    (1 - GOLD_ALLOC - INTL_ALLOC) + GOLDBEES + MON100 sleeves, each
+    rebalanced to target weight every period. (Name kept from the gold-only
+    version for walk_forward.py compatibility.)"""
     eq_m = run_backtest_laggards_only(matrix, index, turnover_matrix, exposure_fn)
     if len(eq_m) < 2:
         return eq_m
     r_m = eq_m[1:] / eq_m[:-1] - 1
-    r_g = load_gold_period_returns(matrix)
-    n = min(len(r_m), len(r_g))
-    r_m, r_g = r_m[:n], r_g[:n]
+    sleeve_rets = [r_m]
+    weights = [1.0 - sc.GOLD_ALLOC - sc.INTL_ALLOC]
+    for sym, alloc in [(sc.GOLD_SYMBOL, sc.GOLD_ALLOC), (sc.INTL_SYMBOL, sc.INTL_ALLOC)]:
+        if alloc > 0:
+            sleeve_rets.append(load_etf_period_returns(f"../data/etf_data/{sym}.csv", matrix))
+            weights.append(alloc)
 
-    w_g = sc.GOLD_ALLOC
-    r = (1 - w_g) * r_m + w_g * r_g
-    turnover = (1 - w_g) * np.abs(r_m - r) + w_g * np.abs(r_g - r)
+    n = min(len(x) for x in sleeve_rets)
+    sleeve_rets = [x[:n] for x in sleeve_rets]
+    r = sum(w * x for w, x in zip(weights, sleeve_rets))
+    turnover = sum(w * np.abs(x - r) for w, x in zip(weights, sleeve_rets))
     r = r - turnover * COST
     return INITIAL_CAPITAL * np.concatenate([[1.0], np.cumprod(1 + r)])
 
@@ -570,7 +582,8 @@ def main():
     elif "--no-gold" in sys.argv:
         engine, label = run_backtest_laggards_only, "laggards_only, momentum sleeve only"
     else:
-        engine, label = run_backtest_gold_blend, f"laggards_only + {sc.GOLD_ALLOC:.0%} gold (production default)"
+        engine, label = run_backtest_gold_blend, (
+            f"laggards_only + {sc.GOLD_ALLOC:.0%} gold + {sc.INTL_ALLOC:.0%} intl (production default)")
 
     print("\n==============================")
     print(f"📊 REALISTIC PORTFOLIO BACKTEST  (engine: {label})")

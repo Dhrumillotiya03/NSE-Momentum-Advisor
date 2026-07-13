@@ -15,7 +15,8 @@ import pandas as pd
 
 ETF_DIR = "../data/etf_data/"
 
-ETF_SYMBOLS = ["GOLDBEES.NS"]
+ETF_SYMBOLS = ["GOLDBEES.NS",
+               "MON100.NS"]  # Nasdaq-100 INR ETF — international sleeve study 2026-07
 
 START_DATE = "2015-01-01"
 

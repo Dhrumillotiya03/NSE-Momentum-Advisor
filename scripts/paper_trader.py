@@ -143,10 +143,10 @@ def step():
         log_fill(today_str, order["sym"], "BUY", px, qty, "month-start entry")
     state["pending_buys"] = still_pending
 
-    # 2. -18% stop check at close (gold sleeve exempt — it's a strategic
-    # allocation rebalanced monthly, not a momentum bet with a stop)
+    # 2. -18% stop check at close (ETF sleeves exempt — strategic
+    # allocations rebalanced monthly, not momentum bets with a stop)
     for sym in list(state["positions"]):
-        if sym == sc.GOLD_SYMBOL:
+        if sym in (sc.GOLD_SYMBOL, sc.INTL_SYMBOL):
             continue
         pos = state["positions"][sym]
         px = close_on(sym, today)
@@ -172,7 +172,8 @@ def step():
         eligible = scan_universe()
 
         strategy_syms = {s for s, p in state["positions"].items()
-                         if p.get("entry_price", 0) > 0 and s != sc.GOLD_SYMBOL}
+                         if p.get("entry_price", 0) > 0
+                         and s not in (sc.GOLD_SYMBOL, sc.INTL_SYMBOL)}
 
         if len(eligible) >= n:
             scores = {s: r["score"] for s, r in eligible.items()}
@@ -196,49 +197,57 @@ def step():
                 log_fill(today_str, sym, "SELL", px, pos["qty"], "month-end: dropped out of top-N", pnl)
                 del state["positions"][sym]
 
-            gold_pos = state["positions"].get(sc.GOLD_SYMBOL)
-            gold_px = close_on(sc.GOLD_SYMBOL, today) or (gold_pos["entry_price"] if gold_pos else None)
-            gold_val = gold_pos["qty"] * gold_px if (gold_pos and gold_px) else 0.0
+            sleeves = [(sc.GOLD_SYMBOL, sc.GOLD_ALLOC), (sc.INTL_SYMBOL, sc.INTL_ALLOC)]
+            sleeve_val = {}
+            for ssym, _alloc in sleeves:
+                spos = state["positions"].get(ssym)
+                spx = close_on(ssym, today) or (spos["entry_price"] if spos else None)
+                sleeve_val[ssym] = (spos["qty"] * spx if (spos and spx) else 0.0, spx)
 
-            total_equity = state["cash"] + gold_val + sum(
+            total_equity = state["cash"] + sum(v for v, _ in sleeve_val.values()) + sum(
                 state["positions"][s]["qty"] * (close_on(s, today) or state["positions"][s]["entry_price"])
                 for s in keep)
 
-            # ---- gold sleeve rebalance (GOLD_ALLOC of TOTAL equity, adopted 2026-07-13) ----
-            if gold_px:
-                gold_target = total_equity * sc.GOLD_ALLOC
-                delta = gold_target - gold_val
-                if abs(delta) >= 0.01 * total_equity:
-                    if delta > 0:
-                        add_qty = int(delta // (gold_px * (1 + sc.COST)))
-                        if add_qty > 0:
-                            state["cash"] -= add_qty * gold_px * (1 + sc.COST)
-                            if gold_pos:
-                                new_qty = gold_pos["qty"] + add_qty
-                                gold_pos["entry_price"] = (gold_pos["qty"] * gold_pos["entry_price"]
-                                                           + add_qty * gold_px) / new_qty
-                                gold_pos["qty"] = new_qty
-                            else:
-                                state["positions"][sc.GOLD_SYMBOL] = {
-                                    "qty": add_qty, "entry_price": gold_px, "entry_date": today_str}
-                            log_fill(today_str, sc.GOLD_SYMBOL, "BUY", gold_px, add_qty,
-                                     "gold sleeve rebalance to target")
-                    elif gold_pos:
-                        trim_qty = min(gold_pos["qty"], int((-delta) // gold_px))
-                        if trim_qty > 0:
-                            proceeds = trim_qty * gold_px * (1 - sc.COST)
-                            pnl = round(proceeds - trim_qty * gold_pos["entry_price"], 2)
-                            state["cash"] += proceeds
-                            gold_pos["qty"] -= trim_qty
-                            log_fill(today_str, sc.GOLD_SYMBOL, "SELL", gold_px, trim_qty,
-                                     "gold sleeve rebalance to target", pnl)
-                            if gold_pos["qty"] == 0:
-                                del state["positions"][sc.GOLD_SYMBOL]
+            # ---- ETF sleeve rebalance (gold + intl, % of TOTAL equity, adopted 2026-07-13) ----
+            for ssym, alloc in sleeves:
+                cur_val, spx = sleeve_val[ssym]
+                if alloc <= 0 or not spx:
+                    continue
+                spos = state["positions"].get(ssym)
+                delta = total_equity * alloc - cur_val
+                if abs(delta) < 0.01 * total_equity:
+                    continue
+                if delta > 0:
+                    add_qty = int(delta // (spx * (1 + sc.COST)))
+                    if add_qty <= 0:
+                        continue
+                    state["cash"] -= add_qty * spx * (1 + sc.COST)
+                    if spos:
+                        new_qty = spos["qty"] + add_qty
+                        spos["entry_price"] = (spos["qty"] * spos["entry_price"]
+                                               + add_qty * spx) / new_qty
+                        spos["qty"] = new_qty
+                    else:
+                        state["positions"][ssym] = {
+                            "qty": add_qty, "entry_price": spx, "entry_date": today_str}
+                    log_fill(today_str, ssym, "BUY", spx, add_qty,
+                             "ETF sleeve rebalance to target")
+                elif spos:
+                    trim_qty = min(spos["qty"], int((-delta) // spx))
+                    if trim_qty <= 0:
+                        continue
+                    proceeds = trim_qty * spx * (1 - sc.COST)
+                    pnl = round(proceeds - trim_qty * spos["entry_price"], 2)
+                    state["cash"] += proceeds
+                    spos["qty"] -= trim_qty
+                    log_fill(today_str, ssym, "SELL", spx, trim_qty,
+                             "ETF sleeve rebalance to target", pnl)
+                    if spos["qty"] == 0:
+                        del state["positions"][ssym]
 
-            # momentum book runs on the remaining (1 - GOLD_ALLOC) as its own
-            # sub-capital, regime exposure unchanged — matches
-            # backtest_portfolio.run_backtest_gold_blend
-            invest_target = total_equity * (1 - sc.GOLD_ALLOC) * exposure
+            # momentum book runs on the remaining sub-capital, regime
+            # exposure unchanged — matches backtest_portfolio.run_backtest_gold_blend
+            invest_target = total_equity * (1 - sc.GOLD_ALLOC - sc.INTL_ALLOC) * exposure
 
             for sym in keep:
                 pos = state["positions"][sym]

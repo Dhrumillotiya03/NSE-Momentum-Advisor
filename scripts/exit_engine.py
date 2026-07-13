@@ -201,34 +201,39 @@ def main():
         print(f"  no sell+rebuy). If a held name's weight has drifted from its inverse-vol")
         print(f"  target, a manual top-up/trim is optional, not required by the mandate.")
 
-        # ---- Gold sleeve rebalance (GOLD_ALLOC of TOTAL equity, adopted 2026-07-13) ----
+        # ---- ETF sleeve rebalance (gold + intl, % of TOTAL equity, adopted 2026-07-13) ----
         from portfolio_state import portfolio_value
         total_eq = portfolio_value(state)
-        gold_target = total_eq * sc.GOLD_ALLOC
-        gold_pos = positions.get(sc.GOLD_SYMBOL, {})
-        gold_qty = gold_pos.get("qty", 0)
-        gold_px, gold_stale = get_quote(sc.GOLD_SYMBOL)
-        if gold_px is None:
-            etf_path = f"../data/etf_data/{sc.GOLD_SYMBOL}.csv"
-            if os.path.exists(etf_path):
-                gdf = pd.read_csv(etf_path, parse_dates=["Date"], low_memory=False)
-                gdf["Close"] = pd.to_numeric(gdf["Close"], errors="coerce")
-                gold_px = gdf.dropna(subset=["Close"]).sort_values("Date")["Close"].iloc[-1]
-        print(f"\n  GOLD SLEEVE ({sc.GOLD_SYMBOL}, target {sc.GOLD_ALLOC:.0%} of total equity):")
-        if gold_px is None:
-            print(f"    no price available for {sc.GOLD_SYMBOL} — resolve manually")
-        else:
-            gold_val = gold_qty * gold_px
-            delta = gold_target - gold_val
-            print(f"    total equity ₹{total_eq:,.0f} -> target ₹{gold_target:,.0f} | "
-                  f"held {gold_qty} x ₹{gold_px:.2f} = ₹{gold_val:,.0f} | delta ₹{delta:+,.0f}")
+        for sleeve_sym, sleeve_alloc, sleeve_name in [
+                (sc.GOLD_SYMBOL, sc.GOLD_ALLOC, "GOLD"),
+                (sc.INTL_SYMBOL, sc.INTL_ALLOC, "INTL")]:
+            if sleeve_alloc <= 0:
+                continue
+            target = total_eq * sleeve_alloc
+            pos = positions.get(sleeve_sym, {})
+            qty_held = pos.get("qty", 0)
+            px, _stale = get_quote(sleeve_sym)
+            if px is None:
+                etf_path = f"../data/etf_data/{sleeve_sym}.csv"
+                if os.path.exists(etf_path):
+                    gdf = pd.read_csv(etf_path, parse_dates=["Date"], low_memory=False)
+                    gdf["Close"] = pd.to_numeric(gdf["Close"], errors="coerce")
+                    px = gdf.dropna(subset=["Close"]).sort_values("Date")["Close"].iloc[-1]
+            print(f"\n  {sleeve_name} SLEEVE ({sleeve_sym}, target {sleeve_alloc:.0%} of total equity):")
+            if px is None:
+                print(f"    no price available for {sleeve_sym} — resolve manually")
+                continue
+            cur_val = qty_held * px
+            delta = target - cur_val
+            print(f"    total equity ₹{total_eq:,.0f} -> target ₹{target:,.0f} | "
+                  f"held {qty_held} x ₹{px:.2f} = ₹{cur_val:,.0f} | delta ₹{delta:+,.0f}")
             if abs(delta) < 0.01 * total_eq:
                 print(f"    within 1% drift band — no trade needed")
             else:
                 side = "buy" if delta > 0 else "sell"
-                qty = int(abs(delta) / gold_px)
+                qty = int(abs(delta) / px)
                 print(f"    {side.upper()} ~{qty} units, then record the actual fill:")
-                print(f"      python record_fill.py {side} {sc.GOLD_SYMBOL.replace('.NS','')} "
+                print(f"      python record_fill.py {side} {sleeve_sym.replace('.NS','')} "
                       f"{qty if side == 'buy' else ''} <FILL_PRICE>".rstrip())
 
     if not exit_list:
