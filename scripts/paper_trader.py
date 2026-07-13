@@ -278,6 +278,10 @@ def step():
     else:
         mtm_regime = ""
 
+    # 3b. idle cash accrues the liquid-ETF yield (CASH_YIELD, adopted
+    # 2026-07-13) — once per trading day, mirrors the backtest engines
+    state["cash"] *= (1 + sc.CASH_YIELD) ** (1 / 252)
+
     # 4. mark-to-market snapshot
     equity = state["cash"]
     for sym, pos in state["positions"].items():

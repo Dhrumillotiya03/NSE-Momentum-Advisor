@@ -91,6 +91,20 @@ MAX_PER_SECTOR = 2               # diversification cap on top-N selection (was
                                  # one sector during BULL rebalances — see sectors.json
                                  # and memory fno-universe-migration)
 
+# ---- Idle-cash yield (ADOPTED 2026-07-13) ----
+# The engines historically credited 0% on uninvested cash, but regime
+# exposure keeps 0-62.5% of the momentum sub-capital idle — in live
+# deployment that cash sits in a liquid ETF (e.g. LIQUIDCASE/LIQUIDBEES on
+# Zerodha: no exit load, T+1, ~6-7% gross) instead of earning nothing.
+# This is accounting realism with a CAUSAL mechanism (money-market rates
+# exist), not a tuned parameter — 0.06 is set BELOW prevailing liquid-fund
+# yields deliberately; do not tune it against backtest output. Ops mandate:
+# idle cash in the real Zerodha account must actually be parked in the
+# liquid ETF for the backtest to remain honest. Approximation note: cash
+# freed mid-period by a -18% stop accrues the full period's yield (rare,
+# negligible, conservative to fix later).
+CASH_YIELD = 0.06
+
 # ---- Gold sleeve (ADOPTED 2026-07-13, research_lowvol_sleeve.py) ----
 # GOLD_ALLOC of TOTAL capital is held in GOLD_SYMBOL (GOLDBEES ETF,
 # data/etf_data/), rebalanced back to target at each month-end alongside the

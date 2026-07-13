@@ -327,6 +327,8 @@ def run_backtest(matrix, index, turnover_matrix=None, exposure_fn=None):
             r -= 2 * COST
             new_capital += pos_val * (1 + r)
 
+        # idle (unexposed) cash accrues the liquid-ETF yield over the hold
+        new_capital += (capital - invested) * ((1 + sc.CASH_YIELD) ** (HOLD / 252) - 1)
         capital = new_capital
         equity.append(capital)
 
@@ -362,6 +364,9 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     capital = float(INITIAL_CAPITAL)
     equity = []
     book = {}   # sym -> {entry_price, shares, last_price, cur_value}
+    # idle cash accrues the liquid-ETF yield each 21d period (see
+    # strategy_config.CASH_YIELD — includes the stop-proceeds approximation)
+    cash_growth = (1 + sc.CASH_YIELD) ** (HOLD / 252)
 
     for i in range(LOOKBACK + 21, n_dates - HOLD, HOLD):
         date = dates[i]
@@ -406,11 +411,13 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
         book_value = sum(p["cur_value"] for p in book.values())
 
         if len(scores) < n:
+            capital *= cash_growth
             equity.append(capital + book_value)
             continue
 
         top = set(select_top_n_capped(scores, n, sector_map, sc.MAX_PER_SECTOR))
         if not top:
+            capital *= cash_growth
             equity.append(capital + book_value)
             continue
 
@@ -479,6 +486,7 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
                     pos["last_price"] = fp
                     pos["cur_value"] = pos["shares"] * fp
 
+        capital *= cash_growth
         equity.append(capital + sum(p["cur_value"] for p in book.values()))
 
     return np.array(equity)
