@@ -184,4 +184,5 @@ RSI_OVERBOUGHT = 80             # advisory cap for the recommender (was 75; loos
 # Non-strategy holdings: flag for manual review, never auto-sell via the
 # momentum re-qualification gate (gold ETF, delisted/BE-series, manual entries).
 EXIT_EXCLUDE_SUFFIXES = ["-BE.NS", "-BE"]
-EXIT_EXCLUDE_SYMBOLS = ["GOLDBEES.NS", "MON100.NS", "HARCR.NS"]
+EXIT_EXCLUDE_SYMBOLS = ["GOLDBEES.NS", "MON100.NS", "HARCR.NS",
+                        "RCOM.NS"]  # dead/delisted write-off (~₹0.92) — flag only, never auto-exit

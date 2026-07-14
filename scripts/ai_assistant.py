@@ -158,7 +158,10 @@ def should_i_sell(symbol):
 
     reason = check_catastrophic_stop(df, entry_price, live_price=None if stale else live_price)
     if reason:
-        return {"symbol": symbol, "verdict": "SELL", "reason": reason}
+        return {"symbol": symbol, "verdict": "SELL",
+                "qty_to_sell": pos.get("qty"),
+                "sell_instruction": f"sell the FULL position of {pos.get('qty')} shares",
+                "reason": reason}
 
     import pandas as pd
     index_dates = pd.to_datetime(
@@ -176,11 +179,13 @@ def should_i_sell(symbol):
             scores_only, n_names, load_sector_map(), sc.MAX_PER_SECTOR))
         requal = check_requalification(symbol, df, regime, eligible_scores, top_n_symbols)
         if requal is None:
-            return {"symbol": symbol, "verdict": "HOLD",
+            return {"symbol": symbol, "verdict": "HOLD", "qty_held": pos.get("qty"),
                     "reason": "Month-end re-evaluation: still in the new top-N — KEEP it "
                               "(laggards-only rebalance: no sell/re-buy, no tax event; "
                               "only its target weight may need a small top-up/trim)"}
         return {"symbol": symbol, "verdict": "SELL",
+                "qty_to_sell": pos.get("qty"),
+                "sell_instruction": f"sell the FULL position of {pos.get('qty')} shares",
                 "reason": f"Month-end re-evaluation — {requal}"}
 
     price = live_price if live_price else float(df["Close"].iloc[-1])

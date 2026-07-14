@@ -71,6 +71,10 @@ def already_journaled(date, symbol, action, qty, price):
 
 
 def do_buy(state, symbol, qty, price, date, reason, force):
+    if qty is not None and qty <= 0:
+        sys.exit(f"ABORT: BUY qty must be positive, got {qty}.")
+    if price <= 0:
+        sys.exit(f"ABORT: BUY price must be positive, got {price}.")
     if already_journaled(date, symbol, "BUY", qty, price) and not force:
         sys.exit(f"ABORT: identical BUY already journaled for {date} — use --force if this is a real second fill.")
 
@@ -103,6 +107,11 @@ def do_buy(state, symbol, qty, price, date, reason, force):
 
 
 def do_sell(state, symbol, qty, price, date, reason, force):
+    if qty is not None and qty <= 0:
+        sys.exit(f"ABORT: SELL qty must be positive, got {qty}. "
+                 f"(Omit qty to sell the full position.)")
+    if price <= 0:
+        sys.exit(f"ABORT: SELL price must be positive, got {price}.")
     pos = state["positions"].get(symbol)
     if pos is None:
         sys.exit(f"ABORT: no open position in {symbol} — nothing to sell. "
