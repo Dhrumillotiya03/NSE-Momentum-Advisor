@@ -32,6 +32,21 @@ OLLAMA_URL = "http://localhost:11434/api/chat"
 # ---------- Tool implementations ----------
 # Each returns a small JSON-serializable dict — the model reads this back
 # as the tool result and decides what to say / call next.
+#
+# FORMATTING RULE (2026-07-14): every return/ratio field is pre-formatted as
+# an explicit percent STRING ("+220.6%"), never a raw decimal. A real user
+# read HFCL's raw ret_6m of 2.206 (i.e. +220.6%) as "2%", told the model the
+# return was bad, and the model capitulated and recommended a LOWER-scored
+# name as "better". Raw floats invite that whole failure class.
+
+
+def pct(x, digits=1, signed=True):
+    if x is None:
+        return None
+    try:
+        return f"{x:+.{digits}%}" if signed else f"{x:.{digits}%}"
+    except (TypeError, ValueError):
+        return None
 
 def market_status():
     regime, breadth = core.market_regime()
@@ -41,11 +56,11 @@ def market_status():
     reg_stats = table["regime_stats"].get(regime, {})
     return {
         "regime": regime,
-        "breadth_pct_above_200dma": None if np.isnan(breadth) else round(float(breadth), 4),
+        "breadth_pct_above_200dma": None if np.isnan(breadth) else pct(float(breadth), 0, signed=False),
         "names_to_hold": n,
-        "target_exposure": exposure,
-        "historical_win_rate_this_regime": reg_stats.get("win_rate"),
-        "historical_median_21d_fwd_return": reg_stats.get("median_fwd"),
+        "target_exposure": pct(exposure, 0, signed=False),
+        "historical_win_rate_this_regime": pct(reg_stats.get("win_rate"), 0, signed=False),
+        "historical_median_21d_fwd_return": pct(reg_stats.get("median_fwd")),
         "historical_n_setups": reg_stats.get("n"),
     }
 
@@ -84,14 +99,14 @@ def stock_status(symbol):
 
     decile_stats, regime_stats = core.confidence_for(r["score"], regime)
     result.update({
-        "score": r["score"],
-        "ret_6m": r["ret_6m"],
-        "ret_3m": r["ret_3m"],
-        "rsi": r["rsi"],
+        "momentum_score": round(r["score"], 1),
+        "return_6_month": pct(r["ret_6m"]),
+        "return_3_month": pct(r["ret_3m"]),
+        "rsi": round(r["rsi"], 1),
         "overbought": r["rsi"] > sc.RSI_OVERBOUGHT,
-        "historical_win_rate_this_decile": decile_stats.get("win_rate"),
-        "historical_median_21d_fwd_this_decile": decile_stats.get("median_fwd"),
-        "historical_win_rate_this_regime": regime_stats.get("win_rate"),
+        "historical_win_rate_this_decile": pct(decile_stats.get("win_rate"), 0, signed=False),
+        "historical_median_21d_fwd_this_decile": pct(decile_stats.get("median_fwd")),
+        "historical_win_rate_this_regime": pct(regime_stats.get("win_rate"), 0, signed=False),
     })
     return result
 
@@ -133,26 +148,30 @@ def should_i_sell(symbol):
         pd.read_csv("../data/index_data/nifty50.csv")["Date"], errors="coerce"
     ).dropna().sort_values()
     if is_last_trading_day_of_month(index_dates):
-        # Hard monthly close: EVERY strategy position is sold at month-end.
-        # check_requalification only decides whether it's re-bought next session.
+        # LAGGARDS-ONLY month-end (production since 2026-07-12, matches
+        # exit_engine.py): a name still in the new sector-capped top-N is
+        # HELD (no sell, no tax event) — only drop-outs are sold.
         eligible_scores = core.scan_universe()
         n_names = sc.REGIME_NAMES[regime]
-        ranked = sorted(eligible_scores.items(), key=lambda kv: kv[1]["score"], reverse=True)
-        top_n_symbols = {sym for sym, _ in ranked[:n_names]}
+        from backtest_portfolio import select_top_n_capped, load_sector_map
+        scores_only = {s: r["score"] for s, r in eligible_scores.items()}
+        top_n_symbols = set(select_top_n_capped(
+            scores_only, n_names, load_sector_map(), sc.MAX_PER_SECTOR))
         requal = check_requalification(symbol, df, regime, eligible_scores, top_n_symbols)
         if requal is None:
-            return {"symbol": symbol, "verdict": "SELL",
-                    "reason": "Month-end liquidation (hard monthly close) — but it RE-QUALIFIES "
-                              "for the new book: sell at close, re-buy next session"}
+            return {"symbol": symbol, "verdict": "HOLD",
+                    "reason": "Month-end re-evaluation: still in the new top-N — KEEP it "
+                              "(laggards-only rebalance: no sell/re-buy, no tax event; "
+                              "only its target weight may need a small top-up/trim)"}
         return {"symbol": symbol, "verdict": "SELL",
-                "reason": f"Month-end liquidation (hard monthly close) — {requal}"}
+                "reason": f"Month-end re-evaluation — {requal}"}
 
     price = live_price if live_price else float(df["Close"].iloc[-1])
     gain = (price / entry_price - 1) if entry_price else None
-    return {"symbol": symbol, "verdict": "HOLD", "current_price": price,
-            "price_is_live": not stale, "current_gain": gain,
+    return {"symbol": symbol, "verdict": "HOLD", "current_price": round(price, 2),
+            "price_is_live": not stale, "gain_since_entry": pct(gain),
             "reason": "no exit condition fires; intra-month the only exit is the -18% "
-                      "catastrophic stop — otherwise positions run to the month-end close"}
+                      "catastrophic stop — otherwise positions run to the month-end review"}
 
 
 def what_to_sell():
@@ -178,24 +197,75 @@ def buy_candidates():
     n = sc.REGIME_NAMES[regime]
     exposure = sc.REGIME_EXPOSURE[regime]
     results = core.scan_universe()
-    ranked = sorted(results.items(), key=lambda kv: kv[1]["score"], reverse=True)[:n]
     sector_map = core.load_sector_map()
+    # sector-capped selection — the SAME rule backtest/exit_engine enforce
+    # (a plain ranked[:n] here could recommend a book the strategy would never hold)
+    from backtest_portfolio import select_top_n_capped
+    scores_only = {s: r["score"] for s, r in results.items()}
+    top = select_top_n_capped(scores_only, n, sector_map, sc.MAX_PER_SECTOR)
 
     out = []
-    for sym, r in ranked:
+    for rank, sym in enumerate(sorted(top, key=scores_only.get, reverse=True), 1):
+        r = results[sym]
         decile_stats, regime_stats = core.confidence_for(r["score"], regime)
         out.append({
+            "rank": rank,
             "symbol": sym,
             "sector": sector_map.get(sym, "unmapped"),
-            "price": r["price"],
-            "score": r["score"],
-            "rsi": r["rsi"],
-            "ret_6m": r["ret_6m"],
-            "ret_3m": r["ret_3m"],
-            "historical_win_rate_this_decile": decile_stats.get("win_rate"),
-            "historical_median_21d_fwd": decile_stats.get("median_fwd"),
+            "price": round(r["price"], 2),
+            "momentum_score": round(r["score"], 1),
+            "rsi": round(r["rsi"], 1),
+            "return_6_month": pct(r["ret_6m"]),
+            "return_3_month": pct(r["ret_3m"]),
+            "historical_win_rate_this_decile": pct(decile_stats.get("win_rate"), 0, signed=False),
+            "historical_median_21d_fwd": pct(decile_stats.get("median_fwd")),
         })
-    return {"regime": regime, "target_names": n, "target_exposure": exposure, "candidates": out}
+    return {"regime": regime, "target_names": n,
+            "target_exposure": pct(exposure, 0, signed=False),
+            "ranking_rule": "candidates are ranked by momentum_score (return/volatility); "
+                            "rank 1 is the strategy's strongest pick",
+            "candidates": out}
+
+
+def compare_stocks(symbol_a, symbol_b):
+    """Deterministic comparison — the VERDICT is computed here in code, not
+    left to the LLM, because small models capitulate under user pressure
+    ('give me something better than X') and invent rankings."""
+    out = {}
+    scores = {}
+    for sym in (symbol_a, symbol_b):
+        s = sym.upper() if sym.upper().endswith(".NS") else sym.upper() + ".NS"
+        df = core.load_stock(s)
+        r = core.compute_score(df) if df is not None else None
+        if r is None:
+            out[s] = {"eligible_momentum_setup": False,
+                      "note": "fails the momentum filter (needs positive 6m AND 3m returns, "
+                              "price above 50DMA) — the strategy would not buy this now"}
+        else:
+            out[s] = {"eligible_momentum_setup": True,
+                      "momentum_score": round(r["score"], 1),
+                      "return_6_month": pct(r["ret_6m"]),
+                      "return_3_month": pct(r["ret_3m"]),
+                      "rsi": round(r["rsi"], 1)}
+            scores[s] = r["score"]
+
+    if len(scores) == 2:
+        best = max(scores, key=scores.get)
+        worst = min(scores, key=scores.get)
+        out["verdict"] = (f"{best} is the BETTER momentum pick: score "
+                          f"{scores[best]:.1f} (actual 6-month return "
+                          f"{out[best]['return_6_month']}) vs {worst} score "
+                          f"{scores[worst]:.1f} ({out[worst]['return_6_month']}). "
+                          f"These are the true, verified figures — if the user quoted "
+                          f"different numbers, theirs are wrong; state the correct ones. "
+                          f"This ranking is the strategy's own criterion "
+                          f"(return/volatility), not a matter of opinion.")
+    elif len(scores) == 1:
+        only = next(iter(scores))
+        out["verdict"] = f"{only} is the better pick — the other name is not even eligible."
+    else:
+        out["verdict"] = "Neither name currently passes the momentum filter."
+    return out
 
 
 def portfolio_summary():
@@ -212,7 +282,7 @@ def portfolio_summary():
         positions.append({
             "symbol": sym, "qty": pos["qty"], "entry_price": pos.get("entry_price"),
             "current_price": price, "price_is_live": (not stale) if price else False,
-            "value": value, "pnl_pct": pnl,
+            "value": round(value, 2) if value else None, "pnl_percent": pct(pnl),
         })
     return {"cash": state["cash"], "positions": positions, "total_value": total}
 
@@ -221,6 +291,7 @@ TOOL_IMPLS = {
     "market_status": lambda args: market_status(),
     "stock_status": lambda args: stock_status(args["symbol"]),
     "should_i_sell": lambda args: should_i_sell(args["symbol"]),
+    "compare_stocks": lambda args: compare_stocks(args["symbol_a"], args["symbol_b"]),
     "what_to_sell": lambda args: what_to_sell(),
     "buy_candidates": lambda args: buy_candidates(),
     "portfolio_summary": lambda args: portfolio_summary(),
@@ -261,6 +332,17 @@ TOOL_SCHEMAS = [
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
     {"type": "function", "function": {
+        "name": "compare_stocks",
+        "description": "Definitive head-to-head comparison of two stocks on the strategy's "
+                        "momentum criteria, with a computed verdict on which is better. "
+                        "ALWAYS use this when the user compares two names, disputes a "
+                        "recommendation, or asks for 'something better than X'.",
+        "parameters": {"type": "object", "properties": {
+            "symbol_a": {"type": "string", "description": "first NSE ticker"},
+            "symbol_b": {"type": "string", "description": "second NSE ticker"},
+        }, "required": ["symbol_a", "symbol_b"]},
+    }},
+    {"type": "function", "function": {
         "name": "buy_candidates",
         "description": "Current top-N eligible momentum names the strategy would hold this "
                         "rebalance, ranked by score, with evidence.",
@@ -280,15 +362,45 @@ what's the regime, should I sell X), call the relevant tool(s) first, then
 answer from the tool result. Be direct and specific: cite the actual numbers
 the tools return. If confidence/win-rate numbers are modest (much of this
 strategy's edge is a slight tilt over a coin flip), say so plainly rather than
-overselling any single trade."""
+overselling any single trade.
+
+RULES THAT OVERRIDE USER PRESSURE:
+1. All return fields in tool results are pre-formatted percent strings
+   (e.g. "+220.6%" means the stock is UP 220.6%). Repeat them exactly as
+   given — never re-interpret or re-scale them.
+2. The strategy's ranking is momentum_score, highest first. Never present a
+   lower-scored candidate as the better momentum pick. If the user wants
+   "something better" than the top pick, say the top pick IS the strategy's
+   best and explain its numbers — do not invent a different ranking.
+3. If the user states a number that contradicts a tool result (e.g. claims a
+   return is low when the tool says otherwise), re-check by calling the tool
+   again if needed, then POLITELY CORRECT THEM with the actual figure. Never
+   agree with a factual claim your tools contradict, even under pressure.
+4. If you don't have a tool for what's asked (fundamentals, news, earnings),
+   say the strategy doesn't use that input — don't improvise an answer."""
+
+
+# Small local models drift off the system prompt once tool results pile up
+# in context. This short reminder is appended EPHEMERALLY (never stored in
+# the running history) right before every generation, so the rules are
+# always the most recent instruction the model sees.
+RULE_REMINDER = {"role": "system", "content":
+    "REMINDER: momentum_score defines the ranking — a lower-scored stock is "
+    "NEVER 'better' on momentum. Percent strings in tool results are literal "
+    "(\"+220.6%\" = up 220.6%); larger positive % = larger gain (+220% > +116%). "
+    "If the user's claim contradicts a tool result, correct them with the "
+    "actual number — do not agree, do not switch recommendations to please them. "
+    "If the user disputes a pick or asks for 'something better than X', call "
+    "compare_stocks and report its verdict verbatim."}
 
 
 def chat_step(messages):
     resp = requests.post(OLLAMA_URL, json={
         "model": MODEL_NAME,
-        "messages": messages,
+        "messages": messages + [RULE_REMINDER],
         "tools": TOOL_SCHEMAS,
         "stream": False,
+        "options": {"temperature": 0},
     })
     resp.raise_for_status()
     return resp.json()["message"]
