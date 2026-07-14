@@ -33,9 +33,27 @@ stock_ai/
   records the actual fill, updating positions/avg-entry/cash/realized-P&L and the
   journal atomically, with a duplicate-fill guard. Never journal a signal as a trade
   — that's what corrupted the books before the rework.
-- Books were reset 2026-07-12 to a clean baseline (cash ₹10L, no positions) — user
-  confirmed everything prior was simulation, no real Zerodha positions exist yet.
-  Pre-reset originals archived in data/_quarantine/*_pre_cleanup_2026-07-12.*.
+- REAL BOOK IMPORTED 2026-07-14 (supersedes the 2026-07-12 "no real
+  positions" reset): user's actual Zerodha holdings are now in
+  portfolio_state.json — 9 positions, ₹67L invested, all pre-existing
+  DISCRETIONARY picks (none bought by the strategy): AARTIIND (PLEDGED —
+  cannot sell without unpledging, note field on the position), BEL,
+  KALYANKJIL, KFINTECH, RELIANCE, VOLTAS, WIPRO, GOLDBEES x9000 (the gold
+  sleeve, already ≈15% of book), RCOM (dead write-off, in
+  EXIT_EXCLUDE_SYMBOLS). CASH IS A PLACEHOLDER (0) — user has not supplied
+  the real cash/liquid balance; update state["cash"] when provided. The
+  user runs the system irregularly (not daily) and Zerodha may not be
+  synced — record_fill discipline after each real trade is what keeps the
+  books honest. Pre-reset originals: data/_quarantine/*_pre_cleanup_2026-07-12.*.
+- AGENT-SIM (2026-07-14, agent_sim.py, nightly in run_daily_log.sh): LLM
+  trader-persona asks the real ai_assistant for advice against a SANDBOXED
+  book copy (data/_agent_sim/, seeded from the real portfolio, sim cash
+  ₹5L), executes its JSON orders through the real record_fill code, code
+  critic checks books/journal consistency. It's an INTERFACE test (advice→
+  human→fill→books), NOT an alpha test. `python agent_sim.py report` for
+  findings. Its first run caught: record_fill accepted qty<=0 fills (now
+  hard-aborts), sell verdicts lacked quantities (now qty_to_sell), stock
+  CSVs lag the index intraday (sim fills at last close ≤5d).
 - -18% stop watch is automated: cron weekdays 14:40 IST runs
   scripts/run_exit_check.sh (logs to data/exit_check.log, notify-send on SELL
   signal); run_daily_log.sh also runs exit_engine.py each evening as a backstop.
