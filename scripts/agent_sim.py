@@ -21,11 +21,20 @@ One month is one rebalance period; a good or bad sim month says nothing
 about the alpha (see statistical-hygiene-2026-07). The deployment gate
 remains gate_report.py over 3-6 paper months.
 
-SANDBOX: data/_agent_sim/ — seeded on first run from the real
-portfolio_state.json (same positions, sim cash ₹5,00,000). The real books
+SANDBOX: data/_agent_sim/ — starts as a CLEAN ₹10L cash book (2026-07-14
+redesign, user direction): the sim buys ONLY what the model suggests, at
+the model's timing (fresh-start entry, daily -18% stop checks, month-end
+rotation), so every rupee of P&L is attributable to the model's calls —
+legacy discretionary holdings would muddy that attribution. The real books
 are never touched: every module-level path (portfolio_state.STATE_PATH,
 core.STATE_PATH, trade_journal.JOURNAL_FILE, record_fill.JOURNAL_PATH) is
 redirected before any tool runs.
+
+`python agent_sim.py report` scores MODEL ACCURACY, not just plumbing:
+per-trade P&L on closed round-trips, open picks vs entry, and each sell's
+aftermath (did the stock keep falling after the model said sell, or did
+the exit cost upside?) — plus the interface findings (blocked orders,
+critic problems).
 
 Usage (from scripts/):
     python agent_sim.py          # one daily session (idempotent per date)
@@ -45,9 +54,7 @@ SIM_STATE = SIM_DIR + "portfolio_state.json"
 SIM_JOURNAL = SIM_DIR + "trade_history.csv"
 SIM_LOG = SIM_DIR + "sessions.csv"
 SIM_EQUITY = SIM_DIR + "equity.csv"
-SIM_CASH_START = 500_000.0
-
-REAL_STATE = "../data/portfolio_state.json"
+SIM_CASH_START = 1_000_000.0
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
@@ -59,6 +66,8 @@ Below is today's conversation with your advisor about YOUR portfolio.
 
 Decide what you will ACTUALLY do today. Rules:
 - You generally follow the advisor's recommendations, including quantities.
+- ETF sleeve buys/rebalances (GOLDBEES, MON100) the advisor lists are real
+  orders too — include them, don't treat them as optional commentary.
 - You may skip or size down a trade if you state a reason.
 - Only trade what was discussed. No inventing symbols.
 - If the advisor says nothing needs doing, do nothing.
@@ -88,14 +97,11 @@ def ensure_seeded():
     os.makedirs(SIM_DIR, exist_ok=True)
     if os.path.exists(SIM_STATE):
         return
-    with open(REAL_STATE) as f:
-        state = json.load(f)
-    state["cash"] = SIM_CASH_START
-    state.pop("cash_note", None)
+    state = {"cash": SIM_CASH_START, "positions": {}}
     with open(SIM_STATE, "w") as f:
         json.dump(state, f, indent=2)
-    print(f"[sim] seeded sandbox from real book: {len(state['positions'])} positions, "
-          f"cash ₹{SIM_CASH_START:,.0f}")
+    print(f"[sim] seeded CLEAN sandbox: ₹{SIM_CASH_START:,.0f} cash, no positions — "
+          f"the book will only ever hold the model's own picks")
 
 
 def append_csv(path, row, headers):
@@ -174,12 +180,20 @@ def step():
             return
 
     month_end = is_last_trading_day_of_month(pd.Series(index.index))
-    question = ("It's the month-end review day. Review my whole portfolio: what should "
-                "I sell, what should I buy, and exactly how many shares of each? My "
-                "total capital assumption should be my current portfolio value."
-                if month_end else
-                "Daily check: any exit alerts or stops on my holdings today? "
-                "Should I do anything right now?")
+    from portfolio_state import load_state as _ls
+    fresh_book = not _ls()["positions"]
+    if month_end:
+        question = ("It's the month-end review day. Review my whole portfolio: what should "
+                    "I sell, what should I buy, and exactly how many shares of each? My "
+                    "total capital assumption should be my current portfolio value.")
+    elif fresh_book:
+        cash_now = _ls()["cash"]
+        question = (f"I'm starting fresh with ₹{cash_now:,.0f} in cash and no positions. "
+                    f"What exactly should I buy today and how many shares of each? "
+                    f"Include the ETF sleeves.")
+    else:
+        question = ("Daily check: any exit alerts or stops on my holdings today? "
+                    "Should I do anything right now?")
 
     # 1. ADVISOR
     messages = [{"role": "system", "content": ai.SYSTEM_PROMPT},
@@ -277,6 +291,81 @@ def step():
 
 # ---------- report ----------
 
+def latest_close(sym):
+    for base in ("../data/price_data/", "../data/etf_data/"):
+        path = base + f"{sym}.csv"
+        if not os.path.exists(path):
+            continue
+        df = pd.read_csv(path, low_memory=False)
+        c = pd.to_numeric(df["Close"], errors="coerce").dropna()
+        if len(c):
+            return float(c.iloc[-1])
+    return None
+
+
+def model_accuracy(log):
+    """Score the MODEL's calls, not the plumbing: every executed buy/sell
+    from the sim journal, marked against what the price did afterwards."""
+    if not os.path.exists(SIM_JOURNAL):
+        print("  no trades journaled yet")
+        return
+    jr = pd.read_csv(SIM_JOURNAL)
+    if not len(jr):
+        print("  no trades journaled yet")
+        return
+
+    idx = pd.read_csv("../data/index_data/nifty50.csv", low_memory=False)
+    idx["Close"] = pd.to_numeric(idx["Close"], errors="coerce")
+    idx["Date"] = pd.to_datetime(idx["Date"], errors="coerce")
+    idx = idx.dropna(subset=["Date", "Close"]).sort_values("Date")
+
+    print(f"\n  MODEL ACCURACY — every executed model call vs what happened next")
+    print(f"  {'-'*66}")
+
+    # BUYS: return since entry vs Nifty since same date
+    buys = jr[jr["action"] == "BUY"]
+    if len(buys):
+        print(f"  BUY calls ({len(buys)}):")
+        rel = []
+        for _, t in buys.iterrows():
+            now = latest_close(t["symbol"])
+            if now is None:
+                continue
+            r = now / t["price"] - 1
+            nifty_then = idx[idx["Date"] >= pd.Timestamp(t["date"])]
+            nr = (idx["Close"].iloc[-1] / nifty_then["Close"].iloc[0] - 1) if len(nifty_then) else 0
+            rel.append(r - nr)
+            print(f"    {t['date']} BUY {t['symbol']:16s} @ ₹{t['price']:.2f} -> ₹{now:.2f} "
+                  f"({r:+.1%}; Nifty {nr:+.1%}; alpha {r - nr:+.1%})")
+        if rel:
+            good = sum(1 for x in rel if x > 0)
+            print(f"    -> {good}/{len(rel)} buys beating Nifty since entry, "
+                  f"mean alpha {sum(rel)/len(rel):+.1%}")
+
+    # SELLS: what did the stock do AFTER the model said sell?
+    sells = jr[jr["action"] == "SELL"]
+    if len(sells):
+        print(f"  SELL calls ({len(sells)}):")
+        vindicated = 0
+        for _, t in sells.iterrows():
+            now = latest_close(t["symbol"])
+            if now is None:
+                continue
+            after = now / t["price"] - 1
+            verdict = ("GOOD EXIT (kept falling)" if after < -0.01 else
+                       "cost upside" if after > 0.01 else "neutral")
+            vindicated += after < -0.01
+            pnl = t.get("pnl", "")
+            print(f"    {t['date']} SELL {t['symbol']:16s} @ ₹{t['price']:.2f}, since then "
+                  f"{after:+.1%} -> {verdict} (realized P&L ₹{pnl})")
+        print(f"    -> {vindicated}/{len(sells)} sells vindicated so far")
+
+    print(f"\n  CAVEAT: one month = ONE rebalance period. This scores the month's calls;")
+    print(f"  it cannot validate or refute the strategy (that's gate_report.py over 3-6")
+    print(f"  paper months). A bad month here with clean plumbing still = ship;")
+    print(f"  a good month with broken plumbing = don't.")
+
+
 def report():
     if not os.path.exists(SIM_LOG):
         print("No sim sessions yet.")
@@ -290,8 +379,15 @@ def report():
     print(f"  orders executed: {n_exec} | blocked: {n_block} | critic problems: {n_prob}")
     if eq is not None and len(eq) > 1:
         ret = eq["equity"].iloc[-1] / eq["equity"].iloc[0] - 1
-        print(f"  equity: ₹{eq['equity'].iloc[0]:,.0f} -> ₹{eq['equity'].iloc[-1]:,.0f} ({ret:+.2%})")
-        print(f"  (interface test, not an alpha test — one month proves nothing about returns)")
+        idx = pd.read_csv("../data/index_data/nifty50.csv", low_memory=False)
+        c = pd.to_numeric(idx["Close"], errors="coerce").dropna()
+        d = pd.to_datetime(idx["Date"], errors="coerce")
+        start = pd.Timestamp(eq["date"].iloc[0])
+        nifty = c[d >= start]
+        nret = (nifty.iloc[-1] / nifty.iloc[0] - 1) if len(nifty) > 1 else 0
+        print(f"  equity: ₹{eq['equity'].iloc[0]:,.0f} -> ₹{eq['equity'].iloc[-1]:,.0f} "
+              f"({ret:+.2%}; Nifty same period {nret:+.2%}; alpha {ret - nret:+.2%})")
+
     probs = [(r["date"], p) for _, r in log.iterrows() for p in json.loads(r["critic_problems"])]
     if probs:
         print("  CRITIC FINDINGS (each is an interface bug to fix before real deployment):")
@@ -299,9 +395,11 @@ def report():
             print(f"    {d}: {p}")
     blocks = [(r["date"], b) for _, r in log.iterrows() for b in json.loads(r["blocked"])]
     if blocks:
-        print("  blocked orders (often correct behavior — pledged/duplicate/cash guards):")
+        print("  blocked orders (often correct behavior — duplicate/cash guards):")
         for d, b in blocks[-10:]:
             print(f"    {d}: {b.get('action')} {b.get('symbol')} x{b.get('qty')} — {b.get('why')}")
+
+    model_accuracy(log)
 
 
 if __name__ == "__main__":

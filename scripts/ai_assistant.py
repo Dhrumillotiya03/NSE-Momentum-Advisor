@@ -283,6 +283,21 @@ def position_sizes(capital=None):
     tot2 = sum(w.values())
     w = {s: v / tot2 for s, v in w.items()}
 
+    from live_quotes import get_quote
+    sleeve_plan = []
+    for sleeve_sym, alloc in [(sc.GOLD_SYMBOL, sc.GOLD_ALLOC), (sc.INTL_SYMBOL, sc.INTL_ALLOC)]:
+        spx, _ = get_quote(sleeve_sym)
+        qty = int(capital * alloc // spx) if spx else None
+        sleeve_plan.append({
+            "symbol": sleeve_sym,
+            "target": f"{alloc:.0%} of total = ₹{capital * alloc:,.0f}",
+            "price": round(spx, 2) if spx else None,
+            "quantity": qty,
+            "instruction": (f"BUY {qty} units of {sleeve_sym} (or top up an existing "
+                            f"holding to that level) — this is part of the buy plan, "
+                            f"not optional" if qty else "no live price — resolve manually"),
+        })
+
     momentum_capital = capital * (1 - sc.GOLD_ALLOC - sc.INTL_ALLOC) * exposure
     plan = []
     for s in sorted(top, key=scores_only.get, reverse=True):
@@ -300,10 +315,7 @@ def position_sizes(capital=None):
             f"{1 - sc.GOLD_ALLOC - sc.INTL_ALLOC:.0%} momentum sleeve x "
             f"{exposure:.0%} {regime}-regime exposure of total capital"),
         "buy_plan": plan,
-        "also_maintain_sleeves": {
-            sc.GOLD_SYMBOL: f"{sc.GOLD_ALLOC:.0%} of total = ₹{capital * sc.GOLD_ALLOC:,.0f}",
-            sc.INTL_SYMBOL: f"{sc.INTL_ALLOC:.0%} of total = ₹{capital * sc.INTL_ALLOC:,.0f}",
-        },
+        "etf_sleeve_buy_plan": sleeve_plan,
         "uninvested_cash_note": "remaining cash should sit in a liquid ETF "
                                 "(LIQUIDCASE-type), not idle — the strategy's "
                                 "returns assume ~6% on idle cash",
