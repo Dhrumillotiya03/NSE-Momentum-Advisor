@@ -1,0 +1,9 @@
+[Unit]
+Description=stock_ai intraday watcher (live-quote stop/drop/SR alerts on held names)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/dhrumil/stock_ai/scripts
+ExecStart=/home/dhrumil/anaconda3/bin/python intraday_watch.py
+Environment=DISPLAY=:0
+TimeoutStartSec=300

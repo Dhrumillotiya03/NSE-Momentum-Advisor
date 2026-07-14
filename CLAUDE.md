@@ -56,9 +56,15 @@ stock_ai/
   findings. Its first run caught: record_fill accepted qty<=0 fills (now
   hard-aborts), sell verdicts lacked quantities (now qty_to_sell), stock
   CSVs lag the index intraday (sim fills at last close ≤5d).
-- -18% stop watch is automated: cron weekdays 14:40 IST runs
-  scripts/run_exit_check.sh (logs to data/exit_check.log, notify-send on SELL
-  signal); run_daily_log.sh also runs exit_engine.py each evening as a backstop.
+- -18% stop watch is automated at THREE cadences: intraday_watch.py via
+  systemd timer stockai-intraday (every 15 min during market hours,
+  weekdays — live yfinance quotes ~15-min delayed; alerts STOP breach HIGH,
+  >5% intraday DROP MED, and S/R level crossings INFO with the explicit
+  caveat that auto-selling at resistance was backtested and REJECTED — the
+  S/R alert is information for human discretion, NEVER wire it into
+  exit_engine/paper_trader/agent_sim); legacy cron weekdays 14:40 IST
+  (run_exit_check.sh) kept as backstop; run_daily_log.sh evenings.
+  Alert dedupe: one per (day, symbol, type) via data/intraday_seen.csv.
 - Deployment expectation-setting: hard monthly close ⇒ ALL gains are short-term
   capital gains (20%); realistic net CAGR ≈ gross − STCG drag (≈19.6% gross →
   ~15-16% net; run scripts/research_net_returns.py for the current table).
