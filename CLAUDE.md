@@ -65,6 +65,16 @@ stock_ai/
   exit_engine/paper_trader/agent_sim); legacy cron weekdays 14:40 IST
   (run_exit_check.sh) kept as backstop; run_daily_log.sh evenings.
   Alert dedupe: one per (day, symbol, type) via data/intraday_seen.csv.
+  The same intraday service also runs market_scanner.py — universe-wide
+  discovery (~200 F&O-liquid names, batched yfinance 15m bars): JUMP >=+4%,
+  SURGE (>1.5x 20d avg volume, up-moves only), NEWHIGH (52w), each flag
+  fused with core.compute_score vs today's cached top-N cutoff and labeled
+  QUALIFIES / ELIGIBLE / chase-risk. notify-send only on QUALIFIES. Flags
+  accumulate in data/scanner_log.csv WITH score context so flag quality is
+  measurable — do NOT promote scanner flags into an entry rule without
+  walk-forward evidence (raw daily jumpers mean-revert; the fusion label
+  exists precisely because BIOCON +6.4% failed the filter while WELCORP
+  +2.2% qualified on day one).
 - Deployment expectation-setting: hard monthly close ⇒ ALL gains are short-term
   capital gains (20%); realistic net CAGR ≈ gross − STCG drag (≈19.6% gross →
   ~15-16% net; run scripts/research_net_returns.py for the current table).
