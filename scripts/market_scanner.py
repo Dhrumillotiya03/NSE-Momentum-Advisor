@@ -246,6 +246,101 @@ def main():
           + (f", {len(qualifies)} QUALIFIES (notified)" if qualifies else ""))
 
 
+def eod_catchup():
+    """Reconstruct a missed day's flags from the COMPLETED daily candles.
+
+    If the machine was off during market hours, the 15-min scans never ran
+    and the day would have ZERO rows in scanner_log.csv — silently biasing
+    the month-end shadow evaluation toward days the machine was on. A
+    finished daily bar contains everything the flags need (close vs prev
+    close, full-day volume, high vs 52w high), so the evening pipeline
+    calls this after downloads: if the latest completed session has no
+    logged scan rows, rebuild them, marked time='EOD'. (Alerts are NOT
+    retro-fired for stops/drops — you can't act on noon at 8pm; the
+    evening exit_engine close check covers the actionable part.)"""
+    idx = pd.read_csv("../data/index_data/nifty50.csv", low_memory=False)
+    dates = pd.to_datetime(idx["Date"], errors="coerce").dropna()
+    data_date = dates.max().strftime("%Y-%m-%d")
+
+    if os.path.exists(SCANNER_LOG):
+        log = pd.read_csv(SCANNER_LOG)
+        if (log["date"] == data_date).any():
+            print(f"[scanner-eod] {data_date} already has intraday scan rows — no catch-up needed")
+            return
+
+    universe = sorted(core.liquid_universe())
+    flags = []
+    for sym in universe:
+        path = PRICE_DIR + f"{sym}.csv"
+        if not os.path.exists(path):
+            continue
+        try:
+            df = pd.read_csv(path, usecols=["Date", "Close", "High", "Volume"], low_memory=False)
+        except ValueError:
+            continue
+        df = df[pd.to_datetime(df["Date"], errors="coerce").notna()]
+        for c in ("Close", "High", "Volume"):
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+        df = df.dropna(subset=["Close"]).sort_values("Date")
+        if len(df) < 260 or str(df["Date"].iloc[-1])[:10] != data_date:
+            continue
+        last, prev = df.iloc[-1], df.iloc[:-1]
+        chg = last["Close"] / prev["Close"].iloc[-1] - 1
+        types = []
+        if chg >= JUMP_PCT:
+            types.append("JUMP")
+        avg_vol = prev["Volume"].tail(20).mean()
+        if chg >= 0.01 and pd.notna(last["Volume"]) and pd.notna(avg_vol) \
+                and avg_vol > 0 and last["Volume"] > SURGE_X * avg_vol:
+            types.append("SURGE")
+        hi52 = prev["High"].tail(252).max()
+        if pd.notna(last["High"]) and pd.notna(hi52) and last["High"] > hi52:
+            types.append("NEWHIGH")
+        if types:
+            flags.append((sym, chg, float(last["Close"]), types))
+
+    if not flags:
+        print(f"[scanner-eod] {data_date}: reconstructed scan — nothing unusual")
+        return
+
+    cutoff, regime, n = topn_cutoff_today()
+    rows, qualifies = [], []
+    for sym, chg, price, types in sorted(flags, key=lambda x: -x[1]):
+        df = core.load_stock(sym)
+        r = core.compute_score(df) if df is not None else None
+        if r is None:
+            tag, score = "chase-risk", None
+        elif r["score"] >= cutoff:
+            tag, score = "QUALIFIES", r["score"]
+        else:
+            tag, score = "ELIGIBLE", r["score"]
+        line = (f"{sym.replace('.NS', ''):12s} {chg:+6.1%}  ₹{price:.2f}  "
+                f"[{','.join(types)}]  [{tag}"
+                + (f" score {score:.1f} vs cutoff {cutoff:.1f}" if score else "") + "]")
+        print(f"[scanner-eod] {line}")
+        if tag == "QUALIFIES":
+            qualifies.append(line)
+        rows.append({"date": data_date, "time": "EOD", "symbol": sym,
+                     "day_change": round(chg, 4), "price": round(price, 2),
+                     "flags": "+".join(types), "verdict": tag,
+                     "score": round(score, 2) if score else "",
+                     "topn_cutoff": round(cutoff, 2), "regime": regime})
+
+    new_file = not os.path.exists(SCANNER_LOG)
+    with open(SCANNER_LOG, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["date", "time", "symbol", "day_change", "price",
+                                          "flags", "verdict", "score", "topn_cutoff", "regime"])
+        if new_file:
+            w.writeheader()
+        for row in rows:
+            w.writerow(row)
+    if qualifies:
+        notify("stock_ai SCANNER (end-of-day catch-up) — strategy-grade movers",
+               "\n".join(q[:100] for q in qualifies[:4]))
+    print(f"[scanner-eod] {len(rows)} flag(s) reconstructed for {data_date}"
+          + (f", {len(qualifies)} QUALIFIES" if qualifies else ""))
+
+
 def report():
     """Shadow evaluation of every logged flag: forward return from the flag
     price to 5 sessions later and to the latest close, vs Nifty over the
@@ -311,5 +406,7 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         report()
+    elif len(sys.argv) > 1 and sys.argv[1] == "eod":
+        eod_catchup()
     else:
         main()

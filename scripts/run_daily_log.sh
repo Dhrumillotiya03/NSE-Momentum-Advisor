@@ -23,6 +23,7 @@ LOG=../data/cron_daily_log.log
     "$PYTHON" download_etf.py
     "$PYTHON" trim_partial.py
     "$PYTHON" data_integrity_check.py || notify-send "stock_ai" "DATA INTEGRITY WARNINGS — check cron_daily_log.log" 2>/dev/null
+    "$PYTHON" market_scanner.py eod
     "$PYTHON" sr_daily_logger.py
     "$PYTHON" sr_dynamic_logger.py
     "$PYTHON" exit_engine.py
