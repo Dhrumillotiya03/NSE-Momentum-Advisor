@@ -40,11 +40,13 @@ stock_ai/
   cannot sell without unpledging, note field on the position), BEL,
   KALYANKJIL, KFINTECH, RELIANCE, VOLTAS, WIPRO, GOLDBEES x9000 (the gold
   sleeve, already ≈15% of book), RCOM (dead write-off, in
-  EXIT_EXCLUDE_SYMBOLS). CASH IS A PLACEHOLDER (0) — user has not supplied
-  the real cash/liquid balance; update state["cash"] when provided. The
-  user runs the system irregularly (not daily) and Zerodha may not be
-  synced — record_fill discipline after each real trade is what keeps the
-  books honest. Pre-reset originals: data/_quarantine/*_pre_cleanup_2026-07-12.*.
+  EXIT_EXCLUDE_SYMBOLS). Cash is 0 by user instruction — the imported book
+  is REFERENCE/monitoring only; user is NOT live-trading through this
+  system yet and will connect real Zerodha usage ONLY IF the agent-sim
+  month (and paper gate) run well. Don't nag about the cash figure. The
+  user runs the system irregularly (not daily) — record_fill discipline
+  after each real trade is what will keep the books honest once live.
+  Pre-reset originals: data/_quarantine/*_pre_cleanup_2026-07-12.*.
 - AGENT-SIM (2026-07-14, agent_sim.py, nightly in run_daily_log.sh): LLM
   trader-persona asks the real ai_assistant for advice against a SANDBOXED
   book copy (data/_agent_sim/, seeded from the real portfolio, sim cash
