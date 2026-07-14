@@ -1,0 +1,8 @@
+[Unit]
+Description=stock_ai daily pipeline (downloads, loggers, paper trader, agent-sim)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/dhrumil/stock_ai/scripts/run_daily_log.sh
+Environment=DISPLAY=:0
+TimeoutStartSec=3600

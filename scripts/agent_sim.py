@@ -180,6 +180,23 @@ def step():
             return
 
     month_end = is_last_trading_day_of_month(pd.Series(index.index))
+
+    # Missed-month-end self-heal: the machine may be off on the actual
+    # month-end evening (user does not run this daily). If a month boundary
+    # passed since the last session and that month's rotation never ran,
+    # run it LATE at today's prices — same as a human catching up a day or
+    # two later. Logged as month_end="late" so the report can see it.
+    if not month_end and os.path.exists(SIM_LOG):
+        prev = pd.read_csv(SIM_LOG)
+        if len(prev):
+            last_dt = pd.Timestamp(prev["date"].iloc[-1])
+            if (last_dt.year, last_dt.month) != (today.year, today.month):
+                prev_month = prev[pd.to_datetime(prev["date"]).dt.month == last_dt.month]
+                if not prev_month["month_end"].astype(str).isin(["True", "late"]).any():
+                    month_end = "late"
+                    print(f"[sim] month boundary passed with no rotation logged — "
+                          f"running LATE month-end at today's prices")
+
     from portfolio_state import load_state as _ls
     fresh_book = not _ls()["positions"]
     if month_end:
@@ -275,7 +292,7 @@ def step():
                             "n_pos": len(state["positions"])},
                ["date", "equity", "cash", "n_pos"])
     append_csv(SIM_LOG, {
-        "date": today_str, "month_end": month_end,
+        "date": today_str, "month_end": str(month_end),
         "advice": advice.replace("\n", " ")[:500],
         "trader_thinking": thinking.replace("\n", " "),
         "orders": json.dumps(orders), "executed": json.dumps(executed),

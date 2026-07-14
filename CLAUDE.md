@@ -210,8 +210,17 @@ stock_ai/
 - `sr_daily_logger.py` logs daily S1/R1 always, S2/R2 only if reach-prob beats the
   empirical base rate (~66%, from sr_reach_table.json). WATCHLIST is a FIXED
   hardcoded validation panel — same stocks every day so sr_monthend_analysis.py
-  measures accuracy on a consistent panel; do NOT make it dynamic. Runs via cron
-  weekdays 6pm (scripts/run_daily_log.sh)
+  measures accuracy on a consistent panel; do NOT make it dynamic. SCHEDULING
+  (fixed 2026-07-14 — the whole evening pipeline was previously ONLY a manual
+  Desktop launcher, never actually cron'd): systemd user timer stockai-daily
+  (~/.config/systemd/user/stockai-daily.{service,timer}) runs
+  scripts/run_daily_log.sh weekdays 18:15 IST with Persistent=true — if the
+  machine was off at 18:15, it fires at next boot; a market-hours guard in the
+  script skips runs during NSE hours (partial-candle pollution). agent_sim
+  self-heals a missed month-end (runs the rotation LATE at today's prices,
+  logged month_end="late"). Fully-off days are simply skipped — sim/paper are
+  idempotent per index date. Manual runs still work (Desktop launcher or
+  ./run_daily_log.sh)
 - `sr_dynamic_logger.py` — SEPARATE dynamic watchlist (holdings + top-10 F&O-gated
   momentum) logging to sr_dynamic_log.csv, for extra forward calibration data on
   deployment-relevant names. Never merge it with the fixed panel above. Analyse via

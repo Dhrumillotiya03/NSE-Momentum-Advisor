@@ -1,0 +1,9 @@
+[Unit]
+Description=Run stock_ai daily pipeline at 18:15 IST weekdays; catch up at next boot if missed
+
+[Timer]
+OnCalendar=Mon..Fri 18:15
+Persistent=true
+
+[Install]
+WantedBy=timers.target

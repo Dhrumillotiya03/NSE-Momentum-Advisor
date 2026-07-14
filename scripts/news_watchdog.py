@@ -68,8 +68,14 @@ Reply with ONLY a JSON object: {{"severity": "HIGH"|"MEDIUM"|"NONE", "reason": "
 
 
 def held_symbols():
+    # Includes the agent-sim's sandbox book: alerts on sim-held names feed
+    # the HUMAN's month-end review (was a loss news-explainable?). They are
+    # NEVER fed to the sim's trader agent — news-driven trading was
+    # backtested and rejected; wiring alerts into the trader would
+    # contaminate the very test the sim runs.
     syms = set()
-    for path in ["../data/portfolio_state.json", "../data/paper_state.json"]:
+    for path in ["../data/portfolio_state.json", "../data/paper_state.json",
+                 "../data/_agent_sim/portfolio_state.json"]:
         if not os.path.exists(path):
             continue
         try:
