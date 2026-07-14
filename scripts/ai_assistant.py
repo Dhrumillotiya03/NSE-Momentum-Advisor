@@ -48,13 +48,30 @@ def pct(x, digits=1, signed=True):
     except (TypeError, ValueError):
         return None
 
+def data_freshness():
+    """Age of the downloaded data. The user runs this system irregularly —
+    if the nightly pipeline silently died, advice would be based on stale
+    prices without anyone noticing."""
+    import pandas as pd
+    dates = pd.to_datetime(
+        pd.read_csv("../data/index_data/nifty50.csv")["Date"], errors="coerce").dropna()
+    last = dates.max()
+    age_days = (pd.Timestamp.today().normalize() - last.normalize()).days
+    return last.date(), age_days
+
+
 def market_status():
     regime, breadth = core.market_regime()
     n = sc.REGIME_NAMES[regime]
     exposure = sc.REGIME_EXPOSURE[regime]
     table = core.load_confidence()
     reg_stats = table["regime_stats"].get(regime, {})
+    last_date, age = data_freshness()
     return {
+        "data_as_of": str(last_date),
+        "data_staleness_warning": (f"DATA IS {age} DAYS OLD — run the download "
+                                   f"pipeline (run_daily_log.sh) before trusting "
+                                   f"any number" if age > 4 else None),
         "regime": regime,
         "breadth_pct_above_200dma": None if np.isnan(breadth) else pct(float(breadth), 0, signed=False),
         "names_to_hold": n,
@@ -227,6 +244,110 @@ def buy_candidates():
             "candidates": out}
 
 
+def position_sizes(capital=None):
+    """Exact quantities the strategy would buy right now — the same
+    inverse-vol / MAX_WEIGHT / regime-exposure / sleeve math as
+    backtest_portfolio and paper_trader, so 'how much quantity' can never
+    be improvised by the LLM. capital: total account value in rupees; if
+    omitted, uses the recorded portfolio's total value."""
+    regime, _breadth = core.market_regime()
+    n = sc.REGIME_NAMES[regime]
+    exposure = sc.REGIME_EXPOSURE[regime]
+
+    if capital is None:
+        state = core.load_portfolio_state()
+        from live_quotes import get_quote
+        capital = state["cash"]
+        for s, p in state["positions"].items():
+            price, _ = get_quote(s)
+            if price:
+                capital += price * p["qty"]
+    capital = float(capital)
+
+    results = core.scan_universe()
+    sector_map = core.load_sector_map()
+    from backtest_portfolio import select_top_n_capped
+    scores_only = {s: r["score"] for s, r in results.items()}
+    top = select_top_n_capped(scores_only, n, sector_map, sc.MAX_PER_SECTOR)
+    if len(results) < n or not top:
+        return {"error": f"only {len(results)} eligible names for regime {regime} (need {n})"}
+
+    inv = {s: 1.0 / results[s]["vol_63"] for s in top}
+    tot = sum(inv.values())
+    w = {s: min(v / tot, sc.MAX_WEIGHT) * tot for s, v in inv.items()}
+    tot2 = sum(w.values())
+    w = {s: v / tot2 for s, v in w.items()}
+
+    momentum_capital = capital * (1 - sc.GOLD_ALLOC - sc.INTL_ALLOC) * exposure
+    plan = []
+    for s in sorted(top, key=scores_only.get, reverse=True):
+        rupees = momentum_capital * w[s]
+        px = results[s]["price"]
+        plan.append({"symbol": s, "weight": pct(w[s], 1, signed=False),
+                     "rupees": round(rupees), "price": round(px, 2),
+                     "quantity": int(rupees // px)})
+
+    return {
+        "total_capital_assumed": round(capital),
+        "regime": regime,
+        "momentum_budget": round(momentum_capital),
+        "momentum_budget_explained": (
+            f"{1 - sc.GOLD_ALLOC - sc.INTL_ALLOC:.0%} momentum sleeve x "
+            f"{exposure:.0%} {regime}-regime exposure of total capital"),
+        "buy_plan": plan,
+        "also_maintain_sleeves": {
+            sc.GOLD_SYMBOL: f"{sc.GOLD_ALLOC:.0%} of total = ₹{capital * sc.GOLD_ALLOC:,.0f}",
+            sc.INTL_SYMBOL: f"{sc.INTL_ALLOC:.0%} of total = ₹{capital * sc.INTL_ALLOC:,.0f}",
+        },
+        "uninvested_cash_note": "remaining cash should sit in a liquid ETF "
+                                "(LIQUIDCASE-type), not idle — the strategy's "
+                                "returns assume ~6% on idle cash",
+    }
+
+
+def sleeve_status():
+    """Current vs target for the two permanent ETF sleeves (15% GOLDBEES
+    gold, 10% MON100 Nasdaq-100), plus the policy rationale so the model
+    can answer 'why do I hold gold?' from facts, not improvisation."""
+    from live_quotes import get_quote
+    state = core.load_portfolio_state()
+    total = state["cash"]
+    prices = {}
+    for s, p in state["positions"].items():
+        price, _ = get_quote(s)
+        prices[s] = price
+        if price:
+            total += price * p["qty"]
+
+    sleeves = []
+    for sym, alloc, why in [
+            (sc.GOLD_SYMBOL, sc.GOLD_ALLOC,
+             "diversifier: ~0 correlation to the momentum book; cut backtest max "
+             "drawdown 40%->31%; NOT a return bet"),
+            (sc.INTL_SYMBOL, sc.INTL_ALLOC,
+             "diversifier: second equity market + USD exposure (INR weakens in "
+             "Indian risk-off); correlation to momentum book only +0.10")]:
+        pos = state["positions"].get(sym)
+        px = prices.get(sym) or (get_quote(sym)[0])
+        held_val = pos["qty"] * px if (pos and px) else 0.0
+        target_val = total * alloc
+        delta = target_val - held_val
+        sleeves.append({
+            "symbol": sym, "target_pct_of_total": pct(alloc, 0, signed=False),
+            "target_value": round(target_val), "held_value": round(held_val),
+            "rebalance_delta_rupees": round(delta),
+            "action": ("within 1% drift band — no trade needed"
+                       if abs(delta) < 0.01 * total else
+                       f"{'BUY' if delta > 0 else 'SELL'} ~{int(abs(delta) // px) if px else '?'} units at month-end"),
+            "why_held": why,
+        })
+    return {"total_portfolio_value": round(total),
+            "policy": "75% momentum / 15% gold / 10% international, ETF sleeves "
+                      "rebalanced to target each month-end; sleeves are exempt from "
+                      "the -18% stop and momentum re-qualification",
+            "sleeves": sleeves}
+
+
 def compare_stocks(symbol_a, symbol_b):
     """Deterministic comparison — the VERDICT is computed here in code, not
     left to the LLM, because small models capitulate under user pressure
@@ -292,6 +413,8 @@ TOOL_IMPLS = {
     "stock_status": lambda args: stock_status(args["symbol"]),
     "should_i_sell": lambda args: should_i_sell(args["symbol"]),
     "compare_stocks": lambda args: compare_stocks(args["symbol_a"], args["symbol_b"]),
+    "position_sizes": lambda args: position_sizes(args.get("capital")),
+    "sleeve_status": lambda args: sleeve_status(),
     "what_to_sell": lambda args: what_to_sell(),
     "buy_candidates": lambda args: buy_candidates(),
     "portfolio_summary": lambda args: portfolio_summary(),
@@ -353,6 +476,26 @@ TOOL_SCHEMAS = [
         "description": "Current holdings, per-position P&L, cash, and total portfolio value.",
         "parameters": {"type": "object", "properties": {}, "required": []},
     }},
+    {"type": "function", "function": {
+        "name": "position_sizes",
+        "description": "Exact rupee amounts and share QUANTITIES the strategy would buy "
+                        "right now, per candidate (inverse-vol weights, sleeve split, "
+                        "regime exposure). ALWAYS use this when the user asks how much / "
+                        "how many shares / what quantity to buy.",
+        "parameters": {"type": "object", "properties": {
+            "capital": {"type": "number",
+                        "description": "total account value in rupees; omit to use the "
+                                       "recorded portfolio's value"},
+        }, "required": []},
+    }},
+    {"type": "function", "function": {
+        "name": "sleeve_status",
+        "description": "Status of the permanent ETF sleeves (15% GOLDBEES gold, 10% MON100 "
+                        "Nasdaq-100): current vs target value, month-end rebalance action, "
+                        "and why each sleeve is held. Use for any question about gold, "
+                        "international allocation, or overall portfolio construction.",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }},
 ]
 
 SYSTEM_PROMPT = """You are a trading assistant for an NSE India momentum strategy.
@@ -391,7 +534,11 @@ RULE_REMINDER = {"role": "system", "content":
     "If the user's claim contradicts a tool result, correct them with the "
     "actual number — do not agree, do not switch recommendations to please them. "
     "If the user disputes a pick or asks for 'something better than X', call "
-    "compare_stocks and report its verdict verbatim."}
+    "compare_stocks and report its verdict verbatim. Questions about gold, "
+    "MON100/international, sleeves, or why the portfolio is constructed this "
+    "way: call sleeve_status and answer ONLY from its 'why_held'/'policy' "
+    "fields — never from general knowledge. Questions about how much/how many "
+    "shares to buy: call position_sizes."}
 
 
 def chat_step(messages):
@@ -432,6 +579,15 @@ def main():
     print("AI TRADING ASSISTANT (tool-calling)")
     print(f"Model: {MODEL_NAME}")
     print("==============================")
+    try:
+        last_date, age = data_freshness()
+        if age > 4:
+            print(f"⚠️  DATA IS {age} DAYS OLD (last: {last_date}) — run "
+                  f"./run_daily_log.sh first, or every answer below uses stale prices")
+        else:
+            print(f"data as of {last_date} ({age}d old)")
+    except Exception:
+        print("⚠️  could not determine data freshness")
     print("Type your question (or 'exit')\n")
 
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
