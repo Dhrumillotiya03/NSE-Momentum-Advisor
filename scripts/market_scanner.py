@@ -246,5 +246,70 @@ def main():
           + (f", {len(qualifies)} QUALIFIES (notified)" if qualifies else ""))
 
 
+def report():
+    """Shadow evaluation of every logged flag: forward return from the flag
+    price to 5 sessions later and to the latest close, vs Nifty over the
+    same window — grouped by verdict. This is how the scanner earns (or
+    loses) a future role as an entry signal: if QUALIFIES flags
+    systematically outperform and chase-risk flags don't, that's the
+    evidence base for designing a walk-forward-testable rule. The flags
+    NEVER feed the agent-sim's trader — the sim tests the strategy; this
+    report tests the scanner, separately."""
+    if not os.path.exists(SCANNER_LOG):
+        print("No scanner flags logged yet.")
+        return
+    log = pd.read_csv(SCANNER_LOG)
+    log = log.drop_duplicates(subset=["date", "symbol"], keep="first")
+
+    idx = pd.read_csv("../data/index_data/nifty50.csv", low_memory=False)
+    idx["Date"] = pd.to_datetime(idx["Date"], errors="coerce")
+    idx["Close"] = pd.to_numeric(idx["Close"], errors="coerce")
+    idx = idx.dropna(subset=["Date", "Close"]).sort_values("Date").set_index("Date")["Close"]
+
+    rows = []
+    for _, f in log.iterrows():
+        path = PRICE_DIR + f["symbol"] + ".csv"
+        if not os.path.exists(path):
+            continue
+        px = pd.read_csv(path, usecols=["Date", "Close"], low_memory=False)
+        px["Date"] = pd.to_datetime(px["Date"], errors="coerce")
+        px["Close"] = pd.to_numeric(px["Close"], errors="coerce")
+        px = px.dropna().sort_values("Date").set_index("Date")["Close"]
+        after = px[px.index > pd.Timestamp(f["date"])]
+        if not len(after):
+            continue
+        r5 = after.iloc[min(4, len(after) - 1)] / f["price"] - 1
+        r_now = after.iloc[-1] / f["price"] - 1
+        ni = idx[idx.index > pd.Timestamp(f["date"])]
+        nifty_now = (ni.iloc[-1] / ni.iloc[0] - 1) if len(ni) > 1 else 0.0
+        rows.append({"verdict": f["verdict"], "symbol": f["symbol"], "date": f["date"],
+                     "flag_px": f["price"], "r5": r5, "r_now": r_now,
+                     "alpha_now": r_now - nifty_now, "n_days": len(after)})
+
+    if not rows:
+        print("Flags logged but no forward sessions yet — re-run in a few days.")
+        return
+    df = pd.DataFrame(rows)
+    print(f"SCANNER SHADOW EVALUATION — {len(df)} unique flags, "
+          f"{log['date'].min()} -> {log['date'].max()}")
+    for verdict in ["QUALIFIES", "ELIGIBLE", "chase-risk"]:
+        g = df[df["verdict"] == verdict]
+        if not len(g):
+            continue
+        print(f"\n  {verdict} ({len(g)} flags): mean +5d {g['r5'].mean():+.1%} | "
+              f"mean since flag {g['r_now'].mean():+.1%} | mean alpha vs Nifty "
+              f"{g['alpha_now'].mean():+.1%} | positive-alpha {(g['alpha_now'] > 0).mean():.0%}")
+        for _, r in g.sort_values("alpha_now", ascending=False).head(5).iterrows():
+            print(f"    {r['date']} {r['symbol'].replace('.NS', ''):12s} "
+                  f"flag ₹{r['flag_px']:.2f} -> now {r['r_now']:+.1%} "
+                  f"(alpha {r['alpha_now']:+.1%}, {r['n_days']}d)")
+    print("\n  (Evaluation matures with time — judge at month-end, not day 3. Promotion")
+    print("   to an entry rule requires walk-forward evidence, not this table alone.)")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "report":
+        report()
+    else:
+        main()
