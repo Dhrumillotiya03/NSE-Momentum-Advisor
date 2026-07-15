@@ -30,6 +30,7 @@ LOG=../data/cron_daily_log.log
     "$PYTHON" paper_trader.py
     "$PYTHON" news_watchdog.py
     "$PYTHON" agent_sim.py
+    "$PYTHON" exit_shadow.py
     "$PYTHON" sim_charts.py
 
     echo "----- done $(date) -----"
