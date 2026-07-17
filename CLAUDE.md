@@ -222,7 +222,13 @@ stock_ai/
   threshold, so ~1-2 crossings are EXPECTED by chance; treated as amber,
   not proof. DO NOT retune to grid winners (that's the curve-fit this
   study detects); a LOOKBACK/VOL_WIN change needs the usual bar (paired
-  block-bootstrap CI + mechanism). CSVs in data/_research/.
+  block-bootstrap CI + mechanism). CSVs in data/_research/. AMBERS
+  RESOLVED same day (research_param_bootstrap.py): LOOKBACK 147 delta is
+  pure noise (Sharpe -0.05, P(better) 37%) — 126 fully cleared; VOL_WIN
+  126 NOT significant on Sharpe (CI [-0.11,+0.48]) so no change, but its
+  CAGR delta CI [+0.2pp,+15.3pp] excludes 0 — the one candidate worth
+  re-testing on FRESH out-of-sample data after the paper/sim months
+  (grid-selected post-hoc, so the bar is higher than the sleeves').
 - STATISTICAL HYGIENE (2026-07-12, research_statistical_hygiene.py): with
   ~128 rebalance periods (~10.7y), Sharpe confidence intervals are WIDE —
   autocorrelation-adjusted (Lo 2002) 95% CI on the current 0.85 point
