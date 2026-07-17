@@ -107,6 +107,16 @@ stock_ai/
 - 3-layer: (1) Nifty50 regime filter Bull/Sideways/Bear (breadth-gated, broad
   universe) (2) momentum scoring on the F&O-gated universe (3) inverse-vol
   position sizing with regime-based exposure.
+- SCORER IS UNIFIED (2026-07-17 audit fix): core.momentum_score is THE one
+  per-name scorer — live (compute_score → advisor/exit_engine/scanner) and
+  both backtest engines all call it. Convention: 50DMA gate + vol_63 windows
+  END YESTERDAY (exclude the evaluation bar) — the validated backtest
+  convention; include-today was walk-forward-tested 2026-07-17 and is NOT
+  better. NEVER re-inline a copy of the scoring block — the two copies
+  drifted once already (live ranked BUYs by a different score than the
+  validated one). confidence_table.py still has its own vectorized vol
+  (rolling 63 incl. today) — tolerated because its output is decile-bucketed
+  win-rate priors, not a ranking; align it if it's ever rebuilt for ranking.
 - Params (all in scripts/strategy_config.py, the single source of truth): 126-day
   lookback, 50-day MA filter, RSI 80 overbought cap (advisory), -18% catastrophic
   stop only (no tight intra-hold exits — validated to cost Sharpe/CAGR by
@@ -307,8 +317,10 @@ stock_ai/
   silently fails on WITHOUT producing NaT — it survives as a literal string in
   the index and can break anything that sorts by date. core.load_stock and
   backtest_portfolio.load_price_matrix now guard against this explicitly
-  (pd.to_datetime(..., errors="coerce") + filter); other CSV loaders in the
-  repo don't yet — if you hit a sort_index TypeError, check for this first
+  (pd.to_datetime(..., errors="coerce") + filter); support_resistance
+  load_stock/load_delivery guarded too (2026-07-17 — the S/R loggers read
+  through them); other CSV loaders in the repo may not be — if you hit a
+  sort_index TypeError, check for this first
 - backtest_portfolio's scoring used to require a valid price at i+HOLD — a
   LOOKAHEAD (peeks 21 days ahead; systematically excludes names that stop
   trading mid-hold). Removed 2026-07-12; was worth ~+0.4pp phantom CAGR.
