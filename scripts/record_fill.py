@@ -8,13 +8,22 @@ exit_engine.py / full_advisor.py print SIGNALS — they never touch the books.
 After executing an order on Zerodha, record it here with the real fill price.
 
 Usage (from scripts/):
-  python record_fill.py buy  SYMBOL QTY PRICE  [--date YYYY-MM-DD] [--reason "..."]
-  python record_fill.py sell SYMBOL PRICE      [--qty N] [--date YYYY-MM-DD] [--reason "..."]
+  python record_fill.py buy    SYMBOL QTY PRICE  [--date YYYY-MM-DD] [--reason "..."]
+  python record_fill.py sell   SYMBOL PRICE      [--qty N] [--date YYYY-MM-DD] [--reason "..."]
+  python record_fill.py adjust SYMBOL FACTOR     [--date YYYY-MM-DD] [--reason "1:5 split"]
   python record_fill.py show
 
 SELL defaults to the full position. Symbols are normalised to .NS
 (aartiind -> AARTIIND.NS). An identical fill (same date/symbol/action/qty/price)
 already in the journal aborts unless --force is given.
+
+ADJUST records a corporate action (split/bonus) on a held position — the books
+have no other way to learn about one, and an unadjusted position makes qty/avg
+wrong AND trips a false -18% STOP alert when the price halves. FACTOR = new
+shares per old share: 1:5 split -> 5; 1:1 bonus -> 2; 3:2 bonus -> 2.5.
+Qty is multiplied by FACTOR, avg entry divided so invested value is unchanged;
+cash untouched; an ADJUST row is journaled (pnl 0). After running, verify qty
+matches the Zerodha holdings page exactly.
 """
 import argparse
 import json
@@ -63,9 +72,12 @@ def already_journaled(date, symbol, action, qty, price):
         return False
     try:
         df = pd.read_csv(JOURNAL_PATH)
-        return bool(((df["date"] == date) & (df["symbol"] == symbol)
-                     & (df["action"] == action) & (df["qty"] == qty)
-                     & (df["price"].round(2) == round(price, 2))).any())
+        mask = ((df["date"] == date) & (df["symbol"] == symbol)
+                & (df["action"] == action)
+                & (df["price"].round(2) == round(price, 2)))
+        if qty is not None:
+            mask &= df["qty"] == qty
+        return bool(mask.any())
     except Exception:
         return False
 
@@ -141,6 +153,35 @@ def do_sell(state, symbol, qty, price, date, reason, force):
     return pnl
 
 
+def do_adjust(state, symbol, factor, date, reason, force):
+    if factor <= 0 or factor == 1:
+        sys.exit(f"ABORT: FACTOR must be positive and != 1, got {factor}. "
+                 f"(1:5 split -> 5, 1:1 bonus -> 2, 3:2 bonus -> 2.5.)")
+    pos = state["positions"].get(symbol)
+    if pos is None:
+        sys.exit(f"ABORT: no open position in {symbol} — nothing to adjust.")
+    if already_journaled(date, symbol, "ADJUST", None, factor) and not force:
+        sys.exit(f"ABORT: an ADJUST for {symbol} with factor {factor} is already "
+                 f"journaled for {date} — use --force only if that is really intended twice.")
+
+    old_qty, old_entry = pos["qty"], pos["entry_price"]
+    new_qty = int(round(old_qty * factor))
+    if new_qty <= 0:
+        sys.exit(f"ABORT: adjusted qty would be {new_qty}.")
+    # preserve invested value exactly, including integer-rounding of qty
+    pos["entry_price"] = old_entry * old_qty / new_qty
+    pos["qty"] = new_qty
+    if pos.get("high_since_entry"):
+        pos["high_since_entry"] = pos["high_since_entry"] * old_qty / new_qty
+    print(f"Corporate action on {symbol}: {old_qty} @ ₹{old_entry:.2f} -> "
+          f"{new_qty} @ ₹{pos['entry_price']:.2f} (factor {factor}, invested value unchanged)")
+    print("   Verify qty against the Zerodha holdings page NOW — they must match exactly.")
+
+    log_trade(symbol, "ADJUST", factor, new_qty, current_regime(), sector_of(symbol),
+              reason or f"corporate action, factor {factor}", pnl=0.0, date=date)
+    return None
+
+
 def main():
     p = argparse.ArgumentParser(description="Record an executed fill into portfolio state + trade journal.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -155,7 +196,12 @@ def main():
     s.add_argument("price", type=float)
     s.add_argument("--qty", type=int, default=None)
 
-    for sp in (b, s):
+    a = sub.add_parser("adjust", help="record a corporate action (split/bonus) on a held position")
+    a.add_argument("symbol")
+    a.add_argument("factor", type=float,
+                   help="new shares per old share: 1:5 split -> 5, 1:1 bonus -> 2")
+
+    for sp in (b, s, a):
         sp.add_argument("--date", default=datetime.today().strftime("%Y-%m-%d"),
                         help="fill date, default today")
         sp.add_argument("--reason", default=None)
@@ -175,8 +221,10 @@ def main():
 
     if args.cmd == "buy":
         do_buy(state, symbol, args.qty, args.price, args.date, args.reason, args.force)
-    else:
+    elif args.cmd == "sell":
         do_sell(state, symbol, args.qty, args.price, args.date, args.reason, args.force)
+    else:
+        do_adjust(state, symbol, args.factor, args.date, args.reason, args.force)
 
     save_state(state)
     print(f"Cash: ₹{state['cash']:,.2f} | Open positions: {len(state['positions'])}")

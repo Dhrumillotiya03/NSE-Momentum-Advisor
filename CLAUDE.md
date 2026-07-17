@@ -274,7 +274,16 @@ stock_ai/
 - Ops/monitoring scripts (all in run_daily_log.sh unless noted):
   `data_integrity_check.py` — nightly scan of all data CSVs for the three
   corruption classes that have actually bitten (bad-Date rows, decimal-shift
-  price glitches, stale series); notify-send on WARN. `news_watchdog.py` —
+  price glitches, stale series); notify-send on WARN. Since 2026-07-17 it
+  also detects CORPORATE ACTIONS on held names (real/paper/sim books):
+  yfinance back-adjusts, so a split rewrites history and the books' qty/avg
+  silently diverge (plus a false -18% STOP alert as the price halves) —
+  detected by snapshotting each held name's close at a reference date
+  (data/held_close_snapshot.json, self-healing on any qty change) and
+  warning if that PAST close later shifts >15%, with the implied factor.
+  Reconcile via `python record_fill.py adjust SYM FACTOR` (factor = new
+  shares per old: 1:5 split -> 5, 1:1 bonus -> 2) — preserves invested
+  value, journals an ADJUST row, never touches cash. `news_watchdog.py` —
   ALERT-ONLY LLM (Ollama qwen2.5:7b, keyword fallback) severity-classifies
   fresh NSE announcements on held names, notify-send on HIGH; it is NOT a
   trading signal and must never be wired into exit_engine/paper_trader

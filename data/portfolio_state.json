@@ -1,4 +1,54 @@
 {
-  "cash": 1000000,
-  "positions": {}
+  "cash": 0.0,
+  "positions": {
+    "AARTIIND.NS": {
+      "qty": 2625,
+      "entry_price": 457.62,
+      "entry_date": "imported-2026-07-14",
+      "note": "PLEDGED on Zerodha - cannot sell without unpledging first"
+    },
+    "BEL.NS": {
+      "qty": 1425,
+      "entry_price": 440.0,
+      "entry_date": "imported-2026-07-14"
+    },
+    "GOLDBEES.NS": {
+      "qty": 9000,
+      "entry_price": 119.43,
+      "entry_date": "imported-2026-07-14",
+      "note": "gold sleeve (target 15% of total)"
+    },
+    "KALYANKJIL.NS": {
+      "qty": 1350,
+      "entry_price": 397.25,
+      "entry_date": "imported-2026-07-14"
+    },
+    "KFINTECH.NS": {
+      "qty": 1150,
+      "entry_price": 924.78,
+      "entry_date": "imported-2026-07-14"
+    },
+    "RELIANCE.NS": {
+      "qty": 500,
+      "entry_price": 1330.0,
+      "entry_date": "imported-2026-07-14"
+    },
+    "RCOM.NS": {
+      "qty": 3500,
+      "entry_price": 10.14,
+      "entry_date": "imported-2026-07-14",
+      "note": "dead/delisted write-off - excluded from all analysis"
+    },
+    "VOLTAS.NS": {
+      "qty": 750,
+      "entry_price": 1360.0,
+      "entry_date": "imported-2026-07-14"
+    },
+    "WIPRO.NS": {
+      "qty": 3000,
+      "entry_price": 192.5,
+      "entry_date": "imported-2026-07-14"
+    }
+  },
+  "cash_note": "cash 0 is DELIBERATE - reference-only book while the sim month runs (user decision 2026-07-17); do not prompt for a real cash figure"
 }
