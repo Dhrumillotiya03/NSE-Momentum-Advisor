@@ -593,8 +593,9 @@ def main():
     elif "--no-gold" in sys.argv:
         engine, label = run_backtest_laggards_only, "laggards_only, momentum sleeve only"
     else:
-        engine, label = run_backtest_gold_blend, (
-            f"laggards_only + {sc.GOLD_ALLOC:.0%} gold + {sc.INTL_ALLOC:.0%} intl (production default)")
+        sleeves = (f" + {sc.GOLD_ALLOC:.0%} gold + {sc.INTL_ALLOC:.0%} intl"
+                   if sc.GOLD_ALLOC + sc.INTL_ALLOC > 0 else ", momentum-only (sleeves disabled)")
+        engine, label = run_backtest_gold_blend, f"laggards_only{sleeves} (production default)"
 
     print("\n==============================")
     print(f"📊 REALISTIC PORTFOLIO BACKTEST  (engine: {label})")

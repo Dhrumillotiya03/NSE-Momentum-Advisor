@@ -128,7 +128,10 @@ CASH_YIELD = 0.06
 # (A low-vol equity sleeve was tested in the same study and NOT adopted:
 # +0.52 correlation to momentum, costs CAGR, and doubles the manual monthly
 # trading workload for a marginal Sharpe gain beyond what gold provides.)
-GOLD_ALLOC = 0.15
+# DISABLED 2026-07-17 by user decision ("no gold/intl sleeve for now") —
+# risk-appetite call, not an evidence reversal; the evidence above stands.
+# Re-enable by restoring 0.15 (all sleeve code paths check alloc > 0).
+GOLD_ALLOC = 0.0
 GOLD_SYMBOL = "GOLDBEES.NS"
 
 # ---- International sleeve (ADOPTED 2026-07-13, research_intl_sleeve.py) ----
@@ -149,7 +152,9 @@ GOLD_SYMBOL = "GOLDBEES.NS"
 # "better" — that is exactly the trap; momentum is the alpha engine and
 # stays >= 70%. Tax: MON100 is non-equity-oriented for tax (LTCG 12.5%
 # only after 24m, STCG slab) — reflected in research_net_returns.
-INTL_ALLOC = 0.10
+# DISABLED 2026-07-17 alongside GOLD_ALLOC (same user decision; evidence
+# stands, restore 0.10 to re-enable).
+INTL_ALLOC = 0.0
 INTL_SYMBOL = "MON100.NS"
 
 # ---- Risk control ----

@@ -144,7 +144,16 @@ stock_ai/
 - REGIME_EXPOSURE boosted 2026-07-12 (user decision after VIX-overlay study's
   control run — a risk-appetite dial, NOT alpha): BULL 1.0 / SIDEWAYS 0.75 /
   BEAR 0.375 / UNKNOWN 0.75 (old values x1.25 capped at 1.0, no leverage).
-- GOLD SLEEVE + IDLE-CASH YIELD (ADOPTED 2026-07-13, research_lowvol_sleeve.py
+- SLEEVES DISABLED 2026-07-17 (user decision — "no gold/intl sleeve for now",
+  a risk-appetite call, NOT an evidence reversal): GOLD_ALLOC=0.0,
+  INTL_ALLOC=0.0 in strategy_config.py. Production is momentum-only again
+  (+ idle-cash yield, which stays). All sleeve code paths remain (they gate
+  on alloc > 0) — restore 0.15/0.10 to re-enable. The evidence below is kept
+  for that day; both sleeves were the only deltas ever to clear 95%
+  significance, and disabling them raises expected MaxDD (33.4% vs 22.6% on
+  current data) — flagged once, user's call.
+- GOLD SLEEVE + IDLE-CASH YIELD (ADOPTED 2026-07-13, DISABLED 2026-07-17 —
+  see above; research_lowvol_sleeve.py
   — see memory gold-sleeve-2026-07): GOLD_ALLOC=0.15 of TOTAL capital in
   GOLDBEES, rebalanced to target each month-end (1% drift band); the
   momentum book runs on the other 85% as its own sub-capital with regime
@@ -161,7 +170,8 @@ stock_ai/
   idle (unexposed) cash accrues a liquid-ETF yield in engines + paper
   trader (+1.57pp CAGR of accounting realism) — OPS MANDATE: real idle cash
   must actually be parked in LIQUIDCASE-type ETF or the backtest overstates.
-- INTERNATIONAL SLEEVE (ADOPTED 2026-07-13, research_intl_sleeve.py):
+- INTERNATIONAL SLEEVE (ADOPTED 2026-07-13, DISABLED 2026-07-17 — see above;
+  research_intl_sleeve.py):
   INTL_ALLOC=0.10 in MON100 (Nasdaq-100 INR ETF), same construction and
   evidence bar as gold — production is now a 75/15/10 three-sleeve book
   (momentum/gold/intl). Corr to momentum +0.10; Sharpe delta vs the 85/15
@@ -176,17 +186,15 @@ stock_ai/
   reversal does NOT hold for this NSE setup; recent-month strength is
   signal here. Engine's skip_days param stays 0 in production.
 - Current backtest (F&O-gated universe, SIDEWAYS=3, BEAR=4, boosted
-  exposure, THREE-SLEEVE engine — run_backtest_gold_blend [name kept for
-  compat, now blends gold+intl] is the production default in
-  backtest_portfolio.main()/walk_forward.py, full 2015-2026 history):
-  19.88% CAGR, Sharpe 1.21, max DD 24.8%. Walk-forward (19 overlapping 3y
-  windows): mean CAGR 24.8%, median 23.5%, mean Sharpe 1.48, worst window
-  DD 23.5%, 0/19 negative windows (first config with none). Momentum
-  sleeve alone (--no-gold / --engine laggards_only): 18.71%/0.90/37.9%
-  (includes cash yield). Post-tax net ≈ 16.8% CAGR
-  (research_net_returns.py, extended 2026-07-13 for per-sleeve tax:
-  momentum 20% STCG FY-netted, gold/intl 12.5% — disclosed conservative
-  approximations). Legacy hard-close engine (run_backtest /
+  exposure, MOMENTUM-ONLY — sleeves disabled 2026-07-17, so the production
+  default run_backtest_gold_blend degenerates to laggards_only + cash
+  yield; data as of 2026-07-17): 21.79% CAGR, Sharpe 1.01, max DD 33.4%.
+  Walk-forward (19 overlapping 3y windows): mean CAGR 26.9%, median 25.8%,
+  mean Sharpe 1.18, worst window DD 29.2%, 2/19 negative windows. For
+  comparison the three-sleeve config on the SAME data: 22.22%/1.32/22.6%,
+  0/19 negative windows — the sleeves' loss shows up in DD/consistency,
+  not CAGR. Post-tax net ≈ momentum 20% STCG FY-netted
+  (research_net_returns.py). Legacy hard-close engine (run_backtest /
   --engine hard_close) kept for comparison. Trust the walk-forward
   distribution (python walk_forward.py), not any single backtest run — see
   memory feedback-quant-researcher-role for why.
@@ -316,6 +324,21 @@ stock_ai/
   migration were filled in from general knowledge, not verified against a live
   authoritative source — good enough for the diversification cap, worth a manual
   skim eventually
+- trim_partial.py only cleans price CSVs at pipeline time — ANY later download
+  during market hours (a parallel research session, an ad-hoc script) re-writes
+  today's PARTIAL candle into price_data (caught live 2026-07-15: 46 files
+  re-polluted minutes after the pipeline trimmed 416). S/R loggers defend
+  themselves (sr_daily_logger.drop_partial_candle) and stamp rows with the
+  DATA date, not the run date (a mid-market run's data ends at yesterday's
+  close — wall-clock stamping double-logged the same snapshot under two dates).
+  Other consumers (exit_engine, paper_trader, agent_sim) trust file state — if
+  a mid-market number looks off, check the CSV's last row for today's date first
+- A machine booted with a stale clock (NTP syncs mid-run) can leave systemd
+  timer LAST-run stamps in the FUTURE — the next scheduled firing is then
+  silently skipped (happened 2026-07-15: daily timer stamped 19:26 IST by a
+  13:30 boot run, so the real 18:15 run never fired). If an evening run seems
+  missing, `systemctl --user list-timers` and compare LAST against wall clock;
+  `systemctl --user start stockai-daily.service` runs it manually
 
 ## My preferences
 - Direct, no filler. Exact file names + line numbers, not vague descriptions.
