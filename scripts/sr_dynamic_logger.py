@@ -17,10 +17,9 @@ once enough history accrues).
 Run once daily after download_data.py (wired into run_daily_log.sh).
 """
 import os, sys
-from datetime import datetime
 import pandas as pd
 
-from sr_daily_logger import log_stock, COLUMNS
+from sr_daily_logger import log_stock, merge_log, COLUMNS
 from portfolio_state import load_state
 import strategy_config as sc
 from core import scan_universe
@@ -52,9 +51,8 @@ def build_watchlist():
 
 def main():
     symbols = build_watchlist()
-    today = datetime.now().strftime("%Y-%m-%d")
 
-    print(f"\n[dynamic] Logging S/R snapshot for {len(symbols)} stocks — {today}")
+    print(f"\n[dynamic] Logging S/R snapshot for {len(symbols)} stocks")
     print("─" * 50)
 
     rows = []
@@ -62,24 +60,14 @@ def main():
         row = log_stock(sym)
         if row:
             rows.append(row)
-            print(f"  ✅ {row['Symbol']:<14} CMP ₹{row['CMP']}")
+            print(f"  ✅ {row['Symbol']:<14} {row['Date']}  CMP ₹{row['CMP']}")
 
     if not rows:
         print("Nothing logged.")
         return
 
     new_df = pd.DataFrame(rows, columns=COLUMNS)
-
-    if os.path.exists(LOG_PATH):
-        existing = pd.read_csv(LOG_PATH)
-        existing = existing[
-            ~((existing["Date"] == today) & (existing["Symbol"].isin(new_df["Symbol"])))
-        ]
-        combined = pd.concat([existing, new_df], ignore_index=True)
-    else:
-        combined = new_df
-
-    combined = combined.sort_values(["Symbol", "Date"])
+    combined = merge_log(new_df, LOG_PATH)
     combined.to_csv(LOG_PATH, index=False)
 
     print("─" * 50)

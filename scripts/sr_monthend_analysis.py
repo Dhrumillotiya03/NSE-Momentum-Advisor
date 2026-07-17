@@ -82,6 +82,7 @@ def analyse_hit_rates(log_df):
 
     results = []
     price_cache = {}
+    adjusted_skips = {}
 
     for _, row in log_df.iterrows():
         sym = row["Symbol"]
@@ -92,45 +93,92 @@ def analyse_hit_rates(log_df):
             continue
 
         log_date = row["Date"]
+        fwd_days = min(len(pdf[pdf.index > log_date]), 21)
+
+        # Corporate-action guard: the logged CMP is the close of log_date. If
+        # the CSV's close for that same date has since shifted materially,
+        # yfinance back-adjusted the series after we logged (split/bonus) —
+        # every logged level is in pre-adjustment price terms and would score
+        # garbage against the adjusted forward bars. Skip those rows. (Same
+        # >15% threshold as data_integrity_check's held-name detector, which
+        # does NOT cover panel names nobody holds — this guard is S/R's own.)
+        if pd.notna(row.get("CMP")) and log_date in pdf.index:
+            ref = float(pdf.loc[log_date, "Close"])
+            if ref > 0 and not 0.85 < float(row["CMP"]) / ref < 1.15:
+                adjusted_skips[sym] = float(row["CMP"]) / ref
+                continue
 
         if pd.notna(row.get("S1")):
             hit = check_touch(pdf, log_date, row["S1"], "down")
             if hit is not None:
-                results.append(("S1", sym, row["S1_prob"], row["S1_n"], hit))
+                results.append(("S1", sym, row["S1_prob"], row["S1_n"], hit, fwd_days))
 
         if pd.notna(row.get("R1")):
             hit = check_touch(pdf, log_date, row["R1"], "up")
             if hit is not None:
-                results.append(("R1", sym, row["R1_prob"], row["R1_n"], hit))
+                results.append(("R1", sym, row["R1_prob"], row["R1_n"], hit, fwd_days))
 
         if pd.notna(row.get("S2")):
             hit = check_touch(pdf, log_date, row["S2"], "down")
             if hit is not None:
-                results.append(("S2", sym, row["S2_prob"], row["S2_n"], hit))
+                results.append(("S2", sym, row["S2_prob"], row["S2_n"], hit, fwd_days))
 
         if pd.notna(row.get("R2")):
             hit = check_touch(pdf, log_date, row["R2"], "up")
             if hit is not None:
-                results.append(("R2", sym, row["R2_prob"], row["R2_n"], hit))
+                results.append(("R2", sym, row["R2_prob"], row["R2_n"], hit, fwd_days))
+
+    if adjusted_skips:
+        print("  ⚠️  Skipped symbols whose price history was back-adjusted AFTER "
+              "logging (split/bonus — logged levels are in pre-adjustment terms):")
+        for s, r in sorted(adjusted_skips.items()):
+            print(f"      {s}: logged CMP is {r:.2f}x the CSV's close on the log date")
 
     if not results:
         print("  Not enough time has passed since logging to evaluate any touches yet.")
         print("  (Need at least ~5 trading days after a log date to check.)")
-        return pd.DataFrame(columns=["Level", "Symbol", "Prob", "N", "Hit"])
+        return pd.DataFrame(columns=["Level", "Symbol", "Prob", "N", "Hit", "FwdDays"])
 
-    res_df = pd.DataFrame(results, columns=["Level", "Symbol", "Prob", "N", "Hit"])
+    res_df = pd.DataFrame(results, columns=["Level", "Symbol", "Prob", "N", "Hit", "FwdDays"])
+
+    # A snapshot's 21d window is only RESOLVED once 21 forward bars exist (or
+    # the level was already hit). Truncated windows can only under-count hits
+    # — a miss-so-far may still hit tomorrow — so reporting them as misses
+    # deflates the rate. Split the two so early runs can't mislead.
+    resolved = res_df[(res_df["FwdDays"] >= 21) | res_df["Hit"]]
 
     for lvl in ["S1", "R1", "S2", "R2"]:
         sub = res_df[res_df["Level"] == lvl]
         if len(sub) == 0:
             continue
-        hit_rate = sub["Hit"].mean() * 100
-        print(f"  {lvl}: {hit_rate:.1f}% hit rate  (n={len(sub)} snapshots)")
+        rsub = resolved[resolved["Level"] == lvl]
+        line = f"  {lvl}: "
+        if len(rsub):
+            line += f"{rsub['Hit'].mean()*100:.1f}% hit rate  (n={len(rsub)} resolved)"
+        else:
+            line += "no resolved snapshots yet"
+        pending = len(sub) - len(rsub)
+        if pending:
+            line += f"  [{pending} truncated window(s) still open — not counted as misses]"
+        print(line)
 
-    overall = res_df["Hit"].mean() * 100
-    print(f"\n  Overall hit rate: {overall:.1f}%  (n={len(res_df)})")
+    if len(resolved):
+        print(f"\n  Overall hit rate: {resolved['Hit'].mean()*100:.1f}%  "
+              f"(n={len(resolved)} resolved of {len(res_df)} total)")
+    avg_fwd = res_df["FwdDays"].mean()
+    if avg_fwd < 21 and len(res_df) > len(resolved):
+        # Resolved-only is biased HIGH early (only hits resolve before day 21);
+        # counting every open window as a miss is the LOW extreme. Truth lands
+        # between the two once windows fill out.
+        lo = res_df["Hit"].mean() * 100
+        hi = resolved["Hit"].mean() * 100 if len(resolved) else float("nan")
+        print(f"  ⚠️  Avg forward window is only {avg_fwd:.1f}/21 trading days. "
+              f"Final hit rate will land between {lo:.0f}% (every open window "
+              f"misses) and {hi:.0f}% (current resolved) — don't judge v2 yet.")
 
-    return res_df
+    # Downstream sections (calibration, n-sensitivity, distance) get only
+    # resolved outcomes — truncated not-yet-misses would bias them low too.
+    return resolved
 
 
 # ──────────────────────────────────────────────

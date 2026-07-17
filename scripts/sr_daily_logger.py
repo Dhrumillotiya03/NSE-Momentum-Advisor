@@ -40,10 +40,27 @@ COLUMNS = [
 ]
 
 
+def drop_partial_candle(df):
+    """Consumer-side twin of trim_partial.py: if the last row is TODAY and the
+    session hasn't closed (weekday before 16:00 IST), it is a partial candle —
+    drop it. trim_partial cleans the CSVs in the pipeline, but other processes
+    (parallel research scripts, ad-hoc downloads) can re-write partial rows
+    into price_data at any time, so the logger must not trust file state."""
+    now = datetime.now()
+    if now.weekday() <= 4 and now.hour < 16 and \
+            df.index[-1].date() == now.date():
+        return df.iloc[:-1]
+    return df
+
+
 def log_stock(sym):
     df = load_stock(sym)
     if df is None or len(df) < 60:
         print(f"  ⚠️  {sym}: no data, skipped")
+        return None
+    df = drop_partial_candle(df)
+    if len(df) < 60:
+        print(f"  ⚠️  {sym}: no completed data, skipped")
         return None
 
     cur        = float(df["Close"].iloc[-1])
@@ -72,7 +89,13 @@ def log_stock(sym):
 
     return {
         "Symbol":  sym.replace(".NS", ""),
-        "Date":    datetime.now().strftime("%Y-%m-%d"),
+        # Stamp the DATA date (last completed candle), not the wall-clock date:
+        # the pipeline may run at any hour (boot-time catch-up), and after
+        # trim_partial a mid-market run's data still ends at yesterday's close.
+        # Wall-clock stamping logged that same snapshot under a second date,
+        # double-counting it and shifting its forward window in
+        # sr_monthend_analysis. Data-date stamping makes runs idempotent.
+        "Date":    df.index[-1].strftime("%Y-%m-%d"),
         "CMP":     round(cur, 2),
         "S1":      s1, "S1_prob": s1_prob, "S1_n": s1_n,
         "R1":      r1, "R1_prob": r1_prob, "R1_n": r1_n,
@@ -81,11 +104,24 @@ def log_stock(sym):
     }
 
 
+def merge_log(new_df, log_path):
+    """Replace existing rows matching new_df's (Date, Symbol) pairs, keep the rest.
+    Rows carry per-symbol DATA dates, so dedupe must be pair-wise, not run-date."""
+    if os.path.exists(log_path):
+        existing = pd.read_csv(log_path)
+        pairs = set(zip(new_df["Date"], new_df["Symbol"]))
+        keep = [(d, s) not in pairs
+                for d, s in zip(existing["Date"], existing["Symbol"])]
+        combined = pd.concat([existing[keep], new_df], ignore_index=True)
+    else:
+        combined = new_df
+    return combined.sort_values(["Symbol", "Date"])
+
+
 def main():
     symbols = sys.argv[1:] if len(sys.argv) > 1 else WATCHLIST
-    today   = datetime.now().strftime("%Y-%m-%d")
 
-    print(f"\nLogging S/R snapshot for {len(symbols)} stocks — {today}")
+    print(f"\nLogging S/R snapshot for {len(symbols)} stocks")
     print("─" * 50)
 
     rows = []
@@ -96,24 +132,14 @@ def main():
         row = log_stock(sym)
         if row:
             rows.append(row)
-            print(f"  ✅ {row['Symbol']:<14} CMP ₹{row['CMP']}")
+            print(f"  ✅ {row['Symbol']:<14} {row['Date']}  CMP ₹{row['CMP']}")
 
     if not rows:
         print("Nothing logged.")
         return
 
     new_df = pd.DataFrame(rows, columns=COLUMNS)
-
-    if os.path.exists(LOG_PATH):
-        existing = pd.read_csv(LOG_PATH)
-        existing = existing[
-            ~((existing["Date"] == today) & (existing["Symbol"].isin(new_df["Symbol"])))
-        ]
-        combined = pd.concat([existing, new_df], ignore_index=True)
-    else:
-        combined = new_df
-
-    combined = combined.sort_values(["Symbol", "Date"])
+    combined = merge_log(new_df, LOG_PATH)
     combined.to_csv(LOG_PATH, index=False)
 
     print("─" * 50)
