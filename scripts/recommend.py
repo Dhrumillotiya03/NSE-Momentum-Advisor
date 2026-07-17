@@ -10,7 +10,7 @@ Answers "which stock should I buy, and when" using:
     forward return for stocks scoring in the same decile, AND conditioned on the
     current regime. This is a descriptive base rate, not a promise — no single
     trade is likely to be much better than a coin flip tilted slightly in your
-    favor (historical top-decile win rate ~57-60%), and this tool says so plainly
+    favor (historical top-decile win rate ~56%), and this tool says so plainly
     rather than manufacturing false confidence.
 
 Usage:

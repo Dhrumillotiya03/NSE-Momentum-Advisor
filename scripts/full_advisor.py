@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 
 import yaml
-from core import load_stock, market_regime as _core_market_regime, compute_atr, SECTOR_FILE, liquid_universe
+from core import load_stock, market_regime as _core_market_regime, compute_atr, compute_rsi, SECTOR_FILE, liquid_universe
 from support_resistance import get_levels, strength_label
 with open("../config.yaml") as f:
     cfg = yaml.safe_load(f)
@@ -127,14 +127,6 @@ def position_size(price, atr):
     stop = price - stop_dist
 
     return shares, value, stop
-
-def compute_rsi(close, period=14):
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(period).mean()
-    loss = -delta.clip(upper=0).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs)).iloc[-1]
-
 
 # ---------- MAIN REPORT ----------
 

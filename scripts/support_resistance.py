@@ -20,7 +20,12 @@ def load_stock(symbol):
         # enter the tradable top-200 and could get bought by the strategy.
         path = os.path.join(ETF_DIR, f"{symbol}.csv")
         if not os.path.exists(path): return None
-    df = pd.read_csv(path, parse_dates=["Date"])
+    df = pd.read_csv(path)
+    # Same guard as core.load_stock: a truncated download can leave a
+    # malformed last row whose Date survives as a literal string (not NaT)
+    # and breaks date sorting downstream (see CLAUDE.md gotcha, SUNDARMFIN).
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df[df["Date"].notna()]
     df = df.sort_values("Date").set_index("Date")
     for col in ["Open", "Close", "High", "Low"]:
         if col in df.columns:
@@ -33,7 +38,9 @@ def load_stock(symbol):
 def load_delivery(symbol):
     path = os.path.join(DELIVERY_DIR, f"{symbol}.csv")
     if not os.path.exists(path): return None
-    df = pd.read_csv(path, parse_dates=["Date"])
+    df = pd.read_csv(path)
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
+    df = df[df["Date"].notna()]
     df = df.sort_values("Date").set_index("Date")
     df["DelivQty"] = pd.to_numeric(df["DelivQty"], errors="coerce").fillna(0)
     df["DelivPer"] = pd.to_numeric(df["DelivPer"], errors="coerce").fillna(0)

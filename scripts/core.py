@@ -114,48 +114,72 @@ current_regime = market_regime   # alias for callers migrated from recommend.py
 
 # ---------- Scoring ----------
 
-def compute_score(df):
-    """Returns dict(score, ret_6m, ret_3m, vol_63, rsi, price) or None if ineligible.
+def momentum_score(close, skip_days=0):
+    """THE canonical per-name scorer — single implementation shared by the
+    live path (compute_score → advisor/exit_engine/scanner) and both backtest
+    engines (backtest_portfolio.run_backtest / run_backtest_laggards_only).
+    Extracted 2026-07-17: the two hand-maintained copies had DRIFTED (live
+    included today's bar in the 50DMA gate and used 63 returns incl. today
+    for vol; backtest excluded today for both), so live BUYs were ranked by
+    a different score than the validated one.
 
-    Eligibility: positive 6m AND 3m momentum, price above 50DMA.
-    Score = ret_126 / vol_63 (validated walk-forward vs the abandoned 5-factor
-    blend and vs price-only ML — see memory ml-does-not-beat-heuristic).
+    Convention (canonical = the backtest's, the validated reference):
+    close.iloc[-1] is the evaluation bar ("now"); momentum legs end at now
+    (ret_126, ret_63); the 50DMA gate and vol_63 denominator windows END
+    YESTERDAY (exclude the evaluation bar). Eligibility: positive 6m AND 3m
+    momentum, price above 50DMA. Score = ret_126 / vol_63 (validated
+    walk-forward vs the abandoned 5-factor blend and vs price-only ML — see
+    memory ml-does-not-beat-heuristic).
+
+    skip_days: research-only 12-2 construction (rejected for production,
+    research_skip_month.py) — momentum legs end at -1-skip_days instead.
+    Returns dict(score, ret_6m, ret_3m, vol_63) or None if ineligible.
     """
-    close = df["Close"]
     if len(close) < LOOKBACK + 1:
         return None
-
-    ret_6m = close.iloc[-1] / close.iloc[-LOOKBACK - 1] - 1
-    ret_3m = close.iloc[-1] / close.iloc[-64] - 1 if len(close) > 64 else np.nan
-
-    if np.isnan(ret_6m) or np.isnan(ret_3m):
+    price_now = close.iloc[-1]
+    price_past = close.iloc[-1 - LOOKBACK]
+    if pd.isna(price_now) or pd.isna(price_past) or price_past == 0:
         return None
+    price_ref = price_now
+    if skip_days:
+        price_ref = close.iloc[-1 - skip_days]
+        if pd.isna(price_ref) or price_ref <= 0:
+            return None
+    ret_6m = price_ref / price_past - 1
+
+    price_3m = close.iloc[-64]
+    if pd.isna(price_3m) or price_3m == 0:
+        return None
+    ret_3m = price_ref / price_3m - 1
     if ret_6m <= 0 or ret_3m <= 0:
         return None
 
-    ma50 = close.rolling(50).mean().iloc[-1]
-    if np.isnan(ma50) or close.iloc[-1] < ma50:
+    ma50 = close.iloc[-51:-1].mean()
+    if pd.isna(ma50) or price_now < ma50:
         return None
 
-    window = close.pct_change(fill_method=None).tail(VOL_WIN).dropna()
+    window = close.iloc[-64:-1].pct_change(fill_method=None).dropna()
     if len(window) < 40:
         return None
     vol = window.std()
     if vol == 0 or np.isnan(vol):
         return None
 
-    score = ret_6m / vol
+    return {"score": ret_6m / vol, "ret_6m": ret_6m, "ret_3m": ret_3m,
+            "vol_63": vol}
 
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, np.nan)
-    rsi = (100 - 100 / (1 + rs)).iloc[-1]
 
-    return {
-        "score": score, "ret_6m": ret_6m, "ret_3m": ret_3m,
-        "vol_63": vol, "rsi": rsi, "price": close.iloc[-1],
-    }
+def compute_score(df):
+    """Live wrapper around momentum_score: adds advisory RSI + last price.
+    Returns dict(score, ret_6m, ret_3m, vol_63, rsi, price) or None."""
+    close = df["Close"]
+    r = momentum_score(close)
+    if r is None:
+        return None
+    r["rsi"] = compute_rsi(close)
+    r["price"] = close.iloc[-1]
+    return r
 
 
 def compute_rsi(close, period=14):

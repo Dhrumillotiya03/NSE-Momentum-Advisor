@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 import strategy_config as sc
+from core import compute_rsi
 
 SIM_STATE = "../data/_agent_sim/portfolio_state.json"
 SIM_JOURNAL = "../data/_agent_sim/trade_history.csv"
@@ -49,11 +50,8 @@ BIG_GAIN = 0.10
 
 
 def rsi14(close):
-    delta = close.diff()
-    up = delta.clip(lower=0).rolling(14).mean()
-    down = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = up / down.replace(0, np.nan)
-    return float((100 - 100 / (1 + rs)).iloc[-1])
+    # consolidated to the single canonical RSI (core.compute_rsi) 2026-07-17
+    return float(compute_rsi(close))
 
 
 def latest_r1():

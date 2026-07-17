@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 
 import strategy_config as sc
+from core import momentum_score
 
 DATA_DIR    = "../data/price_data/"
 INDEX_PATH  = "../data/index_data/nifty50.csv"
@@ -246,45 +247,17 @@ def run_backtest(matrix, index, turnover_matrix=None, exposure_fn=None):
         vols   = {}
 
         for sym in gated_symbols:
-
-            # Need valid price now and LOOKBACK ago. (An older version also
-            # required a valid price at i+HOLD — a LOOKAHEAD: it peeked 21
-            # days into the future and silently excluded names that stop
-            # trading mid-hold, i.e. exactly the delisting/suspension
-            # blow-ups. Removing it costs ~0.4pp CAGR on the survivor panel
-            # — that was phantom return. See research_survivorship.py.)
-            price_now  = matrix[sym].iloc[i]
-            price_past = matrix[sym].iloc[i - LOOKBACK]
-
-            if pd.isna(price_now) or pd.isna(price_past):
+            # Per-name score routes through the ONE canonical scorer shared
+            # with the live path (core.momentum_score) — never re-inline it,
+            # the two copies drifted once already (2026-07-17 unification).
+            # (An older inline version also required a valid price at i+HOLD
+            # — a LOOKAHEAD worth ~0.4pp phantom CAGR, removed 2026-07-12;
+            # see research_survivorship.py.)
+            r = momentum_score(matrix[sym].iloc[:i + 1])
+            if r is None:
                 continue
-            if price_past == 0:
-                continue
-
-            ret = price_now / price_past - 1
-
-            # Both 3m and 6m momentum must be positive — filters spike-and-crash stocks
-            price_3m = matrix[sym].iloc[i - 63]
-            if pd.isna(price_3m) or price_3m == 0:
-                continue
-            ret_3m = price_now / price_3m - 1
-            if ret <= 0 or ret_3m <= 0:
-                continue
-
-            # Must be above 20-day MA — confirms uptrend
-            ma50 = matrix[sym].iloc[i - 50:i].mean()
-            if pd.isna(ma50) or price_now < ma50:
-                continue
-
-            window = matrix[sym].iloc[i - 63:i].pct_change(fill_method=None).dropna()
-            if len(window) < 40:
-                continue
-            vol = window.std()
-            if vol == 0 or np.isnan(vol):
-                continue
-
-            scores[sym] = ret / vol
-            vols[sym]   = vol
+            scores[sym] = r["score"]
+            vols[sym]   = r["vol_63"]
 
         # ---- Regime-based sizing (from strategy_config) ----
         n   = sc.REGIME_NAMES[regime]
@@ -381,33 +354,12 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
 
         scores, vols = {}, {}
         for sym in gated_symbols:
-            price_now = matrix[sym].iloc[i]
-            price_past = matrix[sym].iloc[i - LOOKBACK]
-            if pd.isna(price_now) or pd.isna(price_past) or price_past == 0:
+            # Canonical shared scorer — see the comment in run_backtest.
+            r = momentum_score(matrix[sym].iloc[:i + 1], skip_days=skip_days)
+            if r is None:
                 continue
-            price_ref = price_now
-            if skip_days:
-                price_ref = matrix[sym].iloc[i - skip_days]
-                if pd.isna(price_ref) or price_ref <= 0:
-                    continue
-            ret = price_ref / price_past - 1
-            price_3m = matrix[sym].iloc[i - 63]
-            if pd.isna(price_3m) or price_3m == 0:
-                continue
-            ret_3m = price_ref / price_3m - 1
-            if ret <= 0 or ret_3m <= 0:
-                continue
-            ma50 = matrix[sym].iloc[i - 50:i].mean()
-            if pd.isna(ma50) or price_now < ma50:
-                continue
-            window = matrix[sym].iloc[i - 63:i].pct_change(fill_method=None).dropna()
-            if len(window) < 40:
-                continue
-            vol = window.std()
-            if vol == 0 or np.isnan(vol):
-                continue
-            scores[sym] = ret / vol
-            vols[sym] = vol
+            scores[sym] = r["score"]
+            vols[sym] = r["vol_63"]
 
         n = sc.REGIME_NAMES[regime]
         exp = sc.REGIME_EXPOSURE[regime]
