@@ -1,10 +1,22 @@
 import json
+import os
+import sys
+
 import pandas as pd
 import numpy as np
 
 import yaml
 from core import load_stock, market_regime as _core_market_regime, compute_atr, compute_rsi, SECTOR_FILE, liquid_universe
 from support_resistance import get_levels, strength_label
+
+# Advisory-call ledger: every BUY recommendation this advisor emits is
+# appended here (deduped per data-date+symbol) so call quality is
+# MEASURABLE — python call_report.py scores fills/targets/stops forward.
+# Rows are stamped with the DATA date (each symbol's last completed candle),
+# not the run date, per the partial-candle convention (see CLAUDE.md).
+CALLS_LOG = "../data/advisor_calls_log.csv"
+CALL_COLUMNS = ["date", "symbol", "sector", "regime", "rank", "alpha",
+                "price", "buy_at", "target", "stop", "rr", "s_str", "r_str"]
 with open("../config.yaml") as f:
     cfg = yaml.safe_load(f)
 CAPITAL = cfg["capital"]
@@ -128,9 +140,12 @@ def position_size(price, atr):
 
     return shares, value, stop
 
-# ---------- MAIN REPORT ----------
+# ---------- BUY SCAN ----------
 
-def main():
+def compute_buy_calls():
+    """The advisor's full buy pipeline (regime -> top-3 sectors -> gated
+    momentum + S/R levels). Returns (regime, top_sectors, buy_list) where
+    buy_list is a list of dicts sorted by alpha descending."""
     regime = market_regime()
     sectors = load_sectors()
 
@@ -144,18 +159,9 @@ def main():
 
     sec_scores = sector_scores(sectors)
     ranked_sec = sorted(sec_scores.items(), key=lambda x: x[1], reverse=True)
-
     top_sectors = [s[0] for s in ranked_sec[:3]]
 
-    print("\n==============================")
-    print("📊 AI STOCK ADVISOR REPORT")
-    print("==============================")
-
-    print("\nMarket Regime:", regime)
-    print("Top Sectors:", ", ".join(top_sectors))
-
     buy_list = []
-
     for sector, symbols in sectors.items():
         if sector not in top_sectors:
             continue
@@ -165,7 +171,6 @@ def main():
             if df is None:
                 continue
 
-
             alpha = compute_alpha(df)
             if alpha is None or alpha <= 0:
                 continue
@@ -174,10 +179,8 @@ def main():
 
             price = df["Close"].iloc[-1]
             atr = compute_atr(df)
-
             if np.isnan(atr) or atr == 0:
                 continue
-
 
             shares, value, stop_atr = position_size(price, atr)
             entry, stop, target, support, resistance, rr, s_str, r_str = get_trade_levels(df, atr)
@@ -192,11 +195,64 @@ def main():
             if dist_to_support > 0.06:
                 continue
 
-            buy_list.append((sym, alpha, price, shares, value, stop, target, support, resistance, rr, s_str, r_str))
+            buy_list.append({
+                "symbol": sym, "sector": sector, "alpha": alpha,
+                "price": float(price), "shares": shares, "value": value,
+                "buy_at": support, "target": resistance, "stop": stop,
+                "rr": rr, "s_str": s_str, "r_str": r_str,
+                "date": str(df.index[-1].date()),
+            })
 
-    buy_list.sort(key=lambda x: x[1], reverse=True)
+    buy_list.sort(key=lambda x: x["alpha"], reverse=True)
+    return regime, top_sectors, buy_list
 
-    from trade_journal import log_trade
+
+def log_calls(regime, buy_list, top_n=8):
+    """Append today's top-N calls to the ledger, deduped per (date, symbol)."""
+    calls = buy_list[:top_n]
+    if not calls:
+        return 0
+    existing = set()
+    if os.path.exists(CALLS_LOG):
+        try:
+            prev = pd.read_csv(CALLS_LOG, usecols=["date", "symbol"])
+            existing = set(zip(prev["date"].astype(str), prev["symbol"]))
+        except Exception:
+            pass
+    rows = []
+    for rank, c in enumerate(calls, 1):
+        if (c["date"], c["symbol"]) in existing:
+            continue
+        rows.append({"date": c["date"], "symbol": c["symbol"],
+                     "sector": c["sector"], "regime": regime, "rank": rank,
+                     "alpha": round(c["alpha"], 4), "price": round(c["price"], 2),
+                     "buy_at": round(c["buy_at"], 2), "target": round(c["target"], 2),
+                     "stop": round(c["stop"], 2), "rr": c["rr"],
+                     "s_str": c["s_str"], "r_str": c["r_str"]})
+    if rows:
+        pd.DataFrame(rows, columns=CALL_COLUMNS).to_csv(
+            CALLS_LOG, mode="a", header=not os.path.exists(CALLS_LOG), index=False)
+    return len(rows)
+
+
+# ---------- MAIN REPORT ----------
+
+def main():
+    quiet = "--log" in sys.argv    # nightly pipeline mode: ledger + one line
+    regime, top_sectors, buy_list = compute_buy_calls()
+    n_logged = log_calls(regime, buy_list)
+
+    if quiet:
+        print(f"advisor calls: {len(buy_list[:8])} live, {n_logged} newly logged "
+              f"({regime}, sectors: {', '.join(top_sectors)})")
+        return
+
+    print("\n==============================")
+    print("📊 AI STOCK ADVISOR REPORT")
+    print("==============================")
+
+    print("\nMarket Regime:", regime)
+    print("Top Sectors:", ", ".join(top_sectors))
 
     print("\n📈 BUY RECOMMENDATIONS:\n")
 
@@ -204,22 +260,22 @@ def main():
         print("⚠️ Market is currently BEAR/HIGH_RISK.")
         print("Showing best available stocks anyway — use smaller position sizes.\n")
 
-    for s in buy_list[:8]:
-        sym, alpha, price, shares, value, stop, target, support, resistance, rr, s_str, r_str = s
-
+    for c in buy_list[:8]:
         print(f"{'='*42}")
-        print(f"  {sym}")
-        print(f"  Alpha Score:    {alpha:.4f}")
-        print(f"  Current Price:  ₹{price:.2f}")
-        print(f"  Shares:         {shares}")
-        print(f"  Position Value: ₹{value:,.0f}")
+        print(f"  {c['symbol']}")
+        print(f"  Alpha Score:    {c['alpha']:.4f}")
+        print(f"  Current Price:  ₹{c['price']:.2f}")
+        print(f"  Shares:         {c['shares']}")
+        print(f"  Position Value: ₹{c['value']:,.0f}")
         print(f"  ─────────────────────────────────────")
-        print(f"  📥 Buy at:   ₹{support:.2f}  [{strength_label(s_str)} — {s_str} touches]")
-        print(f"  🎯 Target:   ₹{resistance:.2f}  [{strength_label(r_str)} — {r_str} touches]")
-        print(f"  🛑 Stop:     ₹{stop:.2f}  (3% below support)")
-        print(f"  ⚖️  R:R:      1:{rr}")
+        print(f"  📥 Buy at:   ₹{c['buy_at']:.2f}  [{strength_label(c['s_str'])} — {c['s_str']} touches]")
+        print(f"  🎯 Target:   ₹{c['target']:.2f}  [{strength_label(c['r_str'])} — {c['r_str']} touches]")
+        print(f"  🛑 Stop:     ₹{c['stop']:.2f}  (3% below support)")
+        print(f"  ⚖️  R:R:      1:{c['rr']}")
         print()
-        #log_trade(sym, "BUY", price, shares, regime, "N/A", "Alpha signal", pnl=None)
+
+    if n_logged:
+        print(f"({n_logged} call(s) appended to {CALLS_LOG} — score them with: python call_report.py)")
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ LOG=../data/cron_daily_log.log
     "$PYTHON" sr_dynamic_logger.py
     "$PYTHON" exit_engine.py
     "$PYTHON" paper_trader.py
+    "$PYTHON" full_advisor.py --log
     "$PYTHON" news_watchdog.py
     "$PYTHON" agent_sim.py
     "$PYTHON" exit_shadow.py

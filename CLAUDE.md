@@ -288,7 +288,15 @@ stock_ai/
   fresh NSE announcements on held names, notify-send on HIGH; it is NOT a
   trading signal and must never be wired into exit_engine/paper_trader
   (the automated announcement exit veto was backtested and REJECTED — see
-  memory exit-announcements-rejected). `gate_report.py` (manual, monthly) —
+  memory exit-announcements-rejected). ADVISORY-CALL LEDGER (2026-07-17):
+  every full_advisor.py BUY call is appended to data/advisor_calls_log.csv
+  (deduped per data-date+symbol; nightly via `full_advisor.py --log` in
+  run_daily_log.sh, manual runs log too). `python call_report.py` scores
+  them Univest-style — fill at buy_at (Low touch within 10d), then
+  first-touch target-vs-stop race (42d from fill, same-day both =
+  AMBIGUOUS counted as stop), plus a fill-model-free 21d mark from
+  call-day close; aggregates by regime. Measurement only — the ledger must
+  never feed back into scoring/selection. `gate_report.py` (manual, monthly) —
   scores each completed paper month at its percentile of the production
   backtest's 21d-return distribution; this is the deployment gate made
   quantitative (2+ months below p10 = live path diverges, investigate).
