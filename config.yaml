@@ -1,22 +1,19 @@
-capital: 1000000
+# LEGACY config. The strategy's single source of truth is
+# scripts/strategy_config.py — regime exposure, name counts, the -18% stop,
+# transaction cost, and the universe gate ALL live there and are shared by the
+# backtest, live exit engine, paper trader, sim, and assistant.
+#
+# The three keys below are the ONLY ones still read anywhere, and only by the
+# two hand-run legacy tools full_advisor.py and risk_manager.py. Editing any
+# other value here has no effect — that is why the old dead keys were removed
+# (rebalance_days, exposure_default, catastrophic_stop, trend_ma, backtest.*,
+# data.*): they duplicated strategy_config.py and silently did nothing, a
+# two-sources-of-truth trap.
+
+capital: 1000000          # notional capital used by full_advisor/risk_manager sizing
 
 portfolio:
-  top_n: 10
-  rebalance_days: 21
-  exposure_default: 0.7
-  # NOTE: canonical strategy params (regime exposure, name counts, stops) now
-  # live in scripts/strategy_config.py — the single source of truth shared by the
-  # backtest, live exit engine, and recommender. Keys below are legacy/advisory.
+  top_n: 10               # max position count (risk_manager.py)
 
 risk:
-  catastrophic_stop: 0.18   # -18% per-name circuit breaker (profit-oriented config B)
-  trend_ma: 50
-  risk_per_trade: 0.01
-
-backtest:
-  initial_capital: 1000000
-  cost: 0.001
-
-data:
-  history_years: 3
-  min_liquidity: 50000000
+  risk_per_trade: 0.01    # per-trade risk fraction (full_advisor.py, risk_manager.py)
