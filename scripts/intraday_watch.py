@@ -13,6 +13,12 @@ RCOM and other EXIT_EXCLUDE names skipped), it fetches a live-ish quote
   DROP  (MED)   down >5% vs yesterday's close — sharp move, human review.
   S/R   (INFO)  price crossed yesterday's logged S1 (support broken) or R1
                 (resistance reached) from sr_dynamic_log.csv.
+  BOOK  (MED/HIGH)  TOTAL book equity (every position incl. sleeves and
+                write-offs, live quotes with CSV-close fallback, + cash)
+                in drawdown >=10% (MED) / >=20% (HIGH) from its tracked
+                peak (../data/book_peak.json, ratchets up automatically).
+                Positions-level stops can all be quiet while the whole book
+                bleeds a little everywhere — this is the aggregate eye.
 
 HONESTY NOTE on the S/R alert: an automated sell-at-resistance exit was
 backtested and REJECTED (momentum names push THROUGH a strong resistance
@@ -41,7 +47,9 @@ from live_quotes import get_quote
 SEEN_PATH = "../data/intraday_seen.csv"
 LOG_PATH = "../data/intraday_watch_log.csv"
 SR_LOG = "../data/sr_dynamic_log.csv"
+PEAK_PATH = "../data/book_peak.json"
 DROP_THRESHOLD = -0.05
+BOOK_DD_LEVELS = [(-0.20, "BOOK_DD20", "HIGH"), (-0.10, "BOOK_DD10", "MED")]
 
 
 def market_open_now():
@@ -66,12 +74,51 @@ def watched_positions(state):
 
 
 def prev_close(sym):
-    path = f"../data/price_data/{sym}.csv"
-    if not os.path.exists(path):
-        return None
-    df = pd.read_csv(path, usecols=["Close"], low_memory=False)
-    c = pd.to_numeric(df["Close"], errors="coerce").dropna()
-    return float(c.iloc[-1]) if len(c) else None
+    for d in ("../data/price_data", "../data/etf_data"):
+        path = f"{d}/{sym}.csv"
+        if os.path.exists(path):
+            df = pd.read_csv(path, usecols=["Close"], low_memory=False)
+            c = pd.to_numeric(df["Close"], errors="coerce").dropna()
+            return float(c.iloc[-1]) if len(c) else None
+    return None
+
+
+def book_drawdown_check(state):
+    """Value the ENTIRE real book (live quotes, CSV-close fallback), ratchet
+    the tracked peak, return (dd, equity, peak, n_live) — dd as a negative
+    fraction, or (None, ...) if too little of the book could be priced."""
+    import json
+    total, n_live, n_priced, n_pos = state.get("cash", 0.0), 0, 0, 0
+    for sym, pos in state["positions"].items():
+        qty = pos.get("qty", 0)
+        if qty <= 0:
+            continue
+        n_pos += 1
+        price, stale = get_quote(sym)
+        if price is not None and not stale:
+            n_live += 1
+        else:
+            price = prev_close(sym)
+        if price is None:
+            continue
+        n_priced += 1
+        total += qty * price
+    if n_pos == 0 or n_priced < n_pos * 0.8 or total <= 0:
+        return None, None, None, n_live   # too blind to judge the book
+
+    try:
+        with open(PEAK_PATH) as f:
+            peak = json.load(f)
+    except Exception:
+        peak = {}
+    if total > peak.get("equity", 0):
+        peak = {"equity": total, "date": datetime.now().strftime("%Y-%m-%d")}
+        try:
+            with open(PEAK_PATH, "w") as f:
+                json.dump(peak, f, indent=2)
+        except Exception:
+            pass
+    return total / peak["equity"] - 1, total, peak["equity"], n_live
 
 
 def latest_sr_levels():
@@ -172,6 +219,29 @@ def main():
                     w.writeheader()
                 w.writerow({"date": today, "time": now_hm, "symbol": sym, "type": typ,
                             "severity": sev, "price": round(price, 2), "message": msg})
+
+    # ---- book-level drawdown (aggregate, not per-name) ----
+    dd, equity, peak, n_live = book_drawdown_check(state)
+    if dd is not None:
+        for threshold, typ, sev in BOOK_DD_LEVELS:
+            if dd > threshold:
+                continue
+            key = (today, "__BOOK__", typ)
+            if key not in seen:
+                msg = (f"BOOK drawdown {dd:+.1%} from peak ₹{peak:,.0f} "
+                       f"(now ₹{equity:,.0f}, {n_live} live quotes) — review the "
+                       f"whole book, individual stops may all still be quiet")
+                new_seen.append({"date": today, "symbol": "__BOOK__", "type": typ})
+                alerts.append((sev, "__BOOK__", typ, msg))
+                with open(LOG_PATH, "a", newline="") as f:
+                    w = csv.DictWriter(f, fieldnames=["date", "time", "symbol", "type",
+                                                      "severity", "price", "message"])
+                    if f.tell() == 0:
+                        w.writeheader()
+                    w.writerow({"date": today, "time": now_hm, "symbol": "__BOOK__",
+                                "type": typ, "severity": sev,
+                                "price": round(equity, 2), "message": msg})
+            break   # deepest breached level only — DD20 implies DD10
 
     if new_seen:
         mark_seen(new_seen)

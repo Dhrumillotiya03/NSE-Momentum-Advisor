@@ -59,7 +59,10 @@ stock_ai/
 - -18% stop watch is automated at THREE cadences: intraday_watch.py via
   systemd timer stockai-intraday (every 15 min during market hours,
   weekdays — live yfinance quotes ~15-min delayed; alerts STOP breach HIGH,
-  >5% intraday DROP MED, and S/R level crossings INFO with the explicit
+  >5% intraday DROP MED, BOOK-level drawdown from tracked peak (2026-07-17:
+  whole real book incl. sleeves/write-offs + cash, peak ratchets in
+  data/book_peak.json; -10% MED / -20% HIGH, deepest level only, once per
+  day), and S/R level crossings INFO with the explicit
   caveat that auto-selling at resistance was backtested and REJECTED — the
   S/R alert is information for human discretion, NEVER wire it into
   exit_engine/paper_trader/agent_sim); legacy cron weekdays 14:40 IST
