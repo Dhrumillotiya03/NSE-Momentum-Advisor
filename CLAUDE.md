@@ -208,6 +208,18 @@ stock_ai/
   --engine hard_close) kept for comparison. Trust the walk-forward
   distribution (python walk_forward.py), not any single backtest run — see
   memory feedback-quant-researcher-role for why.
+- PARAM ROBUSTNESS (2026-07-17, research_param_robustness.py +
+  _tier2.py): are the core params curve-fit to one cycle? Tier-1 (per-era
+  grids) + Tier-2 (paired 19-window walk-forward, pre-registered rule:
+  curve-fit only if an alternative wins >=14/19 windows AND higher mean
+  CAGR). HOLD=21, MA_GATE=50, BULL_N=10: ROBUST (MA gate is nearly inert —
+  entire grid incl. NO gate within 0.9pp CAGR; don't bother re-tuning it).
+  LOOKBACK=126 and VOL_WIN=63 each got a BOUNDARY signal (147 resp. 126
+  wins exactly 14/19) — but 24 alternatives were tested at a p≈0.06
+  threshold, so ~1-2 crossings are EXPECTED by chance; treated as amber,
+  not proof. DO NOT retune to grid winners (that's the curve-fit this
+  study detects); a LOOKBACK/VOL_WIN change needs the usual bar (paired
+  block-bootstrap CI + mechanism). CSVs in data/_research/.
 - STATISTICAL HYGIENE (2026-07-12, research_statistical_hygiene.py): with
   ~128 rebalance periods (~10.7y), Sharpe confidence intervals are WIDE —
   autocorrelation-adjusted (Lo 2002) 95% CI on the current 0.85 point
