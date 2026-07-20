@@ -5,6 +5,14 @@ import pandas as pd
 PRICE_DIR    = "../data/price_data/"
 DELIVERY_DIR = "../data/delivery_data/"
 ETF_DIR      = "../data/etf_data/"
+INDEX_DIR    = "../data/index_data/"
+
+# Indices aren't stocks or ETFs — no .NS suffix, filename != tradable symbol.
+# Map the friendly name used everywhere else (e.g. "NIFTY50") to its file.
+INDEX_FILES = {
+    "NIFTY50": "nifty50.csv",
+    "INDIAVIX": "indiavix.csv",
+}
 
 
 # ──────────────────────────────────────────────
@@ -12,14 +20,18 @@ ETF_DIR      = "../data/etf_data/"
 # ──────────────────────────────────────────────
 
 def load_stock(symbol):
-    path = os.path.join(PRICE_DIR, f"{symbol}.csv")
-    if not os.path.exists(path):
-        # ETFs (e.g. GOLDBEES) live in etf_data/, NOT price_data/ — price_data
-        # is globbed as the universe by core.market_breadth_pct and
-        # core.liquid_universe, and a high-turnover ETF placed there would
-        # enter the tradable top-200 and could get bought by the strategy.
-        path = os.path.join(ETF_DIR, f"{symbol}.csv")
+    if symbol.upper() in INDEX_FILES:
+        path = os.path.join(INDEX_DIR, INDEX_FILES[symbol.upper()])
         if not os.path.exists(path): return None
+    else:
+        path = os.path.join(PRICE_DIR, f"{symbol}.csv")
+        if not os.path.exists(path):
+            # ETFs (e.g. GOLDBEES) live in etf_data/, NOT price_data/ — price_data
+            # is globbed as the universe by core.market_breadth_pct and
+            # core.liquid_universe, and a high-turnover ETF placed there would
+            # enter the tradable top-200 and could get bought by the strategy.
+            path = os.path.join(ETF_DIR, f"{symbol}.csv")
+            if not os.path.exists(path): return None
     df = pd.read_csv(path)
     # Same guard as core.load_stock: a truncated download can leave a
     # malformed last row whose Date survives as a literal string (not NaT)
