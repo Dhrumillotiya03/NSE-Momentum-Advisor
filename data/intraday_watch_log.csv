@@ -2,3 +2,9 @@ date,time,symbol,type,severity,price,message
 2026-07-17,11:15,RELIANCE.NS,SR_R1,INFO,1320.8,touched logged resistance R1 ₹1311.66 (now ₹1320.80). INFO ONLY: backtest says momentum names push through ~60% of the time — auto-selling here was tested and rejected
 2026-07-17,11:15,WIPRO.NS,SR_S1,INFO,174.84,broke logged support S1 ₹175.08 (now ₹174.84) — informational
 2026-07-17,12:00,VOLTAS.NS,SR_S1,INFO,1364.7,broke logged support S1 ₹1365.52 (now ₹1364.70) — informational
+2026-07-21,11:45,WIPRO.NS,SR_S1,INFO,174.93,broke logged support S1 ₹175.08 (now ₹174.93) — informational
+2026-07-22,12:00,AARTIIND.NS,SR_S1,INFO,486.6,broke logged support S1 ₹488.40 (now ₹486.60) — informational
+2026-07-22,12:00,KALYANKJIL.NS,SR_R1,INFO,594.6,touched logged resistance R1 ₹574.22 (now ₹594.60). INFO ONLY: backtest says momentum names push through ~60% of the time — auto-selling here was tested and rejected
+2026-07-22,12:00,RELIANCE.NS,SR_S1,INFO,1290.1,broke logged support S1 ₹1294.09 (now ₹1290.10) — informational
+2026-07-22,12:00,VOLTAS.NS,SR_S1,INFO,1319.8,broke logged support S1 ₹1355.66 (now ₹1319.80) — informational
+2026-07-22,12:00,WIPRO.NS,SR_S1,INFO,174.56,broke logged support S1 ₹175.08 (now ₹174.56) — informational
