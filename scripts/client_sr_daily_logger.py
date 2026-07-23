@@ -1,6 +1,26 @@
 """
-sr_daily_logger.py
--------------------
+client_sr_daily_logger.py
+--------------------------
+CLIENT-BOUND FILE — not used by this codebase's own pipeline. This is the
+version to copy over to the client's machine, replacing their
+sr_daily_logger.py. Do not wire this into run_daily_log.sh or anything else
+here; the production panel lives in sr_daily_logger.py.
+
+Built from the client's own pasted copy of sr_daily_logger.py (their
+watchlist edits preserved: AARTIIND dropped, 12 symbols added) brought up to
+the current logger interface (data-date stamping, merge_log, partial-candle
+guard) and paired with run_client_sr_log.py.
+
+"NIFTY 50.NS" in their original list was not a valid yfinance ticker (it
+would have failed every download and logged nothing) — replaced with
+"NIFTY50", which support_resistance.load_stock resolves from
+data/index_data/nifty50.csv via the INDEX_FILES map. That map, plus
+ETF_DIR routing (GOLDBEES), only exist in the CURRENT support_resistance.py —
+their machine is still on the initial-commit version without either, so
+support_resistance.py must be copied over too. See the handoff notes
+in run_client_sr_log.py's docstring / the accompanying chat summary for the
+full file list.
+
 Logs one row per stock per day: Symbol, Date, CMP, S1, S1_prob, S1_n,
 R1, R1_prob, R1_n — plus S2/R2 (+prob+n) only when that level's reach
 probability beats the empirical base rate (~66%) from sr_reach_table.json.
@@ -8,27 +28,35 @@ probability beats the empirical base rate (~66%) from sr_reach_table.json.
 WATCHLIST is a FIXED validation panel — deliberately hardcoded so the same
 stocks are logged every day and sr_monthend_analysis.py measures model
 accuracy on a consistent panel. Do NOT make it dynamic (holdings/top-N);
-changing names day-to-day undermines the accuracy analysis.
+changing names day-to-day undermines the accuracy analysis. Adding/removing
+individual symbols by hand is fine — that's how the client got here.
 
-Run this once daily (after 3:30pm IST, after download_data.py).
+Index entries (e.g. NIFTY50) go in WITHOUT a ".NS" suffix — they're not
+yfinance-downloadable tickers, support_resistance.load_stock reads them
+straight from data/index_data/ (see that file's INDEX_FILES map).
+
+Run this once daily (after 3:30pm IST) via run_client_sr_log.py — do not
+run this file directly on a machine that also needs the .xlsx output.
 
 Usage:
-    python sr_daily_logger.py                      ← uses WATCHLIST below
-    python sr_daily_logger.py AARTIIND.NS BEL.NS    ← override watchlist
+    python client_sr_daily_logger.py                      ← uses WATCHLIST below
+    python client_sr_daily_logger.py AARTIIND.NS BEL.NS    ← override watchlist
 """
 
 import os, sys
 from datetime import datetime
 import pandas as pd
 
-from support_resistance import load_stock, get_all_levels, reach_probability_v2, _load_reach_table
+from support_resistance import load_stock, get_all_levels, reach_probability_v2, _load_reach_table, INDEX_FILES
 
 LOG_PATH = "../data/sr_daily_log.csv"
 
 WATCHLIST = [
-    "AARTIIND.NS", "BEL.NS", "GOLDBEES.NS", "KALYANKJIL.NS",
+    "BEL.NS", "KALYANKJIL.NS",
     "KFINTECH.NS", "RELIANCE.NS", "VOLTAS.NS", "WIPRO.NS",
     "CONCOR.NS", "COCHINSHIP.NS", "KAYNES.NS", "NATIONALUM.NS", "RECLTD.NS", "SAIL.NS", "TMPV.NS",
+    "ETERNAL.NS", "DELHIVERY.NS", "KPITTECH.NS", "BDL.NS", "PNB.NS", "SUZLON.NS",
+    "ADANIPOWER.NS", "IREDA.NS", "CDSL.NS", "BSE.NS", "RVNL.NS", "NIFTY50",
 ]
 
 COLUMNS = [
@@ -43,9 +71,8 @@ COLUMNS = [
 def drop_partial_candle(df):
     """Consumer-side twin of trim_partial.py: if the last row is TODAY and the
     session hasn't closed (weekday before 16:00 IST), it is a partial candle —
-    drop it. trim_partial cleans the CSVs in the pipeline, but other processes
-    (parallel research scripts, ad-hoc downloads) can re-write partial rows
-    into price_data at any time, so the logger must not trust file state."""
+    drop it. A download running during market hours can leave a half-formed
+    candle in price_data, so the logger must not trust file state blindly."""
     now = datetime.now()
     if now.weekday() <= 4 and now.hour < 16 and \
             df.index[-1].date() == now.date():
@@ -90,11 +117,8 @@ def log_stock(sym):
     return {
         "Symbol":  sym.replace(".NS", ""),
         # Stamp the DATA date (last completed candle), not the wall-clock date:
-        # the pipeline may run at any hour (boot-time catch-up), and after
-        # trim_partial a mid-market run's data still ends at yesterday's close.
-        # Wall-clock stamping logged that same snapshot under a second date,
-        # double-counting it and shifting its forward window in
-        # sr_monthend_analysis. Data-date stamping makes runs idempotent.
+        # a run at any hour of day would otherwise double-log the same
+        # snapshot under two dates. Data-date stamping makes runs idempotent.
         "Date":    df.index[-1].strftime("%Y-%m-%d"),
         "CMP":     round(cur, 2),
         "S1":      s1, "S1_prob": s1_prob, "S1_n": s1_n,
@@ -127,7 +151,8 @@ def main():
     rows = []
     for sym in symbols:
         sym = sym.strip().upper()
-        if not sym.endswith(".NS"):
+        # Index entries (NIFTY50, INDIAVIX) are not .NS-suffixed tickers.
+        if sym not in INDEX_FILES and not sym.endswith(".NS"):
             sym += ".NS"
         row = log_stock(sym)
         if row:
@@ -145,20 +170,6 @@ def main():
     print("─" * 50)
     print(f"Logged {len(rows)} rows to {LOG_PATH}")
     print(f"Total rows in log: {len(combined)}")
-
-    # Data-date stamping means a symbol whose price CSV lagged (missed run,
-    # yfinance drop for that one name) silently logs under an OLDER date than
-    # its panel-mates, with no error — that's how the 2026-07-22 gap happened
-    # (13/15 stocks stayed on 07-21 for a day, unnoticed until a manual check).
-    # Flag it immediately instead: warn on any row dated behind today's max.
-    latest = new_df["Date"].max()
-    lagging = new_df[new_df["Date"] != latest]
-    if not lagging.empty:
-        print(f"\n⚠️  {len(lagging)} symbol(s) logged BEHIND today's latest ({latest}) "
-              f"— their price data hasn't updated yet:")
-        for _, r in lagging.iterrows():
-            print(f"      {r['Symbol']:<14} stuck at {r['Date']}")
-        print("   Re-run later, or check that symbol's price_data/etf_data CSV.")
 
 
 if __name__ == "__main__":

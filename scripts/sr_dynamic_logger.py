@@ -74,6 +74,20 @@ def main():
     print(f"[dynamic] Logged {len(rows)} rows to {LOG_PATH}")
     print(f"[dynamic] Total rows in log: {len(combined)}")
 
+    # Data-date stamping means a symbol whose price CSV lagged (yfinance drop
+    # for that one name, stale cache) silently logs under an OLDER date than
+    # its watchlist-mates, with no error — same failure mode caught in
+    # sr_daily_logger.py's fixed panel on 2026-07-22/23 (13/15 stocks stuck a
+    # day behind, unnoticed for two days). Flag it here too.
+    latest = new_df["Date"].max()
+    lagging = new_df[new_df["Date"] != latest]
+    if not lagging.empty:
+        print(f"\n⚠️  [dynamic] {len(lagging)} symbol(s) logged BEHIND today's "
+              f"latest ({latest}) — their price data hasn't updated yet:")
+        for _, r in lagging.iterrows():
+            print(f"      {r['Symbol']:<14} stuck at {r['Date']}")
+        print("   Re-run later, or check that symbol's price_data/etf_data CSV.")
+
 
 if __name__ == "__main__":
     main()

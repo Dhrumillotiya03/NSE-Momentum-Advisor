@@ -23,6 +23,9 @@ PyYAML>=6.0.1
 # ── Progress bars ──
 tqdm>=4.65.0
 
+# ── Excel export (run_client_sr_log.py / export_sr_log_xlsx.py) ──
+openpyxl>=3.1.0
+
 # ── Technical indicators (used in exit_engine, full_advisor) ──
 pandas-ta>=0.3.14b
 
