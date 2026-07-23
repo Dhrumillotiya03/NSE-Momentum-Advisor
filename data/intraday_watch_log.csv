@@ -8,3 +8,4 @@ date,time,symbol,type,severity,price,message
 2026-07-22,12:00,RELIANCE.NS,SR_S1,INFO,1290.1,broke logged support S1 ₹1294.09 (now ₹1290.10) — informational
 2026-07-22,12:00,VOLTAS.NS,SR_S1,INFO,1319.8,broke logged support S1 ₹1355.66 (now ₹1319.80) — informational
 2026-07-22,12:00,WIPRO.NS,SR_S1,INFO,174.56,broke logged support S1 ₹175.08 (now ₹174.56) — informational
+2026-07-22,12:15,BEL.NS,SR_S1,INFO,406.6,broke logged support S1 ₹409.45 (now ₹406.60) — informational
