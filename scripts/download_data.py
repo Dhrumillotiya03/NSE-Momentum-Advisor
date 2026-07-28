@@ -56,19 +56,40 @@ def main():
 
     print(f"Downloading data for {len(symbols)} stocks...")
 
+    today = datetime.now().date()
+    stale_count = 0
+
     for sym in tqdm(symbols):
         out_path = f"{OUTPUT_DIR}{sym}.csv"
 
-        # Skip if already downloaded today
+        # Skip only if the file's ACTUAL LAST CANDLE is already today's trading
+        # day — mtime is not a reliable proxy: a file fetched at 00:58 (an
+        # earlier catch-up run, a parallel session) looks "downloaded today"
+        # under a rolling 24h mtime check for the next 24h, even on an
+        # EVENING run that should refresh it with today's close. This bit 4
+        # symbols on 2026-07-28 (AARTIIND, ADANIENSOL, APOLLOHOSP + 1 more),
+        # silently skipped and left a day stale until manually caught via the
+        # S/R loggers' lag-detection warning.
         if os.path.exists(out_path):
-            modified = os.path.getmtime(out_path)
-            age_days = (datetime.now().timestamp() - modified) / 86400
-            if age_days < 1:
-                continue
+            try:
+                with open(out_path, "rb") as f:
+                    f.seek(0, os.SEEK_END)
+                    size = f.tell()
+                    f.seek(max(0, size - 200))
+                    last_line = f.read().decode(errors="ignore").strip().splitlines()[-1]
+                last_date = last_line.split(",")[0]
+                if pd.Timestamp(last_date).date() >= today:
+                    continue
+                stale_count += 1
+            except Exception:
+                pass  # unreadable/malformed — fall through and re-fetch
 
         df = download_symbol(sym)
         if df is not None:
             df.to_csv(out_path, index=False)
+
+    if stale_count:
+        print(f"  ({stale_count} file(s) had a recent mtime but stale content — re-fetched anyway)")
 
     print("\n✅ Data saved successfully.")
     print(f"Files saved in: {OUTPUT_DIR}")
