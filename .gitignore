@@ -1,42 +1,19 @@
-# Bulk market data — re-downloadable, would bloat every diff (100M+)
-data/price_data/
-data/delivery_data/
-data/fo_data/
-data/etf_data/
+# Personal / live trading data — never commit
+data/
+*.csv
+*.log
 
-# Daily pipeline run log — append-only output of run_daily_log.sh
-data/cron_daily_log.log
-
-# Backfill resume-progress logs — regenerated, not meaningful history
-data/bhavcopy_backfill_progress.txt
-data/fo_backfill_progress.txt
-data/delisted_backfill_progress.txt
-
-# Ephemeral runtime state — daily dedupe/cache churn, no history value
-# (the measurement LOGS scanner_log.csv / intraday_watch_log.csv ARE tracked)
-data/exit_check.log
-data/intraday_seen.csv
-data/scanner_seen.csv
-data/news_watchdog_seen.csv
-data/scanner_cutoff_cache.json
-
-# Agent-sim charts — PNGs regenerated nightly (sim books/journal ARE tracked)
-data/_agent_sim/charts/
+# Config with real capital numbers (optional — see note below)
+# config.yaml
 
 # Python
 __pycache__/
 *.pyc
-.ipynb_checkpoints/
+.venv/
+venv/
 
-# Exported codebase dump (regenerated, huge)
-complete_codebase.txt
+# Claude Code local settings
+.claude/settings.local.json
 
-# Local editor/tooling
-.vscode/
-.idea/
-*.swp
-
-# NOTE: small trusted-source + state files ARE tracked on purpose:
-#   data/sectors.json, config.yaml, data/*.json state, data/sr_*.csv,
-#   data/index_data/, nifty universe CSVs — these are curated/small and
-#   you want their history across sessions.
+# OS
+.DS_Store
