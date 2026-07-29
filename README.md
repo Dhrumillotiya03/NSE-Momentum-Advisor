@@ -1,4 +1,4 @@
-# nse-momentum-advisor
+# NSE-momentum-advisor
 
 A local-first, self-contained quantitative trading advisor for NSE (India) equities — combining momentum-based stock selection, market regime detection, support/resistance analytics, and an AI assistant layer, with **zero recurring external API cost**.
 
