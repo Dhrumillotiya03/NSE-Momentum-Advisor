@@ -4,8 +4,6 @@ A local-first, self-contained quantitative trading advisor for NSE (India) equit
 
 Conceptually similar to what you'd get from Wright Research (momentum model portfolios), StockEdge (S/R + delivery volume analytics), and Univest (actionable trade calls) — but running entirely on your own machine against your own rules.
 
-> ⚠️ **Not financial advice.** This is a personal research/advisory tool. It does not place trades automatically (paper trading and a simulation harness are included, but live execution requires deliberate manual action). Use at your own risk.
-
 ---
 
 ## What it does
