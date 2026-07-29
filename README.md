@@ -93,4 +93,4 @@ Actively developed. Recent work: consolidating multiple advisor entry points ont
 
 ## License
 
-Personal project — add a license (e.g. MIT) if you want others to be able to reuse this. If left unlicensed, GitHub's default "all rights reserved" applies to public viewers.
+MIT — see [LICENSE](LICENSE).
