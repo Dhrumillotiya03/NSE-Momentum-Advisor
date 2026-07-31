@@ -256,6 +256,74 @@ stock_ai/
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
   volume profile + wick rejection + delivery volume scoring + reach probability
+- HORIZON = TO MONTH-END, WHERE MONTH-END IS THE LAST TUESDAY (2026-07-31, user
+  spec — the rebalance date). `sr_horizon.py` is the single source of truth:
+  last_tuesday_of_month / horizon_end (rolls to next month once that Tuesday
+  passes) / trading_days_until / scale_probability_to_horizon. The window
+  SHRINKS through the month — run Aug 2 → 17 trading days, run Aug 12 → 9 —
+  so probabilities must shrink with it.
+  `reach_probability_v2(df, level, direction, forward_days, cur)` previously
+  ACCEPTED forward_days and IGNORED it (table is baked at 21d), so a 9-day
+  question silently got a 21-day answer — a systematic overstatement. Horizon
+  is now resolved best-source-first: (1) native table at exactly that horizon,
+  (2) sqrt-time interpolation between the two bracketing native tables,
+  (3) sqrt-of-time rescale p_h = 1-(1-p)**sqrt(h/21) as a last resort.
+  `cur` overrides the reference price so LIVE quotes drive
+  distance+probability instead of the last CSV close.
+- METRIC BUG FIXED 2026-07-31 — THE BIG ONE. sr_reach_table.json does NOT
+  measure what every consumer thinks. Its builder scores outcomes with
+  sr_backtest.test_support/test_resistance, a touch-AND-BOUNCE test that
+  returns None when a level is never touched — and sr_build_reachtable DROPS
+  those rows. So the table is P(bounce | touched), with untouched levels
+  invisible, while sr_daily_logger / analyse_table / sr_monthend_analysis all
+  label and score it as P(touch). Damage concentrates in far cells: distant
+  levels are rarely touched, so they're mostly dropped instead of counted as
+  misses, leaving survivors conditioned on having been reached. The old table
+  is therefore nearly FLAT in distance (12%+ ≈66%, ABOVE 0-2%'s ≈57%) while
+  real forward data decays hard (76% at 0-5% → 3% at 10-15% → 0% beyond 15%).
+  That also explains its weak OOS corr 0.173.
+  `sr_build_touchtable.py` builds the correct P(touch) table: pure touch test,
+  untouched = a real miss, complete-window requirement (the old builder
+  accepted len(future)>=5 and scored 6-bar windows as 21-day outcomes — the
+  same truncation bias as the fake-100% analysis bug), wrong-side levels
+  skipped, and thin cells fall back to the DISTANCE-marginal rate rather than
+  the global base (a global fallback hands far cells a near-base number,
+  re-creating the exact distortion). Result at 21d: decays 94.5%→5.9% across
+  distance, OOS corr **0.529 vs 0.173**, 0/24 fallback cells, 7860 train rows.
+  Built at 5/10/15/21d (`--forward N`); support_resistance prefers
+  sr_touch_table*.json and falls back to the legacy file if absent.
+  Empirical-vs-sqrt check: scaling 21d→10d was off by mean 4.3pp (max 7.3pp)
+  and systematically understates near levels / overstates far ones — hence
+  native tables + interpolation rather than one rescaled table.
+  P(touch) is now guaranteed MONOTONIC non-decreasing in horizon (verified
+  1-23d); an earlier nearest-table-match version was not (13d read 94% while
+  14d read 90%, i.e. a longer horizon looked less likely).
+  NOTE: probabilities now legitimately span ~5-95%, NOT the old 57-78 band —
+  any threshold or bucket keyed to that band is stale (sr_monthend_analysis's
+  calibration bins and legacy-row detector were both fixed for this; the
+  detector is now DATE-anchored, since a band test would discard valid modern
+  rows).
+  Callers omitting forward_days are unchanged (default = table's 21d).
+  Anything gating on a probability must scale its THRESHOLD by the same
+  horizon — sr_daily_logger's S2/R2 base-rate gate does; a raw 66% gate
+  against scaled probs empties S2/R2 exactly when the window is tightest.
+  `python support_resistance.py SYM --as-of YYYY-MM-DD` tests a horizon
+  without waiting for the calendar; `--live` pulls CMP from live_quotes.py
+  (stale fallbacks are dropped, not silently shown as live). Levels sitting on
+  the wrong side of live price render as BROKEN (a support below price has
+  been breached — real information, and it happens routinely intraday).
+  Loggers stamp HorizonEnd/HorizonDays; rows predating those columns are NaN
+  and readers must treat them as 21d.
+- S2/R2 ARE NOW ALWAYS LOGGED (2026-07-31). They used to be written only when
+  their probability beat the base rate, but the log is the MEASUREMENT record:
+  a level never written can never be scored, so the gate was destroying
+  exactly the low-probability observations needed to calibrate the low end,
+  and biased the logged sample toward levels the model already liked.
+  Filtering is a DISPLAY concern; `S2_shown`/`R2_shown` record what the gate
+  would have decided so display stays reconstructible. Any gate consuming a
+  horizon-scaled probability must scale its THRESHOLD by the same horizon —
+  a raw base-rate gate against scaled probs empties S2/R2 exactly when the
+  window is tightest.
 - Backtested via `sr_backtest.py` (fast, uses `fast=True` flag — REQUIRED or it hangs,
   wick_rejection_score becomes iterrows-based without it) and `sr_backtest_filtered.py`
   (only tests on trend+momentum+regime-filtered conditions)
@@ -314,8 +382,51 @@ stock_ai/
   and a high-turnover ETF there would enter the tradable top-200 and could get bought
   by the strategy. support_resistance.load_stock and sr_monthend_analysis fall back
   to etf_data/ automatically
+- OPS CADENCE: NOTHING new needs running daily. run_daily_log.sh (systemd
+  timer stockai-daily, weekdays 18:15 IST, Persistent=true) already runs the
+  downloads + both S/R loggers; it now also rotates cron_daily_log.log at 5MB
+  (it was append-only and unbounded). `./sr_monthly_review.sh` is the ONCE-A-
+  MONTH read-only review (run after the month's last Tuesday): fixed panel at
+  the production horizon, at 21d, at 10d, plus the dynamic panel, with the
+  reading notes inline. It writes nothing and is safe to re-run.
+  Do NOT rebuild the P(touch) tables monthly — they're built from ~10y of
+  history so a month barely moves them, and rebuilding on the same cadence you
+  MEASURE on lets the thing under test change underneath the test. Rebuild
+  only when price history is materially extended, then re-check the
+  monotonicity invariant.
 - `sr_monthend_analysis.py` checks hit-rate, level drift, probability calibration,
-  n-sensitivity, distance-vs-accuracy — run only after 2-3+ weeks of logged data
+  n-sensitivity, distance-vs-accuracy — run only after 2-3+ weeks of logged data.
+  Section 0 is DATA QUALITY (duplicate pairs, partial days, frozen price
+  series) and must be read FIRST — a pipeline bug and a miscalibrated model
+  look alike in the hit rate but need opposite fixes. `--to-month-end` states
+  explicitly when it is IGNORED (log has no HorizonDays yet) rather than
+  silently falling back to 21d.
+  MEASUREMENT BUG FIXED 2026-07-31 — it reported a fake 100% hit rate on every
+  panel/level/bucket. Two compounding causes, both about the hit/miss asymmetry:
+  (1) the old `resolved = FwdDays>=21 | Hit` filter kept every hit but dropped
+  unresolved misses; with a log shorter than 21 trading days NO row ever
+  reached FwdDays>=21, so "resolved" collapsed to hits-only ⇒ 100% by
+  construction. (2) even after fixing that, returning True the moment a touch
+  occurred (bar 3) while a miss waited the full window meant hits resolved
+  early and misses never did — still 100%. check_touch now scores ONLY when
+  the full W-bar window exists, so both outcomes face the same bar count, and
+  returns None (excluded, never counted as a miss) otherwise.
+  A 21d rate needs 21 bars AFTER the log date — with ~1 month of data, use
+  `--window 7/10` for a genuinely resolvable (but shorter, non-comparable to
+  the 21d ~65-68% baseline) horizon. `--exclude-day0` drops levels already
+  inside the touch band at log time (guaranteed hits, zero predictive content,
+  worth ~7pp). `--to-month-end` scores each row against its own logged
+  HorizonDays = the production question. First honest read (2026-07-31, fixed
+  panel, 10d, day-0 excluded): S1 60.4% / R1 59.6% (n≈101-104); with day-0
+  included 69.1%/68.4%. Dynamic panel S1 looks terrible (21-28%) purely
+  because its supports sit a median -10.7% away (S2 -20%) vs -1.9% on the
+  fixed panel — composition, NOT miscalibration; distance decay is clean and
+  monotone (0-5%: 76%, 10-15%: 3%, 15%+: 0%). v2 is NOT yet confirmed or
+  contradicted — no 21d window has closed. Re-run `--window 21` once it has.
+  Data quality of the first month: zero duplicate (Date,Symbol) pairs
+  (data-date stamping works), corp-action guard present but never fired, BUT
+  10 legacy pre-v2 rows dated 2026-07-03 carry probs outside v2's 57-78 range
+  (22-100) and partial-coverage days exist (07-15: 3/15 symbols, 07-17: 2/15).
 
 ## Known gotchas — do not rediscover these the hard way
 - yfinance miscategorizes RELIANCE as IT sector — always trust sectors.json

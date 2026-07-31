@@ -22,6 +22,7 @@ from datetime import datetime
 import pandas as pd
 
 from support_resistance import load_stock, get_all_levels, reach_probability_v2, _load_reach_table
+import sr_horizon as H
 
 LOG_PATH = "../data/sr_daily_log.csv"
 
@@ -37,6 +38,15 @@ COLUMNS = [
     "R1", "R1_prob", "R1_n",
     "S2", "S2_prob", "S2_n",
     "R2", "R2_prob", "R2_n",
+    # Horizon the probabilities refer to: the month's rebalance date (last
+    # Tuesday) and the trading days remaining to it. Logged so accuracy can
+    # later be scored against the horizon actually quoted, instead of assuming
+    # a fixed 21 days. Older rows lack these — readers must treat them as 21d.
+    "HorizonEnd", "HorizonDays",
+    # Would the base-rate gate have DISPLAYED this S2/R2? The level itself is
+    # always logged (it must be, to be measurable); this records the display
+    # decision so it stays reconstructible.
+    "S2_shown", "R2_shown",
 ]
 
 
@@ -66,11 +76,18 @@ def log_stock(sym):
     cur        = float(df["Close"].iloc[-1])
     sups, ress = get_all_levels(df, symbol=sym)
 
+    # Horizon = from this snapshot's DATA date to the month's rebalance date
+    # (last Tuesday). Probabilities are quoted for that window, not a fixed 21d.
+    data_date = df.index[-1]
+    h_end = H.horizon_end(data_date)
+    h_cal = H.project_calendar_forward(H.load_trading_calendar(), h_end)
+    h_days = H.trading_days_until(data_date, h_end, h_cal)
+
     def level_and_prob(levels, i, direction):
         if len(levels) <= i:
             return None, None, None
         p = levels[i][0]
-        prob, n = reach_probability_v2(df, p, direction)
+        prob, n = reach_probability_v2(df, p, direction, h_days)
         return p, prob, n
 
     s1, s1_prob, s1_n = level_and_prob(sups, 0, "down")
@@ -79,13 +96,19 @@ def log_stock(sym):
     s2_raw, s2_prob, s2_n = level_and_prob(sups, 1, "down")
     r2_raw, r2_prob, r2_n = level_and_prob(ress, 1, "up")
 
-    # v2 probs are calibrated empirical base rates. Only surface S2/R2 when the
-    # odds genuinely beat the average level (base rate ~66%), not just >50%.
+    # S2/R2 are ALWAYS logged (2026-07-31). They used to be suppressed unless
+    # their probability beat the base rate, but this file is the MEASUREMENT
+    # record: a level that is never written can never be scored, so the gate
+    # was destroying exactly the low-probability observations needed to
+    # calibrate the low end — and it biased the logged sample toward levels the
+    # model already liked. Filtering is a DISPLAY concern (analyse_table), not
+    # a logging one. `S2_shown`/`R2_shown` preserve what the gate would have
+    # decided, so display behaviour stays reconstructible from the log.
     gate = _load_reach_table().get("base_rate", 50)
-    s2 = s2_raw if (s2_prob is not None and s2_prob > gate) else None
-    r2 = r2_raw if (r2_prob is not None and r2_prob > gate) else None
-    if s2 is None: s2_prob, s2_n = None, None
-    if r2 is None: r2_prob, r2_n = None, None
+    gate = H.scale_probability_to_horizon(gate, h_days) or gate
+    s2, r2 = s2_raw, r2_raw
+    s2_shown = bool(s2_prob is not None and s2_prob > gate)
+    r2_shown = bool(r2_prob is not None and r2_prob > gate)
 
     return {
         "Symbol":  sym.replace(".NS", ""),
@@ -101,6 +124,10 @@ def log_stock(sym):
         "R1":      r1, "R1_prob": r1_prob, "R1_n": r1_n,
         "S2":      s2, "S2_prob": s2_prob, "S2_n": s2_n,
         "R2":      r2, "R2_prob": r2_prob, "R2_n": r2_n,
+        "HorizonEnd":  h_end.strftime("%Y-%m-%d"),
+        "HorizonDays": h_days,
+        "S2_shown":    s2_shown,
+        "R2_shown":    r2_shown,
     }
 
 

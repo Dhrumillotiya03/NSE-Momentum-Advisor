@@ -14,6 +14,14 @@ Analyses performed:
 Usage:
     python sr_monthend_analysis.py
     python sr_monthend_analysis.py --touch-pct 1.0   ← override touch tolerance
+    python sr_monthend_analysis.py --window 10       ← shorter forward horizon
+    python sr_monthend_analysis.py --exclude-day0    ← drop already-touching levels
+
+WINDOW NOTE: a 21-day hit rate needs 21 trading bars after each log date. On a
+log shorter than that, NO window resolves and the rate is unmeasurable at 21d.
+--window 7/10 measures a genuinely resolvable shorter horizon instead. A 10d
+rate is NOT comparable to the 21d backtested ~65-68% figure — shorter window,
+strictly fewer touches, so it reads lower by construction.
 """
 
 import os, sys
@@ -25,6 +33,26 @@ PRICE_DIR = "../data/price_data/"
 
 TOUCH_PCT = 0.01   # price must come within 1% of level to count as "touched"
 
+# Forward window in trading days. 21 is the validated/backtested horizon, but a
+# short forward log cannot RESOLVE a 21d window (needs 21 bars after the log
+# date), and an unresolved window is not a miss. Shortening the window to
+# something the data can actually close (--window 7/10) trades horizon for
+# resolvability and yields a real, if shorter-horizon, hit rate.
+WINDOW_DAYS = 21
+
+# --to-month-end: use each row's own logged HorizonDays (distance to that
+# month's last Tuesday) instead of one fixed window. This measures exactly the
+# production question — "will it touch before the rebalance date?" — where the
+# window differs per row. Rows logged before HorizonDays existed fall back to
+# WINDOW_DAYS.
+USE_LOGGED_HORIZON = False
+
+# Exclude levels already inside the touch band on the log date. Those are
+# arithmetically guaranteed hits carrying zero predictive content, and they
+# inflate S1/R1 by ~7pp on this sample. Off by default (keeps the historical
+# definition); --exclude-day0 turns it on.
+EXCLUDE_DAY0 = False
+
 
 # ──────────────────────────────────────────────
 # LOAD
@@ -34,8 +62,31 @@ def load_log():
     if not os.path.exists(LOG_PATH):
         print(f"❌ No log found at {LOG_PATH}. Run sr_daily_logger.py first.")
         sys.exit(1)
-    df = pd.read_csv(LOG_PATH, parse_dates=["Date"])
+    df = pd.read_csv(LOG_PATH, parse_dates=["Date"], date_format="mixed")
+    # Guard the malformed-row class that has bitten this repo before (a
+    # truncated download leaves a row whose Date won't parse). Those survive as
+    # NaT and break any date comparison downstream.
+    df = df[df["Date"].notna()]
     return df.sort_values(["Symbol", "Date"])
+
+
+# v2 went live 2026-07-04; rows before it came from the old analog scan whose
+# probabilities are on a different scale and would corrupt calibration.
+#
+# This is deliberately DATE-anchored, not range-anchored. An earlier version
+# keyed on v2's 57-78 output band, which broke the moment the P(touch) table
+# replaced the bounce table — P(touch) legitimately spans ~5-95%, so a band
+# test would have silently discarded most valid modern rows. The cutover date
+# is a fixed historical fact and cannot drift with the scorer.
+V2_START_DATE = pd.Timestamp("2026-07-04")
+
+
+def drop_legacy_rows(df):
+    """Drop pre-v2 rows (logged before V2_START_DATE)."""
+    if "Date" not in df.columns:
+        return df, 0
+    legacy = df["Date"] < V2_START_DATE
+    return df[~legacy], int(legacy.sum())
 
 
 def load_price(symbol):
@@ -54,35 +105,132 @@ def load_price(symbol):
 
 
 # ──────────────────────────────────────────────
+# 0. LOG DATA QUALITY
+# ──────────────────────────────────────────────
+
+def coverage_report(log_df):
+    """Surface pipeline defects BEFORE any accuracy number is read.
+
+    A bad hit rate caused by a broken pipeline is a completely different
+    finding from a miscalibrated model, and the three failure modes below have
+    all actually occurred in this repo: duplicate (date,symbol) pairs from
+    wall-clock stamping, partial days from a stale-data/freshness bug, and
+    repeated identical snapshots from a symbol's CSV silently not updating.
+    """
+    print(f"\n{'='*70}")
+    print(f"  0. LOG DATA QUALITY")
+    print(f"{'='*70}")
+
+    dup = log_df.duplicated(subset=["Date", "Symbol"]).sum()
+    print(f"  Duplicate (Date,Symbol) pairs: {dup}" + ("  ⚠️" if dup else "  ✅"))
+
+    per_day = log_df.groupby("Date")["Symbol"].nunique()
+    if len(per_day):
+        panel = int(per_day.max())
+        partial = per_day[per_day < panel * 0.8]
+        print(f"  Panel size (max symbols on a day): {panel}")
+        if len(partial):
+            print(f"  ⚠️  {len(partial)} partial day(s) — under 80% of the panel "
+                  f"(stale-data / missed-run class):")
+            for d, c in partial.items():
+                print(f"      {pd.Timestamp(d).date()}  {c}/{panel} symbols")
+        else:
+            print("  ✅ No partial days")
+
+    # Frozen series: identical CMP on consecutive log dates means that
+    # symbol's price CSV did not update — the freshness bug. Levels recomputed
+    # from an unchanged file are a duplicate observation, not new evidence.
+    frozen = []
+    for sym, grp in log_df.sort_values("Date").groupby("Symbol"):
+        if len(grp) < 3:
+            continue
+        cmp_ = pd.to_numeric(grp["CMP"], errors="coerce")
+        streak = int((cmp_.diff() == 0).astype(int).groupby(
+            (cmp_.diff() != 0).cumsum()).sum().max() or 0)
+        if streak >= 2:
+            frozen.append((sym, streak))
+    if frozen:
+        print(f"  ⚠️  {len(frozen)} symbol(s) with an unchanged CMP across "
+              f"consecutive log dates (possible stale CSV):")
+        for s, k in sorted(frozen, key=lambda x: -x[1])[:8]:
+            print(f"      {s}: {k+1} consecutive identical closes")
+    else:
+        print("  ✅ No frozen price series")
+
+
+# ──────────────────────────────────────────────
 # 1. BASIC HIT-RATE PER LOGGED SNAPSHOT
 # ──────────────────────────────────────────────
 
-def check_touch(price_df, log_date, level, direction, window_days=21):
+def check_touch(price_df, log_date, level, direction, window_days=None):
     """
     direction: 'down' = check Low reaches level (support)
                'up'   = check High reaches level (resistance)
-    Returns True/False/None (None = not enough future data yet)
-    """
-    future = price_df[price_df.index > log_date].head(window_days)
-    if len(future) < 3:
-        return None   # not enough time has passed yet
 
+    Returns True (touched inside the window), False (RESOLVED miss — the full
+    window elapsed without a touch), or None (window still open; outcome
+    genuinely unknown, must not be scored either way).
+
+    The True/None distinction is the whole ballgame: scoring an open window as
+    a miss deflates the rate, and dropping open windows while keeping every hit
+    (the previous `resolved = FwdDays>=21 | Hit` filter) forces exactly 100%.
+    """
+    W = window_days or WINDOW_DAYS
+    future = price_df[price_df.index > log_date]
+    n_bars = len(future)
+
+    # SYMMETRY REQUIREMENT: score a snapshot only when the full W-bar window
+    # exists. Returning True the moment a touch happens (even at bar 3) while
+    # misses must wait the full W biases the sample catastrophically — hits
+    # resolve early, misses never resolve, and the rate pins at 100%. That is
+    # exactly the bug this replaced. Both outcomes must face the same bar count.
+    if n_bars < W:
+        return None
+
+    window = future.head(W)
     if direction == "down":
-        touch_line = level * (1 + TOUCH_PCT)
-        return bool((future["Low"] <= touch_line).any())
-    else:
-        touch_line = level * (1 - TOUCH_PCT)
-        return bool((future["High"] >= touch_line).any())
+        return bool((window["Low"] <= level * (1 + TOUCH_PCT)).any())
+    return bool((window["High"] >= level * (1 - TOUCH_PCT)).any())
+
+
+def already_touching(cmp_, level, direction):
+    """True if the level sits inside the touch band at log time — a guaranteed
+    hit with no predictive content."""
+    if cmp_ is None or not cmp_ or pd.isna(cmp_):
+        return False
+    if direction == "down":
+        return float(cmp_) <= float(level) * (1 + TOUCH_PCT)
+    return float(cmp_) >= float(level) * (1 - TOUCH_PCT)
 
 
 def analyse_hit_rates(log_df):
+    # Does the log actually carry per-row horizons? --to-month-end silently
+    # falls back to WINDOW_DAYS without them, which would misreport what was
+    # measured — the same class of silent-fallback bug that produced the fake
+    # 100%. Say plainly which horizon is in force.
+    have_horizon = ("HorizonDays" in log_df.columns
+                    and log_df["HorizonDays"].notna().any())
+    horizon_desc = f"within {WINDOW_DAYS} days of log date"
+    if USE_LOGGED_HORIZON:
+        if have_horizon:
+            hd = pd.to_numeric(log_df["HorizonDays"], errors="coerce").dropna()
+            horizon_desc = (f"by each row's own month-end "
+                            f"({int(hd.min())}-{int(hd.max())} days, per row)")
+        else:
+            horizon_desc = (f"within {WINDOW_DAYS} days "
+                            f"[--to-month-end IGNORED: log has no HorizonDays yet]")
+
     print(f"\n{'='*70}")
-    print(f"  1. HIT-RATE — did price touch S1 / R1 within 21 days of log date?")
+    print(f"  1. HIT-RATE — did price touch S1 / R1 {horizon_desc}?")
+    if EXCLUDE_DAY0:
+        print(f"     (excluding levels already inside the {TOUCH_PCT*100:.0f}% touch band at log time)")
     print(f"{'='*70}")
 
     results = []
     price_cache = {}
     adjusted_skips = {}
+    open_windows = {}
+    day0_skips = {}
 
     for _, row in log_df.iterrows():
         sym = row["Symbol"]
@@ -108,25 +256,25 @@ def analyse_hit_rates(log_df):
                 adjusted_skips[sym] = float(row["CMP"]) / ref
                 continue
 
-        if pd.notna(row.get("S1")):
-            hit = check_touch(pdf, log_date, row["S1"], "down")
-            if hit is not None:
-                results.append(("S1", sym, row["S1_prob"], row["S1_n"], hit, fwd_days))
-
-        if pd.notna(row.get("R1")):
-            hit = check_touch(pdf, log_date, row["R1"], "up")
-            if hit is not None:
-                results.append(("R1", sym, row["R1_prob"], row["R1_n"], hit, fwd_days))
-
-        if pd.notna(row.get("S2")):
-            hit = check_touch(pdf, log_date, row["S2"], "down")
-            if hit is not None:
-                results.append(("S2", sym, row["S2_prob"], row["S2_n"], hit, fwd_days))
-
-        if pd.notna(row.get("R2")):
-            hit = check_touch(pdf, log_date, row["R2"], "up")
-            if hit is not None:
-                results.append(("R2", sym, row["R2_prob"], row["R2_n"], hit, fwd_days))
+        for lvl, direction in [("S1", "down"), ("R1", "up"),
+                               ("S2", "down"), ("R2", "up")]:
+            if not pd.notna(row.get(lvl)):
+                continue
+            if EXCLUDE_DAY0 and already_touching(row.get("CMP"), row[lvl], direction):
+                day0_skips[lvl] = day0_skips.get(lvl, 0) + 1
+                continue
+            # Per-row horizon when requested and available, else the flag/default.
+            W = WINDOW_DAYS
+            if USE_LOGGED_HORIZON and pd.notna(row.get("HorizonDays")):
+                W = int(row["HorizonDays"])
+            if W <= 0:
+                continue
+            hit = check_touch(pdf, log_date, row[lvl], direction, W)
+            if hit is not None:   # None = window still open, not scoreable
+                results.append((lvl, sym, row[f"{lvl}_prob"], row[f"{lvl}_n"],
+                                hit, fwd_days))
+            else:
+                open_windows[lvl] = open_windows.get(lvl, 0) + 1
 
     if adjusted_skips:
         print("  ⚠️  Skipped symbols whose price history was back-adjusted AFTER "
@@ -139,46 +287,42 @@ def analyse_hit_rates(log_df):
         print("  (Need at least ~5 trading days after a log date to check.)")
         return pd.DataFrame(columns=["Level", "Symbol", "Prob", "N", "Hit", "FwdDays"])
 
+    if day0_skips:
+        print(f"  Excluded {sum(day0_skips.values())} level(s) already inside the "
+              f"touch band at log time (guaranteed hits): "
+              + ", ".join(f"{k} {v}" for k, v in sorted(day0_skips.items())))
+
     res_df = pd.DataFrame(results, columns=["Level", "Symbol", "Prob", "N", "Hit", "FwdDays"])
 
-    # A snapshot's 21d window is only RESOLVED once 21 forward bars exist (or
-    # the level was already hit). Truncated windows can only under-count hits
-    # — a miss-so-far may still hit tomorrow — so reporting them as misses
-    # deflates the rate. Split the two so early runs can't mislead.
-    resolved = res_df[(res_df["FwdDays"] >= 21) | res_df["Hit"]]
-
+    # Every row here is RESOLVED by construction: check_touch returned None for
+    # any window that hadn't completed, and those never entered `results`. So a
+    # False is a real miss and the mean is an honest rate — no filter needed.
+    # (The previous `FwdDays>=21 | Hit` filter kept all hits but dropped every
+    # unresolved miss, which forced 100% whenever no window had closed.)
     for lvl in ["S1", "R1", "S2", "R2"]:
         sub = res_df[res_df["Level"] == lvl]
-        if len(sub) == 0:
-            continue
-        rsub = resolved[resolved["Level"] == lvl]
         line = f"  {lvl}: "
-        if len(rsub):
-            line += f"{rsub['Hit'].mean()*100:.1f}% hit rate  (n={len(rsub)} resolved)"
+        if len(sub):
+            line += f"{sub['Hit'].mean()*100:.1f}% hit rate  (n={len(sub)} resolved)"
         else:
             line += "no resolved snapshots yet"
-        pending = len(sub) - len(rsub)
+        pending = open_windows.get(lvl, 0)
         if pending:
-            line += f"  [{pending} truncated window(s) still open — not counted as misses]"
+            line += f"  [{pending} window(s) still open — excluded, not scored]"
         print(line)
 
-    if len(resolved):
-        print(f"\n  Overall hit rate: {resolved['Hit'].mean()*100:.1f}%  "
-              f"(n={len(resolved)} resolved of {len(res_df)} total)")
-    avg_fwd = res_df["FwdDays"].mean()
-    if avg_fwd < 21 and len(res_df) > len(resolved):
-        # Resolved-only is biased HIGH early (only hits resolve before day 21);
-        # counting every open window as a miss is the LOW extreme. Truth lands
-        # between the two once windows fill out.
-        lo = res_df["Hit"].mean() * 100
-        hi = resolved["Hit"].mean() * 100 if len(resolved) else float("nan")
-        print(f"  ⚠️  Avg forward window is only {avg_fwd:.1f}/21 trading days. "
-              f"Final hit rate will land between {lo:.0f}% (every open window "
-              f"misses) and {hi:.0f}% (current resolved) — don't judge v2 yet.")
+    if len(res_df):
+        print(f"\n  Overall hit rate: {res_df['Hit'].mean()*100:.1f}%  "
+              f"(n={len(res_df)} resolved, {sum(open_windows.values())} still open)")
+    else:
+        print(f"\n  No {WINDOW_DAYS}-day window has completed yet. Re-run with "
+              f"--window 7 or --window 10 for a shorter but resolvable horizon.")
 
-    # Downstream sections (calibration, n-sensitivity, distance) get only
-    # resolved outcomes — truncated not-yet-misses would bias them low too.
-    return resolved
+    if sum(open_windows.values()) > len(res_df):
+        print(f"  ⚠️  More windows are open than resolved — the resolved set is "
+              f"skewed toward EARLIER log dates. Treat as provisional.")
+
+    return res_df
 
 
 # ──────────────────────────────────────────────
@@ -218,6 +362,11 @@ def analyse_calibration(res_df):
     print(f"\n{'='*70}")
     print(f"  3. PROBABILITY CALIBRATION — predicted prob vs actual hit-rate")
     print(f"{'='*70}")
+    print(f"  ⓘ Scores the probabilities AS LOGGED. Rows written before the")
+    print(f"    P(touch) table replaced the P(bounce|touched) table carry the")
+    print(f"    OLD metric, so this section cannot judge the new table until a")
+    print(f"    fresh month has been logged under it. Mixed-metric rows make")
+    print(f"    the buckets uninterpretable — not evidence of miscalibration.")
 
     if len(res_df) == 0:
         print("  No data yet — need touch results from section 1 first.")
@@ -228,11 +377,15 @@ def analyse_calibration(res_df):
         print("  No probability data available.")
         return
 
-    # Fine buckets in reach_probability_v2's operating range (~57-77%). The old
-    # 10-wide buckets from 0-100 left everything crammed into 60-70/70-80 because
-    # v2 is an empirical base-rate model, not the 0-100 analog scan. Narrow bins
-    # here are what let month-end data tell 57% vs 66% vs 74% cells apart.
-    buckets = [(0, 58), (58, 62), (62, 66), (66, 70), (70, 74), (74, 101)]
+    # Bucket edges must match the ACTIVE table's output range. The bounce table
+    # was compressed into ~57-77 so it needed narrow bins there; the P(touch)
+    # table legitimately spans ~5-95%, where those bins would leave most rows
+    # in a single "0-57" bucket. Pick the geometry from the data itself.
+    span = res_df["Prob"].max() - res_df["Prob"].min() if len(res_df) else 0
+    if span > 30:      # wide-range table (P(touch))
+        buckets = [(0, 20), (20, 40), (40, 60), (60, 75), (75, 90), (90, 101)]
+    else:              # compressed legacy band (P(bounce|touched))
+        buckets = [(0, 58), (58, 62), (62, 66), (66, 70), (70, 74), (74, 101)]
     print(f"  {'Predicted range':<18} {'Actual hit rate':>16} {'n':>6}")
     print("  " + "─"*44)
 
@@ -342,10 +495,23 @@ def analyse_distance(log_df, res_df):
 # ──────────────────────────────────────────────
 
 def main():
-    global TOUCH_PCT, LOG_PATH
+    global TOUCH_PCT, LOG_PATH, WINDOW_DAYS, EXCLUDE_DAY0
     if "--touch-pct" in sys.argv:
         idx = sys.argv.index("--touch-pct")
         TOUCH_PCT = float(sys.argv[idx + 1]) / 100
+    # --window N: shorten the forward horizon so windows actually resolve on a
+    # short log. Default 21 = the validated backtest horizon.
+    if "--window" in sys.argv:
+        idx = sys.argv.index("--window")
+        WINDOW_DAYS = int(sys.argv[idx + 1])
+    # --to-month-end: score each snapshot against ITS OWN logged horizon (the
+    # HorizonDays column) rather than one fixed window — i.e. measure exactly
+    # the question the subsystem answers in production.
+    if "--to-month-end" in sys.argv:
+        global USE_LOGGED_HORIZON
+        USE_LOGGED_HORIZON = True
+    if "--exclude-day0" in sys.argv:
+        EXCLUDE_DAY0 = True
     # --log <path>: analyse an alternate log, e.g. ../data/sr_dynamic_log.csv
     # (built by sr_dynamic_logger.py). Default stays the fixed-panel log.
     if "--log" in sys.argv:
@@ -354,8 +520,17 @@ def main():
 
     log_df = load_log()
 
+    if "--keep-legacy" not in sys.argv:
+        log_df, n_legacy = drop_legacy_rows(log_df)
+        if n_legacy:
+            print(f"\nDropped {n_legacy} row(s) logged before {V2_START_DATE.date()} "
+                  f"(pre-v2 scorer, different probability scale; "
+                  f"--keep-legacy to retain)")
+
     print(f"\nLoaded {len(log_df)} log rows across {log_df['Symbol'].nunique()} stocks")
     print(f"Date range: {log_df['Date'].min().date()} → {log_df['Date'].max().date()}")
+
+    coverage_report(log_df)
 
     res_df = analyse_hit_rates(log_df)
     analyse_drift(log_df)

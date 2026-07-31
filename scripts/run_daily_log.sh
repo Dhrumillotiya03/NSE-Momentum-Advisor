@@ -8,6 +8,13 @@ cd "$(dirname "$0")" || exit 1
 PYTHON=/home/dhrumil/anaconda3/bin/python
 LOG=../data/cron_daily_log.log
 
+# Rotate the run log once it passes ~5MB, keeping one previous generation.
+# It is append-only across every run and nothing prunes it, so it grows
+# without bound; only the recent tail is ever read (to check what a run did).
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 5242880 ]; then
+    mv -f "$LOG" "$LOG.1"
+fi
+
 # The pipeline is safe to run at ANY hour: the user powers on at no fixed
 # time and the systemd timer fires missed runs at boot. A download during
 # market hours writes today's PARTIAL candle — trim_partial.py (below,

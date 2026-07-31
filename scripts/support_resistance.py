@@ -435,19 +435,144 @@ def reach_probability(df, level, direction, forward_days=21, lookback_days=504):
 
 import json as _json
 
+# P(TOUCH) table — the metric every consumer actually asks for. Preferred when
+# present. The older sr_reach_table.json measures P(bounce | touched): its
+# builder drops untouched levels entirely (sr_backtest.test_support returns
+# None when never touched), so distant levels are conditioned on having been
+# reached and the table comes out nearly FLAT in distance (12%+ reads ~66%,
+# above 0-2%'s ~57%) while reality decays hard. See sr_build_touchtable.py.
+_TOUCH_TABLE_PATH = "../data/sr_touch_table.json"
 _REACH_TABLE_PATH = "../data/sr_reach_table.json"
 _REACH_TABLE = None   # lazy-loaded singleton
 
 
+_HORIZON_TABLES = {}   # forward_days -> table (or None if none on disk)
+
+
 def _load_reach_table():
+    """Prefer the P(touch) table; fall back to the legacy bounce table."""
     global _REACH_TABLE
     if _REACH_TABLE is None:
-        if os.path.exists(_REACH_TABLE_PATH):
-            with open(_REACH_TABLE_PATH) as f:
-                _REACH_TABLE = _json.load(f)
+        for path in (_TOUCH_TABLE_PATH, _REACH_TABLE_PATH):
+            if os.path.exists(path):
+                with open(path) as f:
+                    _REACH_TABLE = _json.load(f)
+                break
         else:
             _REACH_TABLE = {}   # missing table -> callers fall back
     return _REACH_TABLE
+
+
+def _available_horizon_tables():
+    """{forward_days: path} for every natively-built P(touch) table on disk."""
+    out = {}
+    base = "../data"
+    if not os.path.isdir(base):
+        return out
+    for fn in os.listdir(base):
+        if fn.startswith("sr_touch_table_") and fn.endswith("d.json"):
+            try:
+                out[int(fn[len("sr_touch_table_"):-len("d.json")])] = \
+                    os.path.join(base, fn)
+            except ValueError:
+                continue
+    if os.path.exists(_TOUCH_TABLE_PATH):
+        out.setdefault(21, _TOUCH_TABLE_PATH)
+    return out
+
+
+def _read_horizon_table(path):
+    try:
+        with open(path) as f:
+            return _json.load(f)
+    except Exception:
+        return None
+
+
+def _load_horizon_table(forward_days):
+    """The natively-built table matching `forward_days` EXACTLY, else None.
+
+    Deliberately exact-match. An earlier version returned the nearest table
+    within a few days and let the caller rescale from it, but that made
+    P(touch) NON-MONOTONIC in horizon: at 13d it rescaled the 10d table upward
+    to 94% while 14d switched to the 21d table and read 90%, so a LONGER
+    horizon reported a LOWER touch probability — impossible, and visible to the
+    user as a number that jumps around as the month advances.
+
+    Interpolation between bracketing tables (see _interpolate_horizon_prob)
+    handles the in-between horizons instead, which is both monotonic and more
+    accurate than extrapolating from one side.
+    """
+    if forward_days in _HORIZON_TABLES:
+        return _HORIZON_TABLES[forward_days]
+    avail = _available_horizon_tables()
+    tbl = _read_horizon_table(avail[forward_days]) if forward_days in avail else None
+    _HORIZON_TABLES[forward_days] = tbl
+    return tbl
+
+
+def _interpolate_horizon_prob(dist_pct, vol, forward_days):
+    """P(touch) at `forward_days` by interpolating between the two native
+    tables that bracket it. Returns (prob, n) or None if not bracketed.
+
+    Interpolation is done in sqrt(time), matching the first-passage scaling the
+    fallback uses, so the curve is smooth and monotone between anchors. This
+    keeps every horizon grounded in EMPIRICAL tables rather than extrapolating
+    one table across the whole month.
+    """
+    avail = _available_horizon_tables()
+    if not avail:
+        return None
+    lo = max((d for d in avail if d <= forward_days), default=None)
+    hi = min((d for d in avail if d >= forward_days), default=None)
+
+    # Outside the anchor range (e.g. 1-4d when the shortest table is 5d):
+    # extrapolate by sqrt-time from the NEAREST anchor, not from the 21d table.
+    # Scaling from a distant anchor disagrees with the near one and produced a
+    # non-monotonic seam — WIPRO S1 read 22% at 4d (scaled from 21d) then 19%
+    # at 5d (native), i.e. a longer horizon looking less likely.
+    if lo is None or hi is None:
+        anchor_days = hi if lo is None else lo
+        t = _read_horizon_table(avail[anchor_days])
+        if not t:
+            return None
+        db = _bucket(dist_pct, t["dist_edges"], t["dist_labels"])
+        vb = _bucket(vol,      t["vol_edges"],  t["vol_labels"])
+        c = t["table"].get(f"{db}|{vb}")
+        p = float(c["prob"]) if c else float(t.get("base_rate", 50))
+        n = int(c.get("n", 0)) if c else 0
+        from sr_horizon import scale_probability_to_horizon
+        scaled = scale_probability_to_horizon(p, forward_days, anchor_days)
+        if scaled is None:
+            return None
+        # Never let a short extrapolation exceed its own anchor (or fall below,
+        # when extrapolating past the longest table).
+        scaled = min(scaled, p) if forward_days < anchor_days else max(scaled, p)
+        return int(round(scaled)), n
+
+    if lo == hi:
+        return None
+
+    t_lo, t_hi = _read_horizon_table(avail[lo]), _read_horizon_table(avail[hi])
+    if not t_lo or not t_hi:
+        return None
+
+    def cell_of(t):
+        db = _bucket(dist_pct, t["dist_edges"], t["dist_labels"])
+        vb = _bucket(vol,      t["vol_edges"],  t["vol_labels"])
+        c = t["table"].get(f"{db}|{vb}")
+        return (float(c["prob"]), int(c.get("n", 0))) if c else \
+               (float(t.get("base_rate", 50)), 0)
+
+    p_lo, n_lo = cell_of(t_lo)
+    p_hi, n_hi = cell_of(t_hi)
+
+    w = (np.sqrt(forward_days) - np.sqrt(lo)) / (np.sqrt(hi) - np.sqrt(lo))
+    prob = p_lo + w * (p_hi - p_lo)
+    # Monotone in horizon by construction, but clamp against inverted anchors
+    # (possible from sampling noise in thin cells) so the guarantee is absolute.
+    prob = min(max(prob, min(p_lo, p_hi)), max(p_lo, p_hi))
+    return int(round(prob)), min(n_lo, n_hi)
 
 
 def _bucket(value, edges, labels):
@@ -457,18 +582,39 @@ def _bucket(value, edges, labels):
     return labels[-1]
 
 
-def reach_probability_v2(df, level, direction, forward_days=21):
+def reach_probability_v2(df, level, direction, forward_days=None, cur=None):
     """
     Empirical reach probability from the (distance × volatility) table.
     Returns (prob:int|None, n:int) — n is the training-cell sample size
     (not a per-stock count). Returns (None, 0) if the level is on the wrong
     side of price or the table is unavailable.
+
+    METRIC: with sr_touch_table.json present this is P(TOUCH) — the question
+    every caller actually asks. The legacy sr_reach_table.json measured
+    P(bounce | touched) because its builder DROPPED untouched levels, which
+    made it nearly flat in distance (12%+ read ~66%, above 0-2%'s ~57%). The
+    P(touch) table decays properly (94.5% -> 5.9% across distance at 25-35%
+    vol) and triples OOS correlation (0.529 vs 0.173).
+
+    forward_days: horizon in TRADING DAYS. Resolution order:
+      1. a table built natively at this horizon (sr_touch_table_<N>d.json) —
+         empirical, preferred;
+      2. otherwise the 21d table rescaled by sqrt-of-time (approximate).
+      Previously this argument was accepted and then IGNORED, so a caller
+      asking for a 9-day horizon silently got the 21-day probability — a
+      systematic overstatement. None/omitted = the table's native window
+      (unchanged behaviour for existing callers).
+
+    cur: override the reference price — pass the LIVE quote here so distance is
+      measured from the real current price rather than the last CSV close.
     """
-    tbl = _load_reach_table()
+    # Prefer a table built natively at this horizon over rescaling the 21d one.
+    native = _load_horizon_table(forward_days) if forward_days else None
+    tbl = native or _load_reach_table()
     if not tbl:
         return None, 0
 
-    cur = float(df["Close"].iloc[-1])
+    cur = float(cur) if cur else float(df["Close"].iloc[-1])
     dist_pct = (cur - level) / cur if direction == "down" else (level - cur) / cur
     if dist_pct <= 0:
         return None, 0
@@ -482,8 +628,24 @@ def reach_probability_v2(df, level, direction, forward_days=21):
     vb = _bucket(vol,      tbl["vol_edges"],  tbl["vol_labels"])
     cell = tbl["table"].get(f"{db}|{vb}")
     if cell is None:
-        return int(round(tbl["base_rate"])), 0
-    return int(round(cell["prob"])), int(cell.get("n", 0))
+        prob, n = int(round(tbl["base_rate"])), 0
+    else:
+        prob, n = int(round(cell["prob"])), int(cell.get("n", 0))
+
+    # Horizon resolution, best source first:
+    #   1. native table at exactly this horizon  -> already empirical, no scaling
+    #   2. interpolation between bracketing native tables (sqrt-time weighted)
+    #   3. sqrt-of-time rescale of whatever table we have (approximate)
+    table_days = int(tbl.get("forward_days", 21))
+    if forward_days is not None and int(forward_days) != table_days:
+        interp = _interpolate_horizon_prob(dist_pct, vol, int(forward_days))
+        if interp is not None:
+            prob, n = interp
+        else:
+            from sr_horizon import scale_probability_to_horizon
+            prob = scale_probability_to_horizon(prob, int(forward_days), table_days)
+
+    return prob, n
 
 
 # ──────────────────────────────────────────────
@@ -573,7 +735,26 @@ def get_trade_levels(df, symbol=None):
 
 GAP = "     "
 
-def analyse_table(symbols):
+def analyse_table(symbols, as_of=None, live_prices=None):
+    """Horizon-aware S/R table.
+
+    The reported levels and probabilities answer: "from `as_of` (default today)
+    until this month's REBALANCE DATE — the last Tuesday — will price touch
+    this level?" The horizon shrinks as the month progresses, and the
+    probabilities shrink with it.
+
+    live_prices: optional {SYMBOL: price} from the live quote API. When a
+    symbol is present, that price is used as CMP and as the reference for
+    distance/probability; otherwise the last CSV close is used.
+    """
+    import sr_horizon as H
+
+    as_of = pd.Timestamp(as_of).normalize() if as_of is not None \
+        else pd.Timestamp.today().normalize()
+    end = H.horizon_end(as_of)
+    cal = H.project_calendar_forward(H.load_trading_calendar(), end)
+    horizon_days = H.trading_days_until(as_of, end, cal)
+
     rows = []
     for sym in symbols:
         sym = sym.strip().upper()
@@ -584,14 +765,37 @@ def analyse_table(symbols):
         ctx        = get_trend_context(df)
         sups, ress = get_all_levels(df, symbol=sym)
         t          = get_trade_levels(df, symbol=sym)
-        cur        = ctx["cur"]
 
-        s1_prob, _ = reach_probability_v2(df, sups[0][0], "down") if sups else (None, 0)
-        r1_prob, _ = reach_probability_v2(df, ress[0][0], "up")   if ress else (None, 0)
+        # Live quote overrides the last close as the reference price. Levels
+        # are structural (built from history) but DISTANCE and PROBABILITY must
+        # be measured from where the stock actually is right now.
+        live = (live_prices or {}).get(sym.replace(".NS", "")) or \
+               (live_prices or {}).get(sym)
+        cur  = round(float(live), 2) if live else ctx["cur"]
 
+        s1_prob, _ = reach_probability_v2(df, sups[0][0], "down", horizon_days, cur) \
+            if sups else (None, 0)
+        r1_prob, _ = reach_probability_v2(df, ress[0][0], "up", horizon_days, cur) \
+            if ress else (None, 0)
+        # S2/R2 now carry a meaningful probability too. Under the old
+        # P(bounce|touched) table their numbers were near-constant and
+        # uninformative; under P(touch) a distant S2 correctly reads low, which
+        # is exactly what a user needs to see before planning around it.
+        s2_prob, _ = reach_probability_v2(df, sups[1][0], "down", horizon_days, cur) \
+            if len(sups) > 1 else (None, 0)
+        r2_prob, _ = reach_probability_v2(df, ress[1][0], "up", horizon_days, cur) \
+            if len(ress) > 1 else (None, 0)
+
+        # A level can end up on the WRONG side of price — especially with live
+        # intraday quotes, where a support computed from history gets breached
+        # mid-session. That is real information (the level flipped), so label
+        # it BROKEN rather than printing a nonsense "--0.4%". reach_probability
+        # returns None in that case by design, so no probability is shown.
         def fmt_s(levels, i, prob=None):
             if len(levels) <= i: return "—"
             p, _, score = levels[i]
+            if p > cur:
+                return f"₹{p:,.2f} (BROKEN +{round((p-cur)/cur*100,1)}%)"
             dist = round((cur - p) / cur * 100, 1)
             flag = " ⚠" if dist > 15 else ""
             prob_tag = f" [{prob}%]" if prob is not None else ""
@@ -600,6 +804,8 @@ def analyse_table(symbols):
         def fmt_r(levels, i, prob=None):
             if len(levels) <= i: return "—"
             p, _, score = levels[i]
+            if p < cur:
+                return f"₹{p:,.2f} (BROKEN -{round((cur-p)/cur*100,1)}%)"
             dist = round((p - cur) / cur * 100, 1)
             flag = " ⚠" if dist > 15 else ""
             prob_tag = f" [{prob}%]" if prob is not None else ""
@@ -621,9 +827,9 @@ def analyse_table(symbols):
             "Symbol": sym.replace(".NS",""),
             "CMP":    f"₹{cur:,.2f}",
             "S1":     fmt_s(sups, 0, s1_prob),
-            "S2":     fmt_s(sups, 1),
+            "S2":     fmt_s(sups, 1, s2_prob),
             "R1":     fmt_r(ress, 0, r1_prob),
-            "R2":     fmt_r(ress, 1),
+            "R2":     fmt_r(ress, 1, r2_prob),
             "RSI":    f"{rsi}{rsi_tag}",
             "Bias":   trend_map.get(ctx["trend"], ctx["trend"]),
             "R:R":    f"1:{t['rr']}",
@@ -631,6 +837,11 @@ def analyse_table(symbols):
         })
 
     if not rows: print("No data."); return
+    live_n = sum(1 for s in symbols if (live_prices or {}).get(
+        s.strip().upper().replace(".NS", "")))
+    print(f"\n  Horizon: {as_of.date()} → {end.date()} (last Tue) — "
+          f"{horizon_days} trading days")
+    print(f"  CMP source: {'LIVE quotes for ' + str(live_n) + ' symbol(s)' if live_n else 'last CSV close'}")
     cols   = ["Symbol","CMP","S1","S2","R1","R2","RSI","Bias","R:R","Deliv"]
     widths = {c: max(len(c), max(len(r[c]) for r in rows)) for c in cols}
     sep    = GAP.join("─"*widths[c] for c in cols)
@@ -641,7 +852,13 @@ def analyse_table(symbols):
     for r in rows:
         print(GAP.join(str(r[c]).ljust(widths[c]) for c in cols))
     print(f"{sep}")
-    print(f"\n  S1/R1 [xx%] = reach probability within 21 days")
+    print(f"\n  S1/R1 [xx%] = reach probability by {end.date()} "
+          f"({horizon_days} trading days)")
+    if horizon_days != H.TABLE_FORWARD_DAYS:
+        print(f"  ⓘ Table is calibrated at {H.TABLE_FORWARD_DAYS}d; these are "
+              f"rescaled to the {horizon_days}d horizon (approximate — "
+              f"direction and rough size are right, exact value is not "
+              f"empirically calibrated at this horizon).")
     print(f"  ⚠ = level >15% from CMP   📦Hi/Lo = delivery volume signal\n")
 
 
@@ -702,13 +919,58 @@ def analyse(symbols):
         print(f"{'═'*66}\n")
 
 
+def fetch_live_prices(symbols):
+    """{SYMBOL: price} from live_quotes.py, for use as CMP.
+
+    Only genuinely live quotes are returned — live_quotes falls back to the
+    last CSV close and flags it stale, and a stale "live" price is just the
+    close wearing a costume. Dropping those makes analyse_table fall through
+    to its normal close-based path instead of implying a freshness it lacks.
+    """
+    try:
+        from live_quotes import get_quotes
+    except Exception as e:
+        print(f"  ⚠️  live quotes unavailable ({e}) — using last CSV close.")
+        return None
+
+    syms = [s.strip().upper() if s.strip().upper().endswith(".NS")
+            else s.strip().upper() + ".NS" for s in symbols]
+    out, stale = {}, []
+    for sym, (price, is_stale) in get_quotes(syms).items():
+        if price is None:
+            continue
+        if is_stale:
+            stale.append(sym.replace(".NS", ""))
+            continue
+        out[sym.replace(".NS", "")] = float(price)
+    if stale:
+        print(f"  ⚠️  stale quote (using CSV close) for: {', '.join(sorted(stale))}")
+    return out or None
+
+
 # ──────────────────────────────────────────────
 # ENTRY POINT
 # ──────────────────────────────────────────────
 
 def main():
-    args    = [a for a in sys.argv[1:] if not a.startswith("--")]
-    verbose = "--verbose" in sys.argv
+    argv    = sys.argv[1:]
+    verbose = "--verbose" in argv
+
+    # --as-of YYYY-MM-DD: pretend the run happened on that date (testing the
+    # shrinking horizon without waiting for the calendar).
+    as_of = None
+    if "--as-of" in argv:
+        i = argv.index("--as-of")
+        as_of = argv[i + 1]
+        argv = argv[:i] + argv[i + 2:]
+
+    # --live: pull current prices from live_quotes.py instead of the last CSV
+    # close. Levels stay structural; CMP/distance/probability use the live px.
+    live_prices = None
+    if "--live" in argv:
+        argv = [a for a in argv if a != "--live"]
+
+    args = [a for a in argv if not a.startswith("--")]
     if args:
         symbols = args
     else:
@@ -716,10 +978,14 @@ def main():
         symbols = [s.strip() for s in raw.replace(",", " ").split() if s.strip()]
     if not symbols:
         print("No symbols."); return
+
+    if "--live" in sys.argv:
+        live_prices = fetch_live_prices(symbols)
+
     if verbose:
         analyse(symbols)
     else:
-        analyse_table(symbols)
+        analyse_table(symbols, as_of=as_of, live_prices=live_prices)
 
 
 if __name__ == "__main__":
