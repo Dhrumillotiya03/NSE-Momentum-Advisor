@@ -1,9 +1,0 @@
-date,symbol,action,price,qty,value,regime,sector,reason,pnl
-2026-07-14,HFCL.NS,BUY,214.63,264,56662.32,BEAR,TELECOM,agent-sim: Momentum stock allocation,
-2026-07-14,WELCORP.NS,BUY,1648.8,45,74196.0,BEAR,N/A,agent-sim: Momentum stock allocation,
-2026-07-14,SYRMA.NS,BUY,1431.7,52,74448.4,BEAR,RETAIL_CONSUMER,agent-sim: Momentum stock allocation,
-2026-07-14,PREMIERENE.NS,BUY,1109.5,67,74336.5,BEAR,N/A,agent-sim: Momentum stock allocation,
-2026-07-14,GOLDBEES.NS,BUY,116.33,1293,150414.69,BEAR,N/A,agent-sim: ETF sleeve rebalance,
-2026-07-14,MON100.NS,BUY,333.22,300,99966.0,BEAR,N/A,agent-sim: ETF sleeve rebalance,
-2026-07-15,SYRMA.NS,SELL,1421.8,10,14218.0,BEAR,RETAIL_CONSUMER,agent-sim: Current loss and need to lock in gains,-99.0
-2026-07-15,PREMIERENE.NS,SELL,1100.9,5,5504.5,BEAR,N/A,agent-sim: Small loss and overall portfolio health,-43.0
