@@ -1,4 +1,14 @@
 # Personal / live trading data — never commit
+#
+# NOTE: .gitignore only affects UNTRACKED files. Files committed before a rule
+# was added stay tracked and keep getting published regardless of what is
+# listed here. That is exactly what happened: 567 data/ files (including the
+# real portfolio_state.json with live share quantities and entry prices) were
+# committed before this rule existed and remained public until 2026-07-31.
+# If you ever need to un-publish something, `git rm --cached <path>` is the
+# step that actually stops it — adding it here is not enough.
+#
+# Verify with:  git ls-files data/ | head
 data/
 *.csv
 *.log

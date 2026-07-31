@@ -10,7 +10,8 @@ Conceptually similar to what you'd get from Wright Research (momentum model port
 
 - **Momentum stock selection** — ranks a liquidity-gated universe (~200 names, sized off trailing turnover as a point-in-time proxy for the NSE F&O roster) using a 126-day return / 63-day volatility score, rebalanced on a 21-trading-day cycle.
 - **Regime detection** — classifies the market (BULL / SIDEWAYS / BEAR / UNKNOWN) from Nifty breadth and moving averages, and scales portfolio exposure and position count accordingly.
-- **Support/Resistance engine** — swing-pivot based S/R levels (confluence-filtered, touch-count weighted, with 52-week extreme fallback), reach-probability estimates per level, and NSE bhavcopy delivery-volume overlay.
+- **Support/Resistance engine** — swing-pivot based S/R levels (confluence-filtered, touch-count weighted, with 52-week extreme fallback), empirical touch-probability estimates per level, and NSE bhavcopy delivery-volume overlay. Levels are quoted against the **month-end rebalance date** (the last Tuesday), so the forecast horizon shrinks as the month progresses and the probabilities shrink with it. Probabilities come from a `P(touch)` lookup table keyed on (distance × realised volatility), built walk-forward with a time-based holdout at several horizons.
+- **Forward measurement** — both S/R panels are logged nightly and scored against what price actually did, with windows that have not run their full length excluded rather than counted as misses. The measurement is deliberately separate from the model, so a pipeline fault and a miscalibrated model don't look alike.
 - **Exit engine** — tiered exit logic: a hard catastrophic stop, an (optional, backtest-gated) early technical exit, and a month-end re-qualification gate that only holds positions that still rank in the top-N.
 - **AI assistant** — a real tool-calling loop (via a local Ollama model) where the model chooses which analysis functions to call, all backed directly by the same canonical scoring/regime code the rest of the system uses — no separate logic path to drift out of sync.
 - **Research suite** — a large set of standalone validation scripts (survivorship bias, slippage, transaction cost, VIX overlay, drawdown bootstrap, parameter robustness, statistical hygiene, etc.) used to stress-test the strategy before any parameter change goes live.
@@ -25,6 +26,9 @@ scripts/
 ├── core.py                  # canonical data access, regime detection, scoring, S/R access
 ├── strategy_config.py       # single source of truth for all strategy parameters
 ├── support_resistance.py    # swing-pivot S/R detection engine
+├── sr_horizon.py            # month-end (last-Tuesday) horizon arithmetic
+├── sr_build_touchtable.py   # builds the empirical P(touch) probability tables
+├── sr_monthend_analysis.py  # scores logged S/R levels against actual price action
 ├── exit_engine.py           # tiered exit logic (stop / early exit / month-end gate)
 ├── full_advisor.py          # main advisory CLI — recommendations + S/R table
 ├── ai_assistant.py          # tool-calling AI assistant (local LLM via Ollama)
@@ -83,7 +87,11 @@ python call_report.py
 
 ## Data & privacy
 
-This repo ships **code only**. The `data/` directory (price history, logs, portfolio state, cached lookups) is excluded via `.gitignore` since it contains personal position data. You'll need to populate it yourself using the `download_*.py` scripts before running the advisor or backtests.
+Personal trading data — portfolio state, trade history, paper/sim books, and the advisory/S/R logs — is **not tracked**, and `.gitignore` excludes `data/`. Populate it yourself with the `download_*.py` scripts before running the advisor or backtests.
+
+A limited set of **impersonal reference data** is tracked deliberately, because the code needs it to run and it reveals nothing about anyone's positions: the curated `sectors.json` sector map, index constituent lists, the S/R probability tables, and the corporate-announcements / delisted-price archives used by the research scripts.
+
+> **Historical note.** Until 2026-07-31 this section claimed the repo shipped code only. That was wrong: 567 files under `data/` — including `portfolio_state.json` with live share quantities and entry prices — had been committed before the `.gitignore` rule existed, and `.gitignore` does not untrack already-committed files. They are untracked as of that date, but **they remain in the git history**, so treat anything committed before then as public. If you are forking or reusing this repo, run `git ls-files data/` and confirm you are comfortable with what is listed.
 
 ## Status
 
