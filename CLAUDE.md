@@ -449,6 +449,27 @@ stock_ai/
   are recomputed from scratch on every write and rows dedupe on
   (Date, Symbol), so re-running a day REPLACES its row rather than
   double-counting it into the mean.
+- THE S/R MODEL IS AT ITS CEILING (2026-08-03) — the search is CLOSED. A
+  16-variant sweep (research_sr_model_sweep.py), a ceiling analysis
+  (research_sr_ceiling.py) and a paired block bootstrap
+  (research_sr_model_bootstrap.py) were run on the full 500-symbol universe
+  at 5/10/15/21d. NOTHING cleared the pre-registered bar (+0.02 OOS corr AND
+  a majority of horizons). The decisive number: an ORACLE bucket table fitted
+  ON THE HOLDOUT ITSELF — i.e. one that has seen the answers — beats
+  production by only **+0.008**. The 24-cell lookup already extracts ~99% of
+  what (distance x vol) can express, so bucket/vol/threshold retuning is
+  curve-fitting a difference smaller than noise. That is the mechanism, so a
+  future "promising" grid result is noise by construction — don't chase it.
+  MIN_CELL is INERT at current data volume (50 and 100 both scored exactly
+  0.0000 delta). The best variant, logistic(+ATR,trend,strength), won 4/4
+  horizons at +0.0100 but its bootstrap CI includes zero at 0/4 horizons
+  (21d borderline: P(better) 95.9%, CI [-0.0002,+0.0325]) — not significant,
+  and implausible anyway against +0.008 of total headroom. KEEP the bucket
+  table: matches a fitted model within noise, inspectable, no fitting
+  dependency, and it GUARANTEES monotonicity in horizon (a fitted model does
+  not — that invariant broke once already). Only a NEW DATA SOURCE (intraday
+  bars, order-book depth, options positioning) could move this; rearranging
+  daily OHLC cannot. See memory sr-model-sweep-exhausted-2026-08.
 - VOLATILITY IS ALREADY THE TABLE'S 2nd AXIS — don't "add" it. The P(touch)
   table is keyed on (distance x realised vol) and the vol axis carries real
   signal: at 8-12% distance, 21d P(touch) is 14.6% for a <25%-vol name vs
