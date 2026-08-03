@@ -12,17 +12,26 @@ signal, and is not read by any other part of the pipeline — closing it has
 zero effect on the strategy, books, or scheduled jobs.
 
 DESIGN NOTE — why the analytics are computed ONCE at launch, not per-tick:
-momentum score (core.momentum_score), regime (core.market_regime), RSI, and
-S/R levels (support_resistance.get_levels) are all defined on DAILY CLOSES —
-the exact convention the backtest was validated against (core.momentum_score
-docstring: windows end YESTERDAY, excluding the evaluation bar). They cannot
-change intraday; recomputing them every redraw would burn CPU for numerically
-identical output until tonight's close, and using live/last-price instead of
-a settled close would silently test an unvalidated definition of the signal
-(this project already tried "be more intraday-reactive" — see memory
-staged-entry-rejected-2026-08 — and it lost in walk-forward). What genuinely
-IS live and updates every tick: price, day change %, gain vs entry, and
-distance from price to those fixed levels.
+momentum score (core.momentum_score), regime (core.market_regime), and RSI
+are all defined on DAILY CLOSES — the exact convention the backtest was
+validated against (core.momentum_score docstring: windows end YESTERDAY,
+excluding the evaluation bar). They cannot change intraday; recomputing them
+every redraw would burn CPU for numerically identical output until tonight's
+close, and using live/last-price instead of a settled close would silently
+test an unvalidated definition of the signal (this project already tried "be
+more intraday-reactive" — see memory staged-entry-rejected-2026-08 — and it
+lost in walk-forward). What genuinely IS live and updates every tick: price,
+day change %, gain vs entry, and distance from price to the S/R levels below.
+
+S/R LEVELS are a different case: the underlying pivots come from completed
+daily/weekly/monthly bars (unchanged either way), but WHICH pivot counts as
+support vs resistance is anchored to a live quote fetched once at launch
+(core.sr_levels'/support_resistance.get_levels' cur= param — see CLAUDE.md's
+2026-08-04 fix and the WIPRO case it documents: a resistance already cleared
+by price was mislabeled "R1 (BROKEN)" instead of correctly as support when
+anchored to a stale close). Fetched once, not per-tick, on purpose — see
+StaticAnalytics' docstring for the cost tradeoff. Restart the ticker to
+re-anchor levels to a fresher price during the session.
 
 Run from scripts/:
   python live_ticker.py                    # watchlist = held positions + today's top buy candidates
@@ -38,6 +47,7 @@ import numpy as np
 
 import kite_auth
 import core
+import live_quotes
 import strategy_config as sc
 
 
@@ -76,7 +86,22 @@ def entry_prices():
 class StaticAnalytics:
     """Everything derived from DAILY CLOSES — momentum score/rank, regime,
     RSI, S/R levels. Computed once at launch; see module docstring for why
-    this is correct rather than a shortcut."""
+    this is correct rather than a shortcut.
+
+    S/R LEVELS ARE ANCHORED TO THE LIVE PRICE AT LAUNCH, not the last close
+    (2026-08-04 fix — see core.sr_levels' cur= param). Without this, level
+    SELECTION (which pivot counts as support vs resistance, the proximity
+    window, 52w fallbacks) was silently keyed to yesterday's close even
+    though the ticker is a live tool — the exact WIPRO bug documented in
+    CLAUDE.md (a resistance already cleared by the live price still showing
+    as "R1 (BROKEN -0.6%)" instead of correctly as S1). Fetched ONCE at
+    launch (one batched Kite call) and then left alone for the session by
+    design — recomputing get_levels() on every tick would cost ~0.3s per
+    redraw across a 19-symbol watchlist (~50%+ of a CPU core, permanently,
+    for a display tool) for a distinction (which pivot is which) that only
+    matters at day-open granularity, not tick granularity. Restart the
+    ticker to re-anchor to a fresher price.
+    """
 
     def __init__(self, symbols):
         self.regime, self.breadth = self._safe(core.market_regime, ("UNKNOWN", float("nan")))
@@ -88,6 +113,8 @@ class StaticAnalytics:
         self.universe_n = len(ranked)
         self.scores = scan  # sym -> dict(score, ret_6m, ret_3m, vol_63, rsi, price)
 
+        launch_quotes = self._safe(lambda: live_quotes.get_quotes(symbols), {})
+
         self.levels = {}      # sym -> (support, resistance, s_str, r_str)
         self.prev_close = {}  # sym -> yesterday's close, for day-change fallback
         for sym in symbols:
@@ -95,8 +122,9 @@ class StaticAnalytics:
             if df is None or len(df) < 60:  # scan_universe already scored this name if
                 continue                    # eligible, but doesn't expose its raw df
             self.prev_close[sym] = float(df["Close"].iloc[-1])
+            launch_price = launch_quotes.get(sym, (None, True))[0]
             try:
-                self.levels[sym] = core.sr_levels(df, symbol=sym, fast=True)
+                self.levels[sym] = core.sr_levels(df, symbol=sym, fast=True, cur=launch_price)
             except Exception:
                 pass
             if sym not in self.scores:   # only score again if scan_universe skipped it
@@ -290,7 +318,7 @@ def draw_banner(stdscr, w, analytics: StaticAnalytics, state: TickerState):
         safe_addstr(stdscr, 3, 2, state.last_error, color("red"))
 
     safe_addstr(stdscr, 4, 2,
-                "Support/Resistance are end-of-day (frozen till tonight's close); price/high/low/gain/distance are live tick-by-tick.",
+                "Support/Resistance anchored to price at launch (restart to refresh); price/high/low/gain/distance are live tick-by-tick.",
                 color("dim"))
     safe_addstr(stdscr, 5, 2, "Ctrl-C to exit", color("dim"))
     safe_addstr(stdscr, 6, 0, "=" * w, color("dim"))

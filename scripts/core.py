@@ -270,11 +270,14 @@ def confidence_for(score, regime):
 
 # ---------- S/R access ----------
 
-def sr_levels(df, symbol=None, fast=False):
+def sr_levels(df, symbol=None, fast=False, cur=None):
     """Wraps support_resistance.get_levels -> (support, resistance, s_strength, r_strength).
     Pass fast=True in any backtest loop over many stocks/dates — see CLAUDE.md gotchas,
-    wick_rejection_score's iterrows path hangs without it."""
-    return get_levels(df, symbol=symbol, fast=fast)
+    wick_rejection_score's iterrows path hangs without it. cur overrides the reference
+    price (default: last close) — pass a live quote so level selection (not just
+    distance) reflects where price actually is; leave None for backtests/loggers,
+    which must score against the last completed close only."""
+    return get_levels(df, symbol=symbol, fast=fast, cur=cur)
 
 
 def sr_reach_probability(df, level, direction, forward_days=21):

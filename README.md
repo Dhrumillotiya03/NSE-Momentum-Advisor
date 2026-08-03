@@ -40,7 +40,7 @@ scripts/
 ├── ai_assistant.py          # tool-calling AI assistant (local LLM via Ollama)
 ├── live_quotes.py           # live price feed (Kite Connect if configured, else delayed free feed)
 ├── kite_auth.py             # Kite Connect daily token refresh (optional, for live_quotes.py)
-├── live_ticker.py           # optional terminal tick-by-tick price display (needs Kite Connect)
+├── live_ticker.py           # optional terminal dashboard: live tick-by-tick price + regime/score/S-R/verdict (needs Kite Connect)
 ├── backtest_portfolio.py    # portfolio-level backtest harness
 ├── walk_forward.py          # walk-forward validation
 ├── paper_trader.py          # paper trading loop
@@ -60,7 +60,7 @@ data/                        # local price data, logs, portfolio state (gitignor
 - Python 3.10+
 - [Ollama](https://ollama.com) running locally, with a tool-calling-capable model pulled (e.g. `qwen2.5`, `llama3.1`, `mistral-nemo` — **not** plain `llama3`, which doesn't support tool calling) — only needed for `ai_assistant.py`
 - No paid API keys required for the core strategy, backtesting, or advisory logic. `live_quotes.py` tries Kite Connect first when it is configured, and otherwise falls back to yfinance's free, ~15-minute-delayed feed — callers can tell the two apart, so a delayed quote is never presented as real-time.
-- **Optional:** a Zerodha Kite Connect subscription (~₹500/mo) for true real-time NSE quotes and the tick-by-tick terminal ticker (`live_ticker.py`). Without it, everything falls back transparently to the free feed — nothing breaks or degrades in functionality, only in quote latency. See `kite_auth.py` for the setup flow if you want this.
+- **Optional:** a Zerodha Kite Connect subscription (~₹500/mo) for true real-time NSE quotes and the terminal dashboard (`live_ticker.py`) — live price/change/gain-vs-entry per tick alongside momentum score/rank, regime, and support/resistance (levels are anchored to the live price *at launch*, then held for the session — restart to re-anchor; see the module docstring for the CPU-cost tradeoff behind that choice). Without Kite Connect, everything falls back transparently to the free feed — nothing breaks or degrades in functionality, only in quote latency. See `kite_auth.py` for the setup flow if you want this.
 
 ## Setup
 
@@ -140,7 +140,7 @@ If you configure the optional Kite Connect integration, credentials (API key/sec
 
 ## Status
 
-Actively developed. Recent work: fixed a backtest universe-coverage bug that had silently excluded every stock listed after ~2020 from validation; rebuilt the advisor to match the backtested strategy's own picks (it had drifted onto a structurally anti-momentum entry model); added chart/pattern analysis, relative strength, anchored VWAP, and a composite horizon-advice tool; corrected month-end to the last Tuesday across all live consumers; and wired an optional real-time Kite Connect quote feed alongside the existing free/delayed default. Several candidate strategy improvements (correlation-aware sizing, volatility targeting, regime-detection hysteresis, staged entry) were tested via walk-forward and deliberately not adopted — each looked favorable on a single backtest run but lost on out-of-sample evidence.
+Actively developed. Recent work: fixed a backtest universe-coverage bug that had silently excluded every stock listed after ~2020 from validation; rebuilt the advisor to match the backtested strategy's own picks (it had drifted onto a structurally anti-momentum entry model); added chart/pattern analysis, relative strength, anchored VWAP, and a composite horizon-advice tool; corrected month-end to the last Tuesday across all live consumers; and wired an optional real-time Kite Connect quote feed alongside the existing free/delayed default. Rebuilt `live_ticker.py` from a bare price flasher into a single-line-per-stock dashboard (live price/change/gain alongside momentum score/rank, regime, and support/resistance with live-anchored level selection); several column-width and terminal-overlap bugs were found and fixed by rendering against a mock screen with overlap detection before touching a real terminal. Several candidate strategy improvements (correlation-aware sizing, volatility targeting, regime-detection hysteresis, staged entry) were tested via walk-forward and deliberately not adopted — each looked favorable on a single backtest run but lost on out-of-sample evidence.
 
 **Support/resistance overhaul.** The reach-probability table was found to measure the wrong quantity: because its builder discarded levels that were never touched, it estimated *P(bounce | touched)* while every consumer read it as *P(touch)*. That made it nearly flat across distance — a level 12%+ away scored about the same as one 1% away — and explained its weak out-of-sample correlation. Rebuilt as a true touch table (`sr_build_touchtable.py`): out-of-sample correlation roughly tripled, and probabilities now decay properly with distance. Separately, the forward-accuracy analysis was reporting a 100% hit rate on every panel; the cause was a resolution asymmetry (a touch resolved immediately while a miss had to wait out the full window, so unresolved misses were dropped and only hits survived), not a well-calibrated model. Both are documented in the source.
 
