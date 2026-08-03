@@ -418,6 +418,22 @@ stock_ai/
   symbol — same results, far fewer API calls on a 15-minute timer.
   Loggers stamp HorizonEnd/HorizonDays; rows predating those columns are NaN
   and readers must treat them as 21d.
+- LOGGER OUTPUT IS THREE FILES (2026-08-03, user spec). Each logger run writes:
+  (1) `sr_daily_log.csv` — the cumulative append-only record, unchanged; this
+  is what sr_monthend_analysis reads and must not be rotated or truncated.
+  (2) `sr_today.csv` — today only, OVERWRITTEN each run. A convenience view;
+  nothing is lost by overwriting since (1) and (3) keep the history.
+  (3) `sr_month_YYYY-MM.csv` — one file per CALENDAR month, appended daily,
+  carrying `CMP_avg`/`S1_avg`/`R1_avg` = the running month-to-date mean per
+  stock (expanding, so the last row of the month IS the month's average).
+  Rows now also carry `High`/`Low` from the SAME bar as CMP.
+  sr_dynamic_logger writes the same trio under `sr_dynamic_today.csv` /
+  `sr_dynamic_month_YYYY-MM.csv` — NEVER share files with the fixed panel.
+  Month files are keyed on each row's own DATA date, so a catch-up run
+  straddling a month boundary files each row under the right month. Averages
+  are recomputed from scratch on every write and rows dedupe on
+  (Date, Symbol), so re-running a day REPLACES its row rather than
+  double-counting it into the mean.
 - S2/R2 ARE NOW ALWAYS LOGGED (2026-07-31). They used to be written only when
   their probability beat the base rate, but the log is the MEASUREMENT record:
   a level never written can never be scored, so the gate was destroying

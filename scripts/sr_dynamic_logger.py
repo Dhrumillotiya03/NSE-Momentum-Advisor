@@ -19,12 +19,17 @@ Run once daily after download_data.py (wired into run_daily_log.sh).
 import os, sys
 import pandas as pd
 
-from sr_daily_logger import log_stock, merge_log, COLUMNS
+from sr_daily_logger import (log_stock, merge_log, COLUMNS,
+                             write_today, write_month)
 from portfolio_state import load_state
 import strategy_config as sc
 from core import scan_universe
 
 LOG_PATH = "../data/sr_dynamic_log.csv"
+# Distinct filenames from the fixed panel's — the two panels must never share
+# a file (this one rotates names by momentum rank).
+TODAY_PATH = "../data/sr_dynamic_today.csv"
+MONTH_PATH_FMT = "../data/sr_dynamic_month_{ym}.csv"
 
 # Fixed at the BULL book size (not the current regime's) so panel size stays
 # stable across regime flips — steadier forward sample.
@@ -70,9 +75,19 @@ def main():
     combined = merge_log(new_df, LOG_PATH)
     combined.to_csv(LOG_PATH, index=False)
 
+    # Same today/month split as the fixed panel, under DIFFERENT filenames —
+    # this panel rotates its names by momentum rank, so its rows must never be
+    # mixed with the fixed validation panel's (see memory
+    # sr-daily-log-fixed-panel).
+    today_path = write_today(new_df, TODAY_PATH)
+    month_written = write_month(new_df, MONTH_PATH_FMT)
+
     print("─" * 50)
     print(f"[dynamic] Logged {len(rows)} rows to {LOG_PATH}")
     print(f"[dynamic] Total rows in log: {len(combined)}")
+    print(f"[dynamic] Today snapshot: {today_path} ({len(new_df)} rows, overwritten)")
+    for path, n in month_written:
+        print(f"[dynamic] Month file   : {path} ({n} rows, appended + averages)")
 
     # Data-date stamping means a symbol whose price CSV lagged (yfinance drop
     # for that one name, stale cache) silently logs under an OLDER date than
