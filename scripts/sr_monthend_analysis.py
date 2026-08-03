@@ -62,7 +62,14 @@ def load_log():
     if not os.path.exists(LOG_PATH):
         print(f"❌ No log found at {LOG_PATH}. Run sr_daily_logger.py first.")
         sys.exit(1)
-    df = pd.read_csv(LOG_PATH, parse_dates=["Date"], date_format="mixed")
+    df = pd.read_csv(LOG_PATH)
+    # Month files (sr_month_YYYY-MM.csv) carry AVG summary rows whose Date is
+    # the literal "AVG". Those are derived output, not observations — drop them
+    # before anything tries to parse dates, or they become NaT and (worse) get
+    # scored as if they were a logged snapshot.
+    if "Date" in df.columns:
+        df = df[df["Date"].astype(str).str.upper() != "AVG"]
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce", format="mixed")
     # Guard the malformed-row class that has bitten this repo before (a
     # truncated download leaves a row whose Date won't parse). Those survive as
     # NaT and break any date comparison downstream.

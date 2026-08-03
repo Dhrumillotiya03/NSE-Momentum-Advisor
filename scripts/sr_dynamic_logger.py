@@ -86,8 +86,10 @@ def main():
     print(f"[dynamic] Logged {len(rows)} rows to {LOG_PATH}")
     print(f"[dynamic] Total rows in log: {len(combined)}")
     print(f"[dynamic] Today snapshot: {today_path} ({len(new_df)} rows, overwritten)")
-    for path, n in month_written:
-        print(f"[dynamic] Month file   : {path} ({n} rows, appended + averages)")
+    for path, n, complete in month_written:
+        tag = ("month COMPLETE — AVG rows written"
+               if complete else "month in progress — AVG rows pending last Tuesday")
+        print(f"[dynamic] Month file   : {path} ({n} daily rows, {tag})")
 
     # Data-date stamping means a symbol whose price CSV lagged (yfinance drop
     # for that one name, stale cache) silently logs under an OLDER date than

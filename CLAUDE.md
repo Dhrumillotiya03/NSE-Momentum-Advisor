@@ -423,10 +423,21 @@ stock_ai/
   is what sr_monthend_analysis reads and must not be rotated or truncated.
   (2) `sr_today.csv` — today only, OVERWRITTEN each run. A convenience view;
   nothing is lost by overwriting since (1) and (3) keep the history.
-  (3) `sr_month_YYYY-MM.csv` — one file per CALENDAR month, appended daily,
-  carrying `CMP_avg`/`S1_avg`/`R1_avg` = the running month-to-date mean per
-  stock (expanding, so the last row of the month IS the month's average).
-  Rows now also carry `High`/`Low` from the SAME bar as CMP.
+  (3) `sr_month_YYYY-MM.csv` — one file per CALENDAR month, appended daily.
+  Daily rows are plain (no avg columns). ONCE the month's data collection
+  reaches the rebalance day (last Tuesday), one `AVG` summary row per stock is
+  appended — Date literally reads `AVG` — holding the month's mean CMP/S1/R1
+  plus `Days` = the number of sessions averaged. Rows also carry `High`/`Low`
+  from the SAME bar as CMP.
+  The completeness test is `max(logged date) >= last Tuesday`, NOT equality:
+  if that Tuesday is an NSE holiday no row falls exactly on it and an equality
+  test would silently never write the averages.
+  AVG rows are DERIVED: every write strips existing ones and recomputes from
+  the daily rows, so re-running after month-end never averages an average back
+  into itself (verified — a 4th day updates the mean to the true 4-day figure,
+  and the AVG row count stays fixed). Any reader of these files must filter
+  `Date == "AVG"`; sr_monthend_analysis.load_log does this before parsing
+  dates, since "AVG" would otherwise become NaT and be scored as a snapshot.
   sr_dynamic_logger writes the same trio under `sr_dynamic_today.csv` /
   `sr_dynamic_month_YYYY-MM.csv` — NEVER share files with the fixed panel.
   Month files are keyed on each row's own DATA date, so a catch-up run

@@ -36,11 +36,14 @@ TODAY_PATH = "../data/sr_today.csv"
 # and the file stays small enough to open in a spreadsheet.
 MONTH_PATH_FMT = "../data/sr_month_{ym}.csv"
 
-# Columns that get a running month-to-date average alongside them. CMP/S1/R1
-# are the ones worth averaging: CMP gives the month's mean traded level, and
-# S1/R1 show where the model has been putting the levels on average, which is
-# steadier than any single day's reading.
+# Columns averaged in the end-of-month summary rows. CMP gives the month's
+# mean traded level; S1/R1 show where the model put the levels on average,
+# which is steadier than any single day's reading.
 AVG_COLUMNS = ["CMP", "S1", "R1"]
+
+# Date value marking a summary row in a month file. Not a real date, so it
+# sorts last and is trivial to filter out when reading the file back.
+AVG_ROW_LABEL = "AVG"
 
 WATCHLIST = [
     "AARTIIND.NS", "BEL.NS", "GOLDBEES.NS", "KALYANKJIL.NS",
@@ -177,35 +180,50 @@ def month_path_for(date_str):
     return MONTH_PATH_FMT.format(ym=str(date_str)[:7])
 
 
-def add_running_averages(df):
-    """Add <col>_avg = month-to-date mean of <col>, per symbol, in date order.
+def month_is_complete(daily, ym):
+    """Has this month's data collection finished?
 
-    Expanding (not rolling) mean: row N holds the average of that stock's
-    first N logged days, so the final row of the month is the month's average
-    and every earlier row is the average as it stood then. Re-derived from
-    scratch on every write, so a corrected/re-logged row fixes the averages
-    that follow it instead of leaving a stale figure behind.
+    True once a logged DATA date reaches the month's rebalance day (the last
+    Tuesday). Uses >= rather than == on purpose: if that Tuesday is an NSE
+    holiday no row will ever fall exactly on it, and an equality test would
+    silently never write the averages for that month.
     """
-    df = df.sort_values(["Symbol", "Date"]).copy()
-    for col in AVG_COLUMNS:
-        if col not in df.columns:
-            continue
-        vals = pd.to_numeric(df[col], errors="coerce")
-        df[f"{col}_avg"] = (vals.groupby(df["Symbol"])
-                                .transform(lambda s: s.expanding().mean())
-                                .round(2))
-    return df
+    year, month = int(ym[:4]), int(ym[5:7])
+    last_tue = H.last_tuesday_of_month(year, month)
+    dates = pd.to_datetime(daily["Date"], errors="coerce").dropna()
+    return bool(len(dates)) and dates.max() >= last_tue
+
+
+def build_avg_rows(daily):
+    """One AVG summary row per symbol: the mean of each AVG_COLUMN over the
+    month's logged days.
+
+    Computed from the DAILY rows only — any existing AVG rows are stripped by
+    the caller first, so re-running never averages an average back into itself.
+    """
+    out = []
+    for sym, grp in daily.groupby("Symbol", sort=True):
+        row = {"Symbol": sym, "Date": AVG_ROW_LABEL}
+        for col in AVG_COLUMNS:
+            if col in grp.columns:
+                vals = pd.to_numeric(grp[col], errors="coerce").dropna()
+                row[col] = round(float(vals.mean()), 2) if len(vals) else None
+        row["Days"] = int(len(grp))   # how many sessions the average covers
+        out.append(row)
+    return pd.DataFrame(out)
+
+
+def split_daily_rows(df):
+    """(daily_rows, had_avg_rows) — AVG summary rows are never treated as data."""
+    if "Date" not in df.columns:
+        return df, False
+    is_avg = df["Date"].astype(str).str.upper() == AVG_ROW_LABEL
+    return df[~is_avg].copy(), bool(is_avg.any())
 
 
 def ordered_columns(df):
-    """COLUMNS order, with each <col>_avg placed right after its source column
-    so CMP/CMP_avg (and S1/S1_avg, R1/R1_avg) sit side by side in a spreadsheet."""
-    out = []
-    for c in COLUMNS:
-        if c in df.columns:
-            out.append(c)
-        if c in AVG_COLUMNS and f"{c}_avg" in df.columns:
-            out.append(f"{c}_avg")
+    """COLUMNS order first, then anything extra (e.g. the AVG rows' Days)."""
+    out = [c for c in COLUMNS if c in df.columns]
     out += [c for c in df.columns if c not in out]
     return out
 
@@ -235,10 +253,22 @@ def write_month(new_df, path_fmt=None):
     for ym, grp in new_df.groupby(new_df["Date"].astype(str).str[:7]):
         path = path_fmt.format(ym=ym)
         combined = merge_log(grp, path)
-        combined = add_running_averages(combined)
-        combined = combined[ordered_columns(combined)]
-        combined.to_csv(path, index=False)
-        written.append((path, len(combined)))
+
+        # Drop any AVG rows already in the file before doing anything else:
+        # they are derived output, and letting one survive into the next
+        # merge would feed an average back into the next average.
+        daily, _ = split_daily_rows(combined)
+        daily = daily.sort_values(["Symbol", "Date"])
+
+        complete = month_is_complete(daily, ym)
+        if complete:
+            out = pd.concat([daily, build_avg_rows(daily)], ignore_index=True)
+        else:
+            out = daily
+
+        out = out[ordered_columns(out)]
+        out.to_csv(path, index=False)
+        written.append((path, len(daily), complete))
     return written
 
 
@@ -276,8 +306,10 @@ def main():
     print(f"Logged {len(rows)} rows to {LOG_PATH}")
     print(f"Total rows in log: {len(combined)}")
     print(f"Today snapshot   : {today_path} ({len(new_df)} rows, overwritten)")
-    for path, n in month_written:
-        print(f"Month file       : {path} ({n} rows, appended + averages)")
+    for path, n, complete in month_written:
+        tag = ("month COMPLETE — AVG rows written"
+               if complete else "month in progress — AVG rows pending last Tuesday")
+        print(f"Month file       : {path} ({n} daily rows, {tag})")
 
     # Data-date stamping means a symbol whose price CSV lagged (missed run,
     # yfinance drop for that one name) silently logs under an OLDER date than
