@@ -47,6 +47,8 @@ scripts/
 ├── agent_sim.py             # simulation harness
 ├── call_report.py           # scores logged advisory calls against actual price action
 ├── download_*.py            # NSE bhavcopy, F&O, announcements, index, delisted data fetchers
+├── repair_price_gaps.py     # backfills missing/corrupt price bars from Kite (see Data quality)
+├── data_integrity_check.py  # nightly scan for bad dates, price glitches, stale series
 ├── research_*.py            # standalone strategy validation / robustness studies
 ├── test_*.py                # regression tests for invariants that have broken before
 └── ...
@@ -57,7 +59,7 @@ data/                        # local price data, logs, portfolio state (gitignor
 
 - Python 3.10+
 - [Ollama](https://ollama.com) running locally, with a tool-calling-capable model pulled (e.g. `qwen2.5`, `llama3.1`, `mistral-nemo` — **not** plain `llama3`, which doesn't support tool calling) — only needed for `ai_assistant.py`
-- No paid API keys required for the core strategy, backtesting, or advisory logic — the default live-price source (`live_quotes.py`) uses yfinance's free, ~15-minute-delayed feed.
+- No paid API keys required for the core strategy, backtesting, or advisory logic. `live_quotes.py` tries Kite Connect first when it is configured, and otherwise falls back to yfinance's free, ~15-minute-delayed feed — callers can tell the two apart, so a delayed quote is never presented as real-time.
 - **Optional:** a Zerodha Kite Connect subscription (~₹500/mo) for true real-time NSE quotes and the tick-by-tick terminal ticker (`live_ticker.py`). Without it, everything falls back transparently to the free feed — nothing breaks or degrades in functionality, only in quote latency. See `kite_auth.py` for the setup flow if you want this.
 
 ## Setup
@@ -114,6 +116,17 @@ python kite_auth.py refresh
 # Optional: live tick-by-tick price display (needs Kite Connect configured)
 python live_ticker.py
 ```
+
+## Data quality
+
+Price history comes from yfinance, which intermittently writes a bar with a real `Volume` but `NaN` OHLC. The file's last date looks current, so nothing obvious flags it — but every consumer drops that row, leaving the series stale in practice while appearing fresh. On one recent check, **42 of 500 files** were affected this way; only 5 were detectable by date alone.
+
+`repair_price_gaps.py` backfills those bars from Kite Connect (if configured) and runs nightly before anything reads the CSVs. Two details make it safe rather than merely convenient:
+
+- It measures the last **usable** bar (one with real OHLC), not the last bar present. A `max(date)` check misses exactly the failure it is meant to catch.
+- It refuses to splice unless Kite **agrees with the existing series** on the overlapping bars. This matters because Kite's history is *unadjusted* while the yfinance CSVs are split/dividend-*adjusted*: on NATIONALUM the ratio between them drifts 1.80 (2016) → 1.41 (2019) → 1.15 (2023) → 1.00 (today). That is cumulative dividend adjustment, not a glitch in either source. Recent bars agree exactly, so the tail splices cleanly; older gaps do not and are skipped.
+
+This is deliberately **not** a wholesale migration to Kite history. Swapping every historical price would move every S/R pivot, change the momentum scorer's returns, and invalidate the probability tables and every backtest figure — a much larger change than fixing a few missing bars. Symbols with no Kite instrument token (delisted or renamed) are reported and left alone; their series ending is correct.
 
 ## Data & privacy
 
