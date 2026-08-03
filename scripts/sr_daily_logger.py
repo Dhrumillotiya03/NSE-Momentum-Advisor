@@ -52,7 +52,7 @@ WATCHLIST = [
 ]
 
 COLUMNS = [
-    "Symbol", "Date", "CMP", "High", "Low",
+    "Symbol", "Date", "CMP", "CMP_basis", "High", "Low",
     "S1", "S1_prob", "S1_n",
     "R1", "R1_prob", "R1_n",
     "S2", "S2_prob", "S2_n",
@@ -82,7 +82,7 @@ def drop_partial_candle(df):
     return df
 
 
-def log_stock(sym):
+def log_stock(sym, live_price=None):
     df = load_stock(sym)
     if df is None or len(df) < 60:
         print(f"  ⚠️  {sym}: no data, skipped")
@@ -92,12 +92,23 @@ def log_stock(sym):
         print(f"  ⚠️  {sym}: no completed data, skipped")
         return None
 
-    cur        = float(df["Close"].iloc[-1])
-    # High/Low of the SAME bar the CMP came from (the last completed session),
-    # so the three always describe one day and never straddle two.
+    close      = float(df["Close"].iloc[-1])
+    # LIVE CMP when the market is open, else the last completed close. Run at
+    # 11:00 and again at 14:00 and the levels shift with price, because CMP
+    # feeds level selection (see support_resistance.get_all_levels). After
+    # 15:30 the live quote IS that day's close, so the evening pipeline row is
+    # identical to a close-based one — the end-of-day record is unchanged.
+    #
+    # Rows still dedupe on (Date, Symbol), so a later run REPLACES an earlier
+    # one on the same day rather than accumulating. The file always shows the
+    # most recent state; it is not an intraday time series.
+    cur = float(live_price) if live_price else close
+    # High/Low of the last COMPLETED bar. Deliberately not stretched to include
+    # a live price: they describe that bar, and mixing a live tick into them
+    # would make High/Low and CMP describe different windows.
     day_high   = float(df["High"].iloc[-1])
     day_low    = float(df["Low"].iloc[-1])
-    sups, ress = get_all_levels(df, symbol=sym)
+    sups, ress = get_all_levels(df, symbol=sym, cur=cur)
 
     # Horizon = from this snapshot's DATA date to the month's rebalance date
     # (last Tuesday). Probabilities are quoted for that window, not a fixed 21d.
@@ -110,7 +121,7 @@ def log_stock(sym):
         if len(levels) <= i:
             return None, None, None
         p = levels[i][0]
-        prob, n = reach_probability_v2(df, p, direction, h_days)
+        prob, n = reach_probability_v2(df, p, direction, h_days, cur)
         return p, prob, n
 
     s1, s1_prob, s1_n = level_and_prob(sups, 0, "down")
@@ -143,6 +154,10 @@ def log_stock(sym):
         # sr_monthend_analysis. Data-date stamping makes runs idempotent.
         "Date":    df.index[-1].strftime("%Y-%m-%d"),
         "CMP":     round(cur, 2),
+        # Which basis this row's CMP came from. The month AVG rows average
+        # CLOSE rows only, so an intraday snapshot never skews the monthly
+        # figure toward whatever time of day you happened to run.
+        "CMP_basis": "live" if live_price else "close",
         "High":    round(day_high, 2),
         "Low":     round(day_low, 2),
         "S1":      s1, "S1_prob": s1_prob, "S1_n": s1_n,
@@ -201,6 +216,15 @@ def build_avg_rows(daily):
     Computed from the DAILY rows only — any existing AVG rows are stripped by
     the caller first, so re-running never averages an average back into itself.
     """
+    # Average CLOSE rows only. Including intraday snapshots would weight a day
+    # you happened to run five times five times as heavily, so the average
+    # would describe your run schedule rather than the market. Falls back to
+    # all rows for legacy files written before CMP_basis existed.
+    if "CMP_basis" in daily.columns:
+        closes = daily[daily["CMP_basis"].fillna("close") == "close"]
+        if len(closes):
+            daily = closes
+
     out = []
     for sym, grp in daily.groupby("Symbol", sort=True):
         row = {"Symbol": sym, "Date": AVG_ROW_LABEL}
@@ -278,12 +302,25 @@ def main():
     print(f"\nLogging S/R snapshot for {len(symbols)} stocks")
     print("─" * 50)
 
+    # Live quotes drive CMP (and therefore level selection) so a mid-session
+    # run reflects where price actually is. After the close the live quote is
+    # that day's close, so the evening pipeline row is unchanged.
+    syms = [s.strip().upper() if s.strip().upper().endswith(".NS")
+            else s.strip().upper() + ".NS" for s in symbols]
+    live = {}
+    try:
+        from support_resistance import fetch_live_prices
+        live_prices, _ = fetch_live_prices(syms)
+        live = live_prices or {}
+    except Exception as e:
+        print(f"  ⚠️  live quotes unavailable ({e}) — using last close.")
+
     rows = []
     for sym in symbols:
         sym = sym.strip().upper()
         if not sym.endswith(".NS"):
             sym += ".NS"
-        row = log_stock(sym)
+        row = log_stock(sym, live_price=live.get(sym.replace(".NS", "")))
         if row:
             rows.append(row)
             print(f"  ✅ {row['Symbol']:<14} {row['Date']}  CMP ₹{row['CMP']}")

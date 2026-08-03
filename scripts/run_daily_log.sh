@@ -29,6 +29,12 @@ fi
     "$PYTHON" download_data.py
     "$PYTHON" download_etf.py
     "$PYTHON" trim_partial.py
+    # Repair yfinance gaps from Kite before anything reads the CSVs. yfinance
+    # intermittently writes a row with real Volume but NaN OHLC — the file
+    # looks current while every consumer silently drops that bar. 42 of 500
+    # files were affected on 2026-08-04. Only the recent tail is touched, and
+    # only when Kite agrees with the existing series on the overlap.
+    "$PYTHON" repair_price_gaps.py --apply
     "$PYTHON" data_integrity_check.py || notify-send "stock_ai" "DATA INTEGRITY WARNINGS — check cron_daily_log.log" 2>/dev/null
     "$PYTHON" market_scanner.py eod
     "$PYTHON" sr_daily_logger.py
