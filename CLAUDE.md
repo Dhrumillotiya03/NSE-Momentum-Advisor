@@ -394,6 +394,24 @@ stock_ai/
   (stale fallbacks are dropped, not silently shown as live). Levels sitting on
   the wrong side of live price render as BROKEN (a support below price has
   been breached — real information, and it happens routinely intraday).
+- LIVE PRICE NOW DRIVES LEVEL SELECTION, not just distance (2026-08-04).
+  `get_all_levels`/`get_levels`/`get_trade_levels` take an optional `cur=`
+  reference price (default: last close, so BACKTESTS AND THE TABLE BUILDERS
+  ARE BYTE-IDENTICAL — verified). analyse_table threads the live quote in.
+  Previously the live price was applied only AFTER level selection, so
+  `cur` inside get_all_levels came from the last CSV close and the
+  above/below split, the +-8% proximity window and the 52w fallbacks were all
+  anchored to a stale price. Effect was real: WIPRO at CMP 188.66 showed
+  187.52 as "R1 (BROKEN -0.6%)" — a resistance price had already cleared —
+  where it is correctly S1 at -0.6% with a true R1 at 202.50 above.
+  The PIVOTS are unchanged by this (swing points and volume nodes from
+  completed bars); only which of them count as support vs resistance, and
+  which fall inside the proximity window, shift with price.
+  NOTE the asymmetry this leaves: levels re-rank off the live price, but the
+  P(touch) table was calibrated against levels selected from completed bars.
+  That is the right trade for a month-horizon question (the alternative is
+  ranking off a stale anchor), but it is an approximation, not an exact
+  match to the calibration setup — don't quietly "fix" it by reverting.
 - QUOTE PROVENANCE (2026-08-03): live_quotes' `stale` boolean could not
   distinguish a REAL-TIME Kite tick from a ~15-MIN-DELAYED yfinance quote —
   both return stale=False, so every caller silently treated a quarter-hour-old

@@ -277,8 +277,20 @@ def score_level(df, level, side, symbol=None, mtf_bonus=0.0, fast=False):
 # GET ALL LEVELS
 # ──────────────────────────────────────────────
 
-def get_all_levels(df, lookback_months=24, symbol=None, fast=False):
-    cur = float(df["Close"].iloc[-1])
+def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
+    """Supports/resistances around the reference price.
+
+    cur: reference price. Defaults to the last CLOSE in df. Pass the LIVE quote
+    to re-rank levels against where the stock actually is right now — price
+    moving through a level intraday genuinely changes which level is "nearest
+    support" and which has become resistance, and anchoring that decision to a
+    stale close answers a slightly different question than the one asked.
+
+    The PIVOTS themselves are unaffected by this: they are swing points and
+    volume nodes derived from completed bars, and they do not move because the
+    clock advanced. Only the above/below split and the proximity window shift.
+    """
+    cur = float(cur) if cur else float(df["Close"].iloc[-1])
 
     monthly = to_monthly(df).tail(lookback_months)
     weekly  = to_weekly(df).tail(lookback_months * 4)
@@ -348,13 +360,14 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False):
 # get_levels  (drop-in replacement, backtest-safe)
 # ──────────────────────────────────────────────
 
-def get_levels(df, lookback_days=504, symbol=None, fast=False):
+def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None):
     """
     Returns (support, resistance, s_strength, r_strength).
     Pass fast=True from sr_backtest for vectorised-only path (no vol profile,
     no delivery IO) — runs ~20x faster, negligible accuracy loss in backtest.
+    cur: reference price; defaults to the last close. See get_all_levels.
     """
-    supports, resistances = get_all_levels(df, symbol=symbol, fast=fast)
+    supports, resistances = get_all_levels(df, symbol=symbol, fast=fast, cur=cur)
 
     def pick(candidates, side):
         confirmed = [(p, t, s) for p, t, s in candidates if t >= 2]
@@ -724,9 +737,9 @@ def strength_label(n):
 # GET TRADE LEVELS
 # ──────────────────────────────────────────────
 
-def get_trade_levels(df, symbol=None):
-    cur = round(float(df["Close"].iloc[-1]), 2)
-    support, resistance, s_str, r_str = get_levels(df, symbol=symbol)
+def get_trade_levels(df, symbol=None, cur=None):
+    cur = round(float(cur) if cur else float(df["Close"].iloc[-1]), 2)
+    support, resistance, s_str, r_str = get_levels(df, symbol=symbol, cur=cur)
     stop   = round(support * 0.97, 2)
     risk   = support - stop
     reward = resistance - support
@@ -785,16 +798,21 @@ def analyse_table(symbols, as_of=None, live_prices=None, live_sources=None):
             trimmed.append(sym.replace(".NS", ""))
         if len(df) < 60: continue
 
-        ctx        = get_trend_context(df)
-        sups, ress = get_all_levels(df, symbol=sym)
-        t          = get_trade_levels(df, symbol=sym)
+        ctx = get_trend_context(df)
 
-        # Live quote overrides the last close as the reference price. Levels
-        # are structural (built from history) but DISTANCE and PROBABILITY must
-        # be measured from where the stock actually is right now.
+        # Live quote overrides the last close as the reference price, and it is
+        # threaded into LEVEL SELECTION too — not just distance/probability.
+        # Price moving through a level intraday genuinely changes which level
+        # is the nearest support and which has flipped to resistance; ranking
+        # that off a stale close answers a slightly different question.
+        # The pivots themselves are unchanged (completed bars only) — what
+        # shifts is the above/below split and the proximity window.
         live = (live_prices or {}).get(sym.replace(".NS", "")) or \
                (live_prices or {}).get(sym)
         cur  = round(float(live), 2) if live else ctx["cur"]
+
+        sups, ress = get_all_levels(df, symbol=sym, cur=cur)
+        t          = get_trade_levels(df, symbol=sym, cur=cur)
 
         s1_prob, _ = reach_probability_v2(df, sups[0][0], "down", horizon_days, cur) \
             if sups else (None, 0)
