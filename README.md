@@ -10,7 +10,7 @@ Conceptually similar to what you'd get from Wright Research (momentum model port
 
 - **Momentum stock selection** — ranks a liquidity-gated universe (~200 names, sized off trailing turnover as a point-in-time proxy for the NSE F&O roster) using a 126-day return / 63-day volatility score, rebalanced on a 21-trading-day cycle.
 - **Regime detection** — classifies the market (BULL / SIDEWAYS / BEAR / UNKNOWN) from Nifty breadth and moving averages, and scales portfolio exposure and position count accordingly.
-- **Support/Resistance engine** — swing-pivot based S/R levels (confluence-filtered, touch-count weighted, with 52-week extreme fallback), empirical touch-probability estimates per level, and NSE bhavcopy delivery-volume overlay. Levels are quoted against the **month-end rebalance date** (the last Tuesday), so the forecast horizon shrinks as the month progresses and the probabilities shrink with it. Probabilities come from a `P(touch)` lookup table keyed on (distance × realised volatility), built walk-forward with a time-based holdout at several horizons.
+- **Support/Resistance engine** — swing-pivot based S/R levels (confluence-filtered, touch-count weighted, with 52-week extreme fallback), empirical touch-probability estimates per level, and NSE bhavcopy delivery-volume overlay. Levels are quoted against the **month-end rebalance date** (the last Tuesday), so the forecast horizon shrinks as the month progresses and the probabilities shrink with it. Probabilities come from a `P(touch)` lookup table keyed on (distance × realised volatility), built walk-forward with a time-based holdout at several horizons. When a live quote is available, it drives *level selection* as well as distance — price moving through a level intraday genuinely changes which one is the nearest support and which has flipped to resistance, so ranking that off a stale close would answer a slightly different question. The underlying pivots are unaffected: they come from completed bars and do not move because the clock advanced.
 - **Forward measurement** — both S/R panels are logged nightly and scored against what price actually did, with windows that have not run their full length excluded rather than counted as misses. The measurement is deliberately separate from the model, so a pipeline fault and a miscalibrated model don't look alike.
 - **Exit engine** — tiered exit logic: a hard catastrophic stop, an (optional, backtest-gated) early technical exit, and a month-end (last-Tuesday) re-qualification gate that only holds positions that still rank in the top-N. Exit advice works for *any* symbol, not only positions the system already tracks.
 - **Chart / pattern analysis** — candlestick pattern detection (hammer, engulfing, doji, morning/evening star, marubozu...), trend structure via swing points, moving-average posture, 52-week range positioning, anchored VWAP, volume and volatility behaviour, relative strength vs Nifty, and daily/weekly multi-timeframe agreement. Descriptive context for a human read — never wired into scoring or exit decisions.
@@ -31,6 +31,8 @@ scripts/
 ├── support_resistance.py    # swing-pivot S/R detection engine
 ├── sr_horizon.py            # month-end (last-Tuesday) horizon arithmetic
 ├── sr_build_touchtable.py   # builds the empirical P(touch) probability tables
+├── sr_daily_logger.py       # nightly S/R snapshot — fixed validation panel
+├── sr_dynamic_logger.py     # nightly S/R snapshot — holdings + top momentum names
 ├── sr_monthend_analysis.py  # scores logged S/R levels against actual price action
 ├── exit_engine.py           # tiered exit logic (stop / early exit / month-end gate)
 ├── chart_analysis.py        # candlestick patterns, trend structure, AVWAP, relative strength
@@ -46,6 +48,7 @@ scripts/
 ├── call_report.py           # scores logged advisory calls against actual price action
 ├── download_*.py            # NSE bhavcopy, F&O, announcements, index, delisted data fetchers
 ├── research_*.py            # standalone strategy validation / robustness studies
+├── test_*.py                # regression tests for invariants that have broken before
 └── ...
 data/                        # local price data, logs, portfolio state (gitignored — not in this repo)
 ```
@@ -95,6 +98,14 @@ python call_report.py
 # Candlestick / trend / relative-strength read for one stock
 python chart_analysis.py TCS
 
+# Support/resistance for one or more stocks, quoted to this month's rebalance date
+python support_resistance.py RELIANCE WIPRO
+python support_resistance.py RELIANCE --live          # use live quotes as CMP
+python support_resistance.py RELIANCE --as-of 2026-08-12   # test a past/future horizon
+
+# Monthly (after the last Tuesday): score the logged S/R panels — read-only
+./sr_monthly_review.sh
+
 # Optional: refresh the live Kite Connect quote token for the day
 python kite_auth.py refresh
 
@@ -115,6 +126,10 @@ If you configure the optional Kite Connect integration, credentials (API key/sec
 ## Status
 
 Actively developed. Recent work: fixed a backtest universe-coverage bug that had silently excluded every stock listed after ~2020 from validation; rebuilt the advisor to match the backtested strategy's own picks (it had drifted onto a structurally anti-momentum entry model); added chart/pattern analysis, relative strength, anchored VWAP, and a composite horizon-advice tool; corrected month-end to the last Tuesday across all live consumers; and wired an optional real-time Kite Connect quote feed alongside the existing free/delayed default. Several candidate strategy improvements (correlation-aware sizing, volatility targeting, regime-detection hysteresis, staged entry) were tested via walk-forward and deliberately not adopted — each looked favorable on a single backtest run but lost on out-of-sample evidence.
+
+**Support/resistance overhaul.** The reach-probability table was found to measure the wrong quantity: because its builder discarded levels that were never touched, it estimated *P(bounce | touched)* while every consumer read it as *P(touch)*. That made it nearly flat across distance — a level 12%+ away scored about the same as one 1% away — and explained its weak out-of-sample correlation. Rebuilt as a true touch table (`sr_build_touchtable.py`): out-of-sample correlation roughly tripled, and probabilities now decay properly with distance. Separately, the forward-accuracy analysis was reporting a 100% hit rate on every panel; the cause was a resolution asymmetry (a touch resolved immediately while a miss had to wait out the full window, so unresolved misses were dropped and only hits survived), not a well-calibrated model. Both are documented in the source.
+
+**The S/R model is at its practical ceiling.** Rather than keep proposing tweaks, a headroom analysis was run: an *oracle* table fitted on the holdout it is scored against — one that has already seen the answers — beats the production table by only ~0.008 correlation. So the 24-cell lookup already extracts nearly everything its two features can express, and bucket or threshold retuning would be fitting noise. Consistent with that, a 16-variant sweep (alternative volatility estimators including Parkinson/Garman-Klass/Rogers-Satchell, bucket geometries, ATR-normalised distance, logistic and gradient-boosted models) and a delivery-volume "institutional flow" test all failed a pre-registered bar of +0.02 correlation across a majority of horizons; the single best candidate's bootstrap confidence interval included zero at every horizon. The bucket table is kept deliberately: it matches fitted models within noise, stays inspectable, and guarantees that probability is non-decreasing in horizon — an invariant a fitted model does not provide. Only a genuinely new data source (intraday bars, order-book depth) could plausibly move this, which is the next avenue.
 
 ## License
 
