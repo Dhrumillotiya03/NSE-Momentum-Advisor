@@ -389,9 +389,20 @@ stock_ai/
   Anything gating on a probability must scale its THRESHOLD by the same
   horizon — sr_daily_logger's S2/R2 base-rate gate does; a raw 66% gate
   against scaled probs empties S2/R2 exactly when the window is tightest.
+  LIVE QUOTES ARE THE DEFAULT (2026-08-04) — `python support_resistance.py SYM`
+  pulls CMP from live_quotes.py with no flag. `--no-live` forces the last CSV
+  close; `--live` is still accepted as a no-op so old invocations keep working.
+  Live is auto-suppressed under `--as-of` (that flag asks about a DIFFERENT
+  date, so stamping today's price on it would mix two points in time) and the
+  run says so. Stale fallbacks are dropped, not silently shown as live, and a
+  dead feed degrades to closes with the source stated.
+  NOTE this changes only the INTERACTIVE path — sr_daily_logger,
+  sr_dynamic_logger, sr_backtest and sr_build_touchtable never touch live
+  quotes and must not: they call log_stock/get_all_levels directly, where
+  `cur` defaults to the last completed close. A backtest that saw live prices
+  would be scoring on data unavailable at the decision point.
   `python support_resistance.py SYM --as-of YYYY-MM-DD` tests a horizon
-  without waiting for the calendar; `--live` pulls CMP from live_quotes.py
-  (stale fallbacks are dropped, not silently shown as live). Levels sitting on
+  without waiting for the calendar. Levels sitting on
   the wrong side of live price render as BROKEN (a support below price has
   been breached — real information, and it happens routinely intraday).
 - LIVE PRICE NOW DRIVES LEVEL SELECTION, not just distance (2026-08-04).

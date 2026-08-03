@@ -98,10 +98,12 @@ python call_report.py
 # Candlestick / trend / relative-strength read for one stock
 python chart_analysis.py TCS
 
-# Support/resistance for one or more stocks, quoted to this month's rebalance date
+# Support/resistance for one or more stocks, quoted to this month's rebalance
+# date. Uses live quotes by default, falling back to the last close if the
+# feed is unavailable.
 python support_resistance.py RELIANCE WIPRO
-python support_resistance.py RELIANCE --live          # use live quotes as CMP
-python support_resistance.py RELIANCE --as-of 2026-08-12   # test a past/future horizon
+python support_resistance.py RELIANCE --no-live            # force the last close
+python support_resistance.py RELIANCE --as-of 2026-08-12   # past/future horizon (uses closes)
 
 # Monthly (after the last Tuesday): score the logged S/R panels — read-only
 ./sr_monthly_review.sh

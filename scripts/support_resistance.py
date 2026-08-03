@@ -790,7 +790,7 @@ def analyse_table(symbols, as_of=None, live_prices=None, live_sources=None):
         if df is None or len(df) < 60: continue
 
         # Never build levels on a partial (mid-session) candle — see
-        # drop_partial_candle. Matters most on exactly the `--live` intraday
+        # drop_partial_candle. Matters most on exactly the mid-session intraday
         # runs this path is used for.
         n_before = len(df)
         df = drop_partial_candle(df)
@@ -995,7 +995,7 @@ def drop_partial_candle(df, now=None):
     provisional in a way nothing downstream would flag.
 
     sr_daily_logger has carried this guard for a while, but the interactive
-    path (analyse / analyse_table, i.e. exactly what a `--live` intraday run
+    path (analyse / analyse_table, i.e. exactly what an intraday run
     uses) did not — so the tool most likely to be run mid-session was the one
     least protected. Shared here so both use one implementation.
 
@@ -1068,11 +1068,17 @@ def main():
         as_of = argv[i + 1]
         argv = argv[:i] + argv[i + 2:]
 
-    # --live: pull current prices from live_quotes.py instead of the last CSV
-    # close. Levels stay structural; CMP/distance/probability use the live px.
-    live_prices = None
-    if "--live" in argv:
-        argv = [a for a in argv if a != "--live"]
+    # Live quotes are the DEFAULT (2026-08-04). The tool answers "where is this
+    # stock relative to its levels, right now", so the last CSV close is the
+    # wrong reference whenever a real quote is obtainable. --no-live forces the
+    # close, and `--live` is still accepted so existing muscle memory and any
+    # scripts that pass it keep working.
+    #
+    # Live is suppressed automatically under --as-of: that flag asks about a
+    # DIFFERENT date, and stamping today's price onto a past or future horizon
+    # would silently mix two points in time.
+    use_live = "--no-live" not in argv and as_of is None
+    argv = [a for a in argv if a not in ("--live", "--no-live")]
 
     args = [a for a in argv if not a.startswith("--")]
     if args:
@@ -1083,9 +1089,11 @@ def main():
     if not symbols:
         print("No symbols."); return
 
-    live_sources = {}
-    if "--live" in sys.argv:
+    live_prices, live_sources = None, {}
+    if use_live:
         live_prices, live_sources = fetch_live_prices(symbols)
+    elif as_of is not None and "--no-live" not in sys.argv:
+        print(f"  ⓘ --as-of {as_of}: using that date's close, not a live quote.")
 
     if verbose:
         analyse(symbols)
