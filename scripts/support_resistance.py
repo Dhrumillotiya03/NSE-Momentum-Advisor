@@ -451,14 +451,26 @@ _HORIZON_TABLES = {}   # forward_days -> table (or None if none on disk)
 
 
 def _load_reach_table():
-    """Prefer the P(touch) table; fall back to the legacy bounce table."""
+    """Prefer the P(touch) table; fall back to the legacy bounce table.
+
+    The fallback is LOUD on purpose. The legacy table measures a different
+    quantity (P(bounce | touched), OOS corr 0.173 vs the touch table's 0.529)
+    and reads ~66% for levels 12%+ away that are almost never reached. Silently
+    degrading to it would keep the system running while quietly answering a
+    different question — the exact failure this subsystem already had once.
+    """
     global _REACH_TABLE
     if _REACH_TABLE is None:
-        for path in (_TOUCH_TABLE_PATH, _REACH_TABLE_PATH):
-            if os.path.exists(path):
-                with open(path) as f:
-                    _REACH_TABLE = _json.load(f)
-                break
+        if os.path.exists(_TOUCH_TABLE_PATH):
+            with open(_TOUCH_TABLE_PATH) as f:
+                _REACH_TABLE = _json.load(f)
+        elif os.path.exists(_REACH_TABLE_PATH):
+            with open(_REACH_TABLE_PATH) as f:
+                _REACH_TABLE = _json.load(f)
+            print("  ⚠️  sr_touch_table.json MISSING — falling back to the legacy "
+                  "sr_reach_table.json, which measures P(bounce|touched), NOT "
+                  "P(touch). Far levels will read far too high. Rebuild with: "
+                  "python sr_build_touchtable.py", file=sys.stderr)
         else:
             _REACH_TABLE = {}   # missing table -> callers fall back
     return _REACH_TABLE

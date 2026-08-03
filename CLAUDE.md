@@ -369,7 +369,11 @@ stock_ai/
   re-creating the exact distortion). Result at 21d: decays 94.5%→5.9% across
   distance, OOS corr **0.529 vs 0.173**, 0/24 fallback cells, 7860 train rows.
   Built at 5/10/15/21d (`--forward N`); support_resistance prefers
-  sr_touch_table*.json and falls back to the legacy file if absent.
+  sr_touch_table*.json and falls back to the legacy file if absent — the
+  fallback now prints a LOUD warning to stderr, because degrading silently to
+  a table that answers a different question is exactly the failure this
+  subsystem already had. The legacy sr_reach_table.json is KEPT as that
+  safety net; don't delete it, and don't let the warning be suppressed.
   Empirical-vs-sqrt check: scaling 21d→10d was off by mean 4.3pp (max 7.3pp)
   and systematically understates near levels / overstates far ones — hence
   native tables + interpolation rather than one rescaled table.
