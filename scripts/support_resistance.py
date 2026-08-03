@@ -1,4 +1,5 @@
 import os, sys
+from datetime import datetime
 import numpy as np
 import pandas as pd
 
@@ -735,7 +736,7 @@ def get_trade_levels(df, symbol=None):
 
 GAP = "     "
 
-def analyse_table(symbols, as_of=None, live_prices=None):
+def analyse_table(symbols, as_of=None, live_prices=None, live_sources=None):
     """Horizon-aware S/R table.
 
     The reported levels and probabilities answer: "from `as_of` (default today)
@@ -756,11 +757,21 @@ def analyse_table(symbols, as_of=None, live_prices=None):
     horizon_days = H.trading_days_until(as_of, end, cal)
 
     rows = []
+    trimmed = []
     for sym in symbols:
         sym = sym.strip().upper()
         if not sym.endswith(".NS"): sym += ".NS"
         df = load_stock(sym)
         if df is None or len(df) < 60: continue
+
+        # Never build levels on a partial (mid-session) candle — see
+        # drop_partial_candle. Matters most on exactly the `--live` intraday
+        # runs this path is used for.
+        n_before = len(df)
+        df = drop_partial_candle(df)
+        if len(df) < n_before:
+            trimmed.append(sym.replace(".NS", ""))
+        if len(df) < 60: continue
 
         ctx        = get_trend_context(df)
         sups, ress = get_all_levels(df, symbol=sym)
@@ -837,11 +848,25 @@ def analyse_table(symbols, as_of=None, live_prices=None):
         })
 
     if not rows: print("No data."); return
-    live_n = sum(1 for s in symbols if (live_prices or {}).get(
-        s.strip().upper().replace(".NS", "")))
+    srcs = live_sources or {}
+    n_kite = sum(1 for v in srcs.values() if v == "kite")
+    n_yf = sum(1 for v in srcs.values() if v == "yfinance")
+    if n_kite or n_yf:
+        parts = []
+        if n_kite:
+            parts.append(f"{n_kite} real-time (Kite)")
+        if n_yf:
+            parts.append(f"{n_yf} ~15-min delayed (yfinance)")
+        cmp_src = " + ".join(parts)
+    else:
+        cmp_src = "last CSV close"
     print(f"\n  Horizon: {as_of.date()} → {end.date()} (last Tue) — "
           f"{horizon_days} trading days")
-    print(f"  CMP source: {'LIVE quotes for ' + str(live_n) + ' symbol(s)' if live_n else 'last CSV close'}")
+    print(f"  CMP source: {cmp_src}")
+    if trimmed:
+        print(f"  ⓘ Mid-session run: today's PARTIAL candle excluded from level "
+              f"detection for {len(trimmed)} symbol(s) — levels reflect data "
+              f"through the last CLOSED session, while CMP is live.")
     cols   = ["Symbol","CMP","S1","S2","R1","R2","RSI","Bias","R:R","Deliv"]
     widths = {c: max(len(c), max(len(r[c]) for r in rows)) for c in cols}
     sep    = GAP.join("─"*widths[c] for c in cols)
@@ -852,13 +877,25 @@ def analyse_table(symbols, as_of=None, live_prices=None):
     for r in rows:
         print(GAP.join(str(r[c]).ljust(widths[c]) for c in cols))
     print(f"{sep}")
-    print(f"\n  S1/R1 [xx%] = reach probability by {end.date()} "
+    print(f"\n  S1/R1 [xx%] = P(touch) by {end.date()} "
           f"({horizon_days} trading days)")
-    if horizon_days != H.TABLE_FORWARD_DAYS:
-        print(f"  ⓘ Table is calibrated at {H.TABLE_FORWARD_DAYS}d; these are "
-              f"rescaled to the {horizon_days}d horizon (approximate — "
-              f"direction and rough size are right, exact value is not "
-              f"empirically calibrated at this horizon).")
+    # Describe how this horizon was actually resolved — exact native table,
+    # interpolation between two empirical tables, or a sqrt rescale. Saying
+    # "rescaled" when the number came from interpolated empirical tables
+    # understates it; saying "empirical" when it was rescaled overstates it.
+    _avail = sorted(_available_horizon_tables())
+    if horizon_days in _avail:
+        print(f"  ⓘ From the P(touch) table built natively at {horizon_days}d "
+              f"(empirical).")
+    elif _avail and min(_avail) <= horizon_days <= max(_avail):
+        lo = max(d for d in _avail if d <= horizon_days)
+        hi = min(d for d in _avail if d >= horizon_days)
+        print(f"  ⓘ Interpolated (sqrt-time) between the empirical {lo}d and "
+              f"{hi}d P(touch) tables.")
+    else:
+        print(f"  ⓘ Extrapolated by sqrt-of-time from the nearest empirical "
+              f"table — approximate; direction and rough size are right, the "
+              f"exact value is not calibrated at this horizon.")
     print(f"  ⚠ = level >15% from CMP   📦Hi/Lo = delivery volume signal\n")
 
 
@@ -919,33 +956,70 @@ def analyse(symbols):
         print(f"{'═'*66}\n")
 
 
+def drop_partial_candle(df, now=None):
+    """Drop the last bar if it is TODAY and the session hasn't closed yet.
+
+    A mid-session bar is a PARTIAL candle: its High/Low/Close are whatever has
+    printed so far, not the day's. Feeding it to the pivot detector invents
+    swing points that will not survive the close, so every level built on it is
+    provisional in a way nothing downstream would flag.
+
+    sr_daily_logger has carried this guard for a while, but the interactive
+    path (analyse / analyse_table, i.e. exactly what a `--live` intraday run
+    uses) did not — so the tool most likely to be run mid-session was the one
+    least protected. Shared here so both use one implementation.
+
+    NSE closes 15:30 IST; 16:00 is used as the cutoff to stay clear of the
+    closing-auction settle, matching sr_daily_logger.
+    """
+    if df is None or len(df) == 0:
+        return df
+    now = now or datetime.now()
+    if now.weekday() <= 4 and now.hour < 16 and df.index[-1].date() == now.date():
+        return df.iloc[:-1]
+    return df
+
+
 def fetch_live_prices(symbols):
-    """{SYMBOL: price} from live_quotes.py, for use as CMP.
+    """({SYMBOL: price}, {SYMBOL: source}) from live_quotes.py, for use as CMP.
 
     Only genuinely live quotes are returned — live_quotes falls back to the
     last CSV close and flags it stale, and a stale "live" price is just the
     close wearing a costume. Dropping those makes analyse_table fall through
     to its normal close-based path instead of implying a freshness it lacks.
+
+    The SOURCE is returned alongside because "live" is not one thing: a Kite
+    Connect tick is real-time, while yfinance is ~15 minutes behind. Both
+    report stale=False, so a caller that only checks staleness silently treats
+    a quarter-hour-old price as current. The display layer marks the delayed
+    ones rather than hiding the difference.
     """
     try:
-        from live_quotes import get_quotes
+        from live_quotes import (get_quotes_detail, SOURCE_KITE, SOURCE_YF,
+                                 SOURCE_CSV)
     except Exception as e:
         print(f"  ⚠️  live quotes unavailable ({e}) — using last CSV close.")
-        return None
+        return None, {}
 
     syms = [s.strip().upper() if s.strip().upper().endswith(".NS")
             else s.strip().upper() + ".NS" for s in symbols]
-    out, stale = {}, []
-    for sym, (price, is_stale) in get_quotes(syms).items():
+    out, sources, stale = {}, {}, []
+    for sym, (price, is_stale, source) in get_quotes_detail(syms).items():
+        plain = sym.replace(".NS", "")
         if price is None:
             continue
-        if is_stale:
-            stale.append(sym.replace(".NS", ""))
+        if is_stale or source == SOURCE_CSV:
+            stale.append(plain)
             continue
-        out[sym.replace(".NS", "")] = float(price)
+        out[plain] = float(price)
+        sources[plain] = source
     if stale:
         print(f"  ⚠️  stale quote (using CSV close) for: {', '.join(sorted(stale))}")
-    return out or None
+    delayed = sorted(s for s, src in sources.items() if src == SOURCE_YF)
+    if delayed:
+        print(f"  ⚠️  ~15-min DELAYED quote (yfinance, Kite unavailable) for: "
+              f"{', '.join(delayed)}")
+    return (out or None), sources
 
 
 # ──────────────────────────────────────────────
@@ -979,13 +1053,15 @@ def main():
     if not symbols:
         print("No symbols."); return
 
+    live_sources = {}
     if "--live" in sys.argv:
-        live_prices = fetch_live_prices(symbols)
+        live_prices, live_sources = fetch_live_prices(symbols)
 
     if verbose:
         analyse(symbols)
     else:
-        analyse_table(symbols, as_of=as_of, live_prices=live_prices)
+        analyse_table(symbols, as_of=as_of, live_prices=live_prices,
+                      live_sources=live_sources)
 
 
 if __name__ == "__main__":

@@ -30,9 +30,30 @@ import pandas as pd
 PRICE_DIR = "../data/price_data/"
 CACHE_TTL_SECONDS = 60
 
-_cache = {}   # symbol -> (timestamp, price, stale)
+_cache = {}   # symbol -> (timestamp, price, stale, source)
 _kite_client = None      # lazy-initialized, None if unavailable
 _kite_checked = False    # avoid retrying kite_auth import/init every call
+
+# Quote provenance. `stale` is a two-state flag and cannot express the
+# difference between a REAL-TIME Kite tick and a ~15-MIN-DELAYED yfinance
+# quote — both report stale=False. That distinction matters to any caller
+# reasoning about intraday levels: acting on a 15-minute-old price as though
+# it were live is exactly the kind of error a boolean hides. get_quote_detail /
+# get_quotes_detail expose the source; get_quote/get_quotes keep the old
+# 2-tuple shape so existing callers are untouched.
+SOURCE_KITE = "kite"      # true real-time
+SOURCE_YF = "yfinance"    # ~15-min delayed
+SOURCE_CSV = "csv"        # last downloaded close (stale=True)
+SOURCE_NONE = "none"      # no price available at all
+
+# Delay we attribute to each source, for callers that need to reason about
+# how old a "live" price actually is.
+SOURCE_DELAY_SECONDS = {
+    SOURCE_KITE: 0,
+    SOURCE_YF: 15 * 60,
+    SOURCE_CSV: None,     # unbounded — could be yesterday or older
+    SOURCE_NONE: None,
+}
 
 
 def _csv_last_close(symbol):
@@ -101,41 +122,33 @@ def _kite_live_batch(symbols):
     return out
 
 
-def get_quote(symbol):
-    """Returns (price, stale) — stale=False for a live quote (Kite Connect
-    real-time, or yfinance ~15-min delayed), stale=True when falling back
-    to the last downloaded CSV close. (None, True) if nothing is available.
-    For more than a couple of symbols, prefer get_quotes — it batches the
-    Kite call instead of one request per symbol."""
-    now = time.time()
-    hit = _cache.get(symbol)
-    if hit and now - hit[0] < CACHE_TTL_SECONDS:
-        return hit[1], hit[2]
-
-    kite_prices = _kite_live_batch([symbol])
-    price = kite_prices.get(symbol)
-    if price is None:
-        price = _yf_live(symbol)
-    stale = False
-    if price is None:
-        price = _csv_last_close(symbol)
-        stale = True
-
-    _cache[symbol] = (now, price, stale)
-    return price, stale
+def _resolve(symbol, kite_price):
+    """(price, stale, source) for one symbol, given any Kite price already
+    fetched in batch. Single place where the fallback ladder is defined."""
+    if kite_price is not None:
+        return kite_price, False, SOURCE_KITE
+    price = _yf_live(symbol)
+    if price is not None:
+        return price, False, SOURCE_YF
+    price = _csv_last_close(symbol)
+    if price is not None:
+        return price, True, SOURCE_CSV
+    return None, True, SOURCE_NONE
 
 
-def get_quotes(symbols):
-    """Batch version: {symbol: (price, stale)}. Fetches ALL uncached symbols
-    from Kite in ONE call, falling back to yfinance/CSV per-symbol only for
-    whatever Kite didn't return."""
+def get_quotes_detail(symbols):
+    """{symbol: (price, stale, source)} — source is one of SOURCE_*.
+
+    Fetches ALL uncached symbols from Kite in ONE call, falling back to
+    yfinance/CSV per-symbol only for whatever Kite didn't return.
+    """
     now = time.time()
     out = {}
     need = []
     for sym in symbols:
         hit = _cache.get(sym)
         if hit and now - hit[0] < CACHE_TTL_SECONDS:
-            out[sym] = (hit[1], hit[2])
+            out[sym] = (hit[1], hit[2], hit[3])
         else:
             need.append(sym)
     if not need:
@@ -143,16 +156,34 @@ def get_quotes(symbols):
 
     kite_prices = _kite_live_batch(need)
     for sym in need:
-        price = kite_prices.get(sym)
-        stale = False
-        if price is None:
-            price = _yf_live(sym)
-        if price is None:
-            price = _csv_last_close(sym)
-            stale = True
-        _cache[sym] = (now, price, stale)
-        out[sym] = (price, stale)
+        price, stale, source = _resolve(sym, kite_prices.get(sym))
+        _cache[sym] = (now, price, stale, source)
+        out[sym] = (price, stale, source)
     return out
+
+
+def get_quote_detail(symbol):
+    """(price, stale, source) for one symbol. See get_quotes_detail."""
+    return get_quotes_detail([symbol])[symbol]
+
+
+def get_quote(symbol):
+    """Returns (price, stale) — stale=False for a live quote (Kite Connect
+    real-time, or yfinance ~15-min delayed), stale=True when falling back
+    to the last downloaded CSV close. (None, True) if nothing is available.
+
+    NOTE: this 2-tuple cannot distinguish a real-time Kite tick from a
+    ~15-min-delayed yfinance quote. Use get_quote_detail when that matters.
+    Kept for backward compatibility with existing callers.
+    """
+    price, stale, _ = get_quote_detail(symbol)
+    return price, stale
+
+
+def get_quotes(symbols):
+    """Batch version: {symbol: (price, stale)}. See get_quote for the
+    real-time-vs-delayed caveat; get_quotes_detail exposes the source."""
+    return {s: (p, st) for s, (p, st, _) in get_quotes_detail(symbols).items()}
 
 
 if __name__ == "__main__":
@@ -160,14 +191,12 @@ if __name__ == "__main__":
     syms = [s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
             for s in (sys.argv[1:] or ["RELIANCE.NS"])]
     kite_ok = _get_kite_client() is not None
-    print(f"[Kite Connect: {'connected' if kite_ok else 'no cached token — run kite_auth.py login/exchange'}]\n")
-    kite_hits = _kite_live_batch(syms) if kite_ok else {}
-    for sym in syms:
-        price, stale = get_quote(sym)
-        if stale:
-            tag = "STALE (last CSV close)"
-        elif sym in kite_hits:
-            tag = "LIVE (Kite Connect, real-time)"
-        else:
-            tag = "live (yfinance, ~15min delayed)"
-        print(f"{sym:16s} {price if price is not None else 'N/A':>12}   [{tag}]")
+    print(f"[Kite Connect: {'connected' if kite_ok else 'no cached token — run kite_auth.py refresh'}]\n")
+    tags = {
+        SOURCE_KITE: "LIVE (Kite Connect, real-time)",
+        SOURCE_YF:   "live (yfinance, ~15min delayed)",
+        SOURCE_CSV:  "STALE (last CSV close)",
+        SOURCE_NONE: "NO PRICE AVAILABLE",
+    }
+    for sym, (price, _stale, source) in get_quotes_detail(syms).items():
+        print(f"{sym:16s} {price if price is not None else 'N/A':>12}   [{tags[source]}]")

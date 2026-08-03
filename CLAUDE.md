@@ -390,6 +390,32 @@ stock_ai/
   (stale fallbacks are dropped, not silently shown as live). Levels sitting on
   the wrong side of live price render as BROKEN (a support below price has
   been breached — real information, and it happens routinely intraday).
+- QUOTE PROVENANCE (2026-08-03): live_quotes' `stale` boolean could not
+  distinguish a REAL-TIME Kite tick from a ~15-MIN-DELAYED yfinance quote —
+  both return stale=False, so every caller silently treated a quarter-hour-old
+  price as current. Added `get_quote_detail`/`get_quotes_detail` returning
+  (price, stale, source) with SOURCE_KITE/SOURCE_YF/SOURCE_CSV/SOURCE_NONE
+  and SOURCE_DELAY_SECONDS. `get_quote`/`get_quotes` keep their 2-tuple shape,
+  so existing callers are untouched. analyse_table now reports CMP provenance
+  ("3 real-time (Kite)" vs "2 ~15-min delayed (yfinance)") and names delayed
+  symbols explicitly — a delayed quote is usable, pretending it is live is not.
+- PARTIAL-CANDLE GUARD ON THE INTERACTIVE PATH (2026-08-03): sr_daily_logger
+  had `drop_partial_candle` but analyse/analyse_table did NOT — so the tool
+  most likely to be run mid-session (`--live`) was the least protected, and a
+  partial candle's High/Low invent swing points that vanish at the close. The
+  guard now lives in support_resistance.drop_partial_candle (one shared
+  implementation) and analyse_table applies it, reporting when it fires:
+  levels then reflect the last CLOSED session while CMP is live, which is the
+  correct combination for a month-horizon question — but it must be STATED,
+  not implied.
+- The S/R footer now names how a horizon was resolved — native empirical
+  table / interpolated between two empirical tables / sqrt-extrapolated —
+  instead of always claiming a sqrt "rescale". Most real horizons are
+  interpolated between the 15d and 21d tables, and calling that a rescale
+  understates it.
+- intraday_watch.py prewarms the quote cache with ONE batched `get_quotes`
+  call per pass (book valuation + alert loop) instead of a Kite request per
+  symbol — same results, far fewer API calls on a 15-minute timer.
   Loggers stamp HorizonEnd/HorizonDays; rows predating those columns are NaN
   and readers must treat them as 21d.
 - S2/R2 ARE NOW ALWAYS LOGGED (2026-07-31). They used to be written only when

@@ -42,7 +42,7 @@ import pandas as pd
 
 import strategy_config as sc
 from portfolio_state import load_state
-from live_quotes import get_quote
+from live_quotes import get_quote, get_quotes
 
 SEEN_PATH = "../data/intraday_seen.csv"
 LOG_PATH = "../data/intraday_watch_log.csv"
@@ -88,6 +88,12 @@ def book_drawdown_check(state):
     the tracked peak, return (dd, equity, peak, n_live) — dd as a negative
     fraction, or (None, ...) if too little of the book could be priced."""
     import json
+    # Prewarm the quote cache in ONE batched Kite call. get_quote below then
+    # hits the cache instead of issuing a separate request per symbol — same
+    # results, a fraction of the API calls and latency, which matters on a
+    # 15-minute timer valuing the whole book.
+    get_quotes([s for s, p in state["positions"].items() if p.get("qty", 0) > 0])
+
     total, n_live, n_priced, n_pos = state.get("cash", 0.0), 0, 0, 0
     for sym, pos in state["positions"].items():
         qty = pos.get("qty", 0)
@@ -176,6 +182,9 @@ def main():
     seen = load_seen()
     sr = latest_sr_levels()
     alerts, new_seen = [], []
+
+    # One batched quote call for the whole position set (see book_drawdown_check).
+    get_quotes(list(positions.keys()))
 
     for sym, pos in positions.items():
         price, stale = get_quote(sym)
