@@ -81,15 +81,39 @@ def is_non_strategy_holding(symbol, pos):
 # ---------- Calendar helper ----------
 
 def is_last_trading_day_of_month(dates, as_of=None):
-    """dates: sorted DatetimeIndex/Series of trading days for an index/stock.
-    Returns True if the last available date is the last trading day of its month."""
+    """Is `as_of` (default: the last available date) the month's REBALANCE day?
+
+    REBALANCE DAY = the LAST TUESDAY of the month (user spec, 2026-08-01 —
+    the same definition sr_horizon.py already used for the S/R horizon). If
+    that Tuesday is an NSE holiday, the last trading session on or before it
+    is used instead.
+
+    Previously this returned True on the last CALENDAR trading day, which ran
+    up to 3 days late nearly every month (July 2026: fired 07-31, spec says
+    07-28) and disagreed with the S/R subsystem's horizon. One definition now
+    drives exit_engine, paper_trader, agent_sim and ai_assistant.
+    """
     if len(dates) == 0:
         return False
-    last = pd.Timestamp(dates.iloc[-1] if hasattr(dates, "iloc") else dates[-1])
-    if as_of is not None:
-        last = pd.Timestamp(as_of)
-    next_day = last + pd.Timedelta(days=1)
-    return next_day.month != last.month
+    idx = pd.DatetimeIndex(pd.to_datetime(
+        dates.values if hasattr(dates, "values") else dates, errors="coerce")).dropna()
+    if len(idx) == 0:
+        return False
+    idx = idx.sort_values()
+    last = pd.Timestamp(as_of).normalize() if as_of is not None else idx[-1].normalize()
+    return last == rebalance_day(last.year, last.month, idx)
+
+
+def rebalance_day(year, month, trading_days):
+    """The actual session the month's rebalance falls on: the last Tuesday of
+    the month, rolled BACK to the previous trading session if it's a holiday."""
+    from sr_horizon import last_tuesday_of_month
+    target = last_tuesday_of_month(year, month)
+    sessions = trading_days[(trading_days <= target)
+                            & (trading_days >= target - pd.Timedelta(days=7))]
+    if len(sessions) == 0:
+        return target
+    return sessions[-1].normalize()
 
 
 # ---------- Exit checks ----------

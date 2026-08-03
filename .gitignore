@@ -16,6 +16,13 @@ data/
 # Config with real capital numbers (optional — see note below)
 # config.yaml
 
+# Broker API credentials (Kite Connect API key/secret, TOTP secret, access
+# tokens) — NEVER commit. This is a collaborator's account, not the repo
+# owner's; leaking these exposes someone else's live trading account.
+data/secrets/
+*.secret
+kite_secrets.json
+
 # Python
 __pycache__/
 *.pyc

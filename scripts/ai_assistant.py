@@ -14,7 +14,9 @@ Usage:
     python ai_assistant.py
 """
 import json
+import os
 import numpy as np
+import pandas as pd
 import requests
 
 import strategy_config as sc
@@ -109,6 +111,9 @@ def stock_status(symbol):
         "resistance_strength": r_str,
         "eligible_momentum_setup": r is not None,
     }
+    ew = earnings_watch(symbol, as_of=df.index[-1])
+    if ew:
+        result["earnings_watch"] = ew
     if r is None:
         result["reason_not_eligible"] = ("fails momentum filter: needs positive 6m AND 3m "
                                           "returns, and price above 50DMA")
@@ -128,7 +133,145 @@ def stock_status(symbol):
     return result
 
 
-def should_i_sell(symbol):
+def chart_analysis(symbol):
+    """Candlestick / chart-structure read for one stock — the visual analysis a
+    human does off a daily chart. DESCRIPTIVE context only; never a trade signal
+    (see chart_analysis.py's design rules)."""
+    if not symbol or not symbol.strip():
+        return {"error": "symbol is required"}
+    symbol = symbol.upper()
+    if not symbol.endswith(".NS"):
+        symbol += ".NS"
+    df = core.load_stock(symbol)
+    if df is None:
+        return {"error": f"No price data for {symbol}"}
+    import chart_analysis as ca
+    a = ca.analyse(df, index=core.load_index())
+    if "error" not in a:
+        a["symbol"] = symbol
+        a["summary"] = ca.summarise(a)
+    return a
+
+
+ANNOUNCEMENTS_DIR = "../data/announcements/"
+
+
+def earnings_watch(symbol, as_of=None, horizon_end_date=None):
+    """Estimated next-earnings window, DISPLAY-ONLY — flags timing risk, never
+    a trading signal (see CLAUDE.md: the automated announcement-driven exit
+    veto was backtested and REJECTED, memory exit-announcements-rejected;
+    this is descriptive awareness only, symmetric to chart_analysis's
+    "descriptive not signal" status).
+
+    horizon_end_date: the CALENDAR date the horizon ends (not a trading-day
+    count — comparing a calendar-day projection against a trading-day count
+    systematically undercounts the window by ~30%, which produced a false
+    "outside horizon" on a real case during testing: WELCORP's earnings
+    estimate landed 21 CALENDAR days out while the horizon was 17 TRADING
+    days, both correctly inside the same ~25-calendar-day horizon).
+
+    Method: NSE 'Outcome of Board Meeting' announcements whose text mentions
+    financial results ARE the historical earnings-release dates (downloaded
+    by download_announcements.py). Projects the next date as last_result +
+    median(sane trailing gaps), where "sane" = 75-100 days (one quarter) —
+    filters out backfill/pagination gaps in the announcement history (verified
+    on RELIANCE: raw gaps included spurious 545-546 day values from missing
+    quarters, median-of-sane-gaps still projected within 7 days of the real
+    date). This is an ESTIMATE from historical cadence, not a scraped
+    forward calendar — NSE doesn't reliably publish those far in advance.
+    Returns {} if there's no announcement history or too few clean data
+    points to estimate a cadence."""
+    if not symbol or not symbol.strip():
+        return {}
+    symbol = symbol.upper()
+    if not symbol.endswith(".NS"):
+        symbol += ".NS"
+    path = f"{ANNOUNCEMENTS_DIR}{symbol}.csv"
+    if not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return {}
+    if "desc" not in df.columns or "date" not in df.columns:
+        return {}
+    df["date"] = pd.to_datetime(df["date"], format="%d-%b-%Y %H:%M:%S", errors="coerce")
+    df = df.dropna(subset=["date"])
+    # NSE phrasing varies ("financial results" vs "financial statements", and
+    # the text field is truncated mid-word in the announcements CSV) — match
+    # either stem rather than one exact phrase (verified against RELIANCE's
+    # real history: the April 2026 result used "financial statem[ents]"
+    # phrasing and was silently missed by a "financial result"-only match).
+    mask = (df["desc"] == "Outcome of Board Meeting") & \
+           df["text"].astype(str).str.contains(
+               "financial result|financial statem", case=False, na=False)
+    hits = df.loc[mask, "date"].sort_values()
+    if len(hits) < 2:
+        return {}
+
+    now = pd.Timestamp(as_of).normalize() if as_of else pd.Timestamp.today().normalize()
+    last_result = hits.iloc[-1]
+    gaps = hits.diff().dt.days.dropna()
+    sane = gaps[(gaps >= 75) & (gaps <= 100)]
+    if len(sane) == 0:
+        return {"last_result_date": str(last_result.date()),
+                "note": "insufficient clean quarterly cadence to project the next date"}
+    cadence = float(sane.median())
+    projected = last_result + pd.Timedelta(days=cadence)
+    # keep rolling the projection forward by the cadence if it's already past
+    # (covers a stale announcements CSV that hasn't been backfilled recently)
+    while projected < now:
+        projected = projected + pd.Timedelta(days=cadence)
+    confidence = "estimate from historical cadence, not a confirmed date"
+
+    # A "board meeting scheduled to consider... financial results" is a
+    # SHARPER forward signal than the cadence estimate when one exists and
+    # hasn't resolved into an "Outcome of Board Meeting" row yet — companies
+    # announce the meeting date ~1 week ahead. Prefer it over the projection
+    # if it's later than the last confirmed result and still in the future.
+    sched_mask = df["text"].astype(str).str.contains(
+        r"meeting.*scheduled.*financial result|meeting.*scheduled.*financial statem",
+        case=False, na=False, regex=True)
+    sched_rows = df.loc[sched_mask & (df["date"] > last_result)]
+    if len(sched_rows):
+        m = sched_rows["text"].str.extract(
+            r"(?:held on|scheduled.*?on)\s+\w+,?\s+(\w+ \d{1,2},? \d{4})", expand=False)
+        for txt in m.dropna():
+            try:
+                sched_date = pd.Timestamp(txt.replace(",", ""))
+            except Exception:
+                continue
+            if sched_date >= now - pd.Timedelta(days=3):
+                projected = sched_date
+                confidence = "board meeting formally scheduled for this date (not yet confirmed as held)"
+                break
+
+    days_until = (projected - now).days
+    data_age_days = (now - df["date"].max()).days
+    out = {
+        "last_result_date": str(last_result.date()),
+        "estimated_next_result_date": str(projected.date()),
+        "estimated_cadence_days": round(cadence),
+        "days_until_estimated": days_until,
+        "confidence": confidence,
+        "announcements_data_age_days": data_age_days,
+    }
+    if data_age_days > 14:
+        out["data_stale_warning"] = (
+            f"announcements data is {data_age_days}d old — a scheduled/actual "
+            f"result inside that gap may be missing from this estimate")
+    if horizon_end_date is not None:
+        end = pd.Timestamp(horizon_end_date).normalize()
+        out["inside_stated_horizon"] = now <= projected <= end
+    return out
+
+
+def should_i_sell(symbol, entry_price=None):
+    """Exit verdict for ANY symbol — the position does NOT need to be in the
+    recorded book. This is an advisory engine: the common question is "I hold
+    X, when do I get out?" for a stock the system was never told about.
+    entry_price is optional; supply it to enable the -18% catastrophic stop
+    and the gain-since-entry figure, omit it for a pure signal read."""
     if not symbol or not symbol.strip():
         return {"error": "symbol is required. To review ALL holdings at once, "
                           "call the what_to_sell tool instead (it takes no arguments)."}
@@ -139,11 +282,9 @@ def should_i_sell(symbol):
 
     state = core.load_portfolio_state()
     pos = state["positions"].get(symbol)
-    if pos is None:
-        held = list(state["positions"].keys())
-        return {"error": f"No open position in {symbol}", "currently_held_symbols": held}
+    tracked = pos is not None
 
-    if is_non_strategy_holding(symbol, pos):
+    if tracked and is_non_strategy_holding(symbol, pos):
         return {"symbol": symbol, "verdict": "MANUAL REVIEW",
                 "reason": "non-strategy holding (ETF/BE-series/zero-cost) — excluded from auto-exit"}
 
@@ -151,17 +292,27 @@ def should_i_sell(symbol):
     if df is None or len(df) < 60:
         return {"error": f"Not enough price data for {symbol}"}
 
-    entry_price = pos.get("entry_price", 0)
+    # Entry price precedence: explicit arg > recorded book > unknown (signal-only).
+    if entry_price is None:
+        entry_price = pos.get("entry_price", 0) if tracked else 0
+    entry_price = float(entry_price or 0)
     regime, _breadth = core.market_regime()
     from live_quotes import get_quote
     live_price, stale = get_quote(symbol)
 
+    def _sell(reason):
+        out = {"symbol": symbol, "verdict": "SELL", "reason": reason}
+        if tracked:
+            out["qty_to_sell"] = pos.get("qty")
+            out["sell_instruction"] = f"sell the FULL position of {pos.get('qty')} shares"
+        else:
+            out["sell_instruction"] = "sell the FULL position"
+            out["note"] = "not in the recorded book — advisory signal only"
+        return out
+
     reason = check_catastrophic_stop(df, entry_price, live_price=None if stale else live_price)
     if reason:
-        return {"symbol": symbol, "verdict": "SELL",
-                "qty_to_sell": pos.get("qty"),
-                "sell_instruction": f"sell the FULL position of {pos.get('qty')} shares",
-                "reason": reason}
+        return _sell(reason)
 
     import pandas as pd
     index_dates = pd.to_datetime(
@@ -179,21 +330,205 @@ def should_i_sell(symbol):
             scores_only, n_names, load_sector_map(), sc.MAX_PER_SECTOR))
         requal = check_requalification(symbol, df, regime, eligible_scores, top_n_symbols)
         if requal is None:
-            return {"symbol": symbol, "verdict": "HOLD", "qty_held": pos.get("qty"),
-                    "reason": "Month-end re-evaluation: still in the new top-N — KEEP it "
-                              "(laggards-only rebalance: no sell/re-buy, no tax event; "
-                              "only its target weight may need a small top-up/trim)"}
-        return {"symbol": symbol, "verdict": "SELL",
-                "qty_to_sell": pos.get("qty"),
-                "sell_instruction": f"sell the FULL position of {pos.get('qty')} shares",
-                "reason": f"Month-end re-evaluation — {requal}"}
+            out = {"symbol": symbol, "verdict": "HOLD",
+                   "reason": "Month-end re-evaluation: still in the new top-N — KEEP it "
+                             "(laggards-only rebalance: no sell/re-buy, no tax event; "
+                             "only its target weight may need a small top-up/trim)"}
+            if tracked:
+                out["qty_held"] = pos.get("qty")
+            return out
+        return _sell(f"Month-end re-evaluation — {requal}")
 
     price = live_price if live_price else float(df["Close"].iloc[-1])
     gain = (price / entry_price - 1) if entry_price else None
-    return {"symbol": symbol, "verdict": "HOLD", "current_price": round(price, 2),
-            "price_is_live": not stale, "gain_since_entry": pct(gain),
-            "reason": "no exit condition fires; intra-month the only exit is the -18% "
-                      "catastrophic stop — otherwise positions run to the month-end review"}
+
+    # Health context: WHY it's a hold, and how close it is to failing. A bare
+    # "no exit fires" is useless for deciding whether to keep holding.
+    r = core.compute_score(df)
+    stop_price = entry_price * sc.CATASTROPHIC_STOP if entry_price else None
+    out = {"symbol": symbol, "verdict": "HOLD", "current_price": round(price, 2),
+           "price_is_live": not stale,
+           "still_passes_momentum_filter": r is not None,
+           "reason": ("no exit condition fires; intra-month the only exit is the -18% "
+                      "catastrophic stop — otherwise positions run to the month-end review")}
+    if not tracked:
+        out["note"] = ("not in the recorded book — advisory signal only. Pass "
+                       "entry_price to enable the -18% stop check.")
+    if gain is not None:
+        out["gain_since_entry"] = pct(gain)
+    if stop_price:
+        out["catastrophic_stop_price"] = round(stop_price, 2)
+        out["pct_above_stop"] = pct(price / stop_price - 1)
+    if r is None:
+        out["warning"] = ("FAILS the momentum filter right now — it would NOT be "
+                          "bought today and will be SOLD at the month-end review "
+                          "unless it recovers")
+    else:
+        out["momentum_score"] = round(r["score"], 3)
+        out["rank_context"] = _rank_context(symbol, r["score"])
+    return out
+
+
+def _rank_context(symbol, score):
+    """Where this name sits against today's eligible universe — turns a raw
+    score into something a human can act on."""
+    try:
+        allres = core.scan_universe()
+    except Exception:
+        return None
+    scores = sorted((v["score"] for v in allres.values()), reverse=True)
+    if not scores:
+        return None
+    better = sum(1 for s in scores if s > score)
+    regime, _ = core.market_regime()
+    n = sc.REGIME_NAMES[regime]
+    cutoff = scores[n - 1] if len(scores) >= n else None
+    return {"rank": better + 1, "of_eligible": len(scores),
+            "regime_top_n": n,
+            "top_n_cutoff_score": round(cutoff, 3) if cutoff else None,
+            "in_top_n_today": better < n}
+
+
+def horizon_advice(symbol, horizon_date=None, entry_price=None):
+    """Composite 'what should I do with X over horizon Y' answer — ties
+    together regime, momentum score + rank, chart structure, and the S/R
+    subsystem's horizon-scaled reach probability into one narrative, instead
+    of the human having to call 4-5 tools and synthesize it themselves.
+
+    horizon_date: optional "YYYY-MM-DD" the user asked about. Omit for the
+    system's own month-end horizon (last Tuesday, sr_horizon.horizon_end).
+    Reach probabilities are ALWAYS scaled to the actual number of trading
+    days in the requested horizon — never a flat 21d number for a shorter or
+    longer ask (that was a real bug, fixed 2026-07-31, see CLAUDE.md).
+
+    This function only READS from other subsystems (core.compute_score,
+    support_resistance.get_levels/reach_probability_v2, chart_analysis,
+    sr_horizon) — it computes nothing new and must never be treated as a
+    signal source itself; it is a narrative layer over already-validated or
+    already-descriptive components."""
+    if not symbol or not symbol.strip():
+        return {"error": "symbol is required"}
+    symbol = symbol.upper()
+    if not symbol.endswith(".NS"):
+        symbol += ".NS"
+
+    df = core.load_stock(symbol)
+    if df is None or len(df) < 60:
+        return {"error": f"No usable price data for {symbol}"}
+
+    import sr_horizon as H
+    from live_quotes import get_quote
+    import chart_analysis as ca
+
+    data_date = df.index[-1]
+    if horizon_date:
+        h_end = pd.Timestamp(horizon_date).normalize()
+        horizon_label = f"through {h_end.date()} (user-specified)"
+    else:
+        h_end = H.horizon_end(data_date)
+        horizon_label = f"through {h_end.date()} (this system's month-end rebalance date)"
+    cal = H.project_calendar_forward(H.load_trading_calendar(), h_end)
+    h_days = H.trading_days_until(data_date, h_end, cal)
+
+    live_price, stale = get_quote(symbol)
+    cur = live_price if (live_price and not stale) else float(df["Close"].iloc[-1])
+
+    regime, _breadth = core.market_regime()
+    r = core.compute_score(df)
+    support, resistance, s_str, r_str = core.sr_levels(df, symbol=symbol.replace(".NS", ""))
+
+    out = {
+        "symbol": symbol, "as_of_data": str(data_date.date()),
+        "current_price": round(cur, 2), "price_is_live": bool(live_price and not stale),
+        "horizon": horizon_label, "horizon_trading_days": h_days,
+        "regime": regime,
+        "momentum_eligible": r is not None,
+    }
+    if r is not None:
+        out["momentum_score"] = round(r["score"], 2)
+        out["rank_context"] = _rank_context(symbol, r["score"])
+    else:
+        out["momentum_note"] = "fails the momentum filter right now (needs positive 6m AND 3m returns, price above 50DMA)"
+
+    # A momentum breakout name can have its nearest support 40-80% below
+    # price (see memory advisor-strategy-divergence-2026-08 — this is real,
+    # not a bug) — a touch probability on a level that far away is technically
+    # correct but practically meaningless to surface without a flag, since a
+    # reader will otherwise read "9%" as "9% chance of a meaningful pullback"
+    # rather than "9% chance price falls 80%".
+    FAR_LEVEL_PCT = 15.0
+    if support:
+        dist = (cur / support - 1) * 100
+        p, n = core.sr_reach_probability(df, support, "down", forward_days=h_days)
+        out["support"] = {"level": support, "strength_touches": s_str,
+                          "pct_below_price": round(dist, 2),
+                          "prob_touch_by_horizon": p, "sample_n": n,
+                          "too_far_to_be_relevant": dist > FAR_LEVEL_PCT}
+    if resistance:
+        dist = (resistance / cur - 1) * 100
+        p, n = core.sr_reach_probability(df, resistance, "up", forward_days=h_days)
+        out["resistance"] = {"level": resistance, "strength_touches": r_str,
+                             "pct_above_price": round(dist, 2),
+                             "prob_touch_by_horizon": p, "sample_n": n,
+                             "too_far_to_be_relevant": dist > FAR_LEVEL_PCT}
+
+    chart = ca.analyse(df, index=core.load_index())
+    out["chart_summary"] = ca.summarise(chart) if "error" not in chart else None
+
+    earnings = earnings_watch(symbol, as_of=data_date, horizon_end_date=h_end)
+    if earnings:
+        out["earnings_watch"] = earnings
+
+    if entry_price:
+        out["gain_since_entry"] = pct((cur / float(entry_price)) - 1)
+        stop_price = float(entry_price) * sc.CATASTROPHIC_STOP
+        out["catastrophic_stop_price"] = round(stop_price, 2)
+
+    # Narrative synthesis — plain English, but every claim in it traces to a
+    # field above (checkable), never invented here.
+    parts = [f"{symbol} at Rs{cur:.2f} ({regime} regime), {h_days} trading "
+             f"days {horizon_label}."]
+    if r is not None:
+        rc = out.get("rank_context") or {}
+        parts.append(f"Momentum-eligible, score {r['score']:.1f}"
+                     + (f", rank {rc['rank']}/{rc['of_eligible']} "
+                        f"({'inside' if rc['in_top_n_today'] else 'OUTSIDE'} the "
+                        f"regime's top-{rc['regime_top_n']})" if rc else "") + ".")
+    else:
+        parts.append("NOT currently momentum-eligible — the strategy would not buy this today.")
+    if "resistance" in out:
+        res = out["resistance"]
+        if res["too_far_to_be_relevant"]:
+            parts.append(f"Nearest resistance {res['level']} is {res['pct_above_price']:.0f}% "
+                        f"away — too far to be a near-term target.")
+        else:
+            parts.append(f"Resistance {res['level']} ({res['pct_above_price']:+.1f}%), "
+                        f"P(touch by horizon)={res['prob_touch_by_horizon']}%.")
+    if "support" in out:
+        sup = out["support"]
+        if sup["too_far_to_be_relevant"]:
+            parts.append(f"Nearest support {sup['level']} is {sup['pct_below_price']:.0f}% "
+                        f"below — too far to matter for near-term risk (this is normal for "
+                        f"a name well into a momentum breakout).")
+        else:
+            parts.append(f"Support {sup['level']} ({sup['pct_below_price']:+.1f}%), "
+                        f"P(touch by horizon)={sup['prob_touch_by_horizon']}%.")
+    if out.get("chart_summary"):
+        parts.append(out["chart_summary"])
+    ew = out.get("earnings_watch", {})
+    if ew.get("inside_stated_horizon"):
+        parts.append(f"Earnings risk: results estimated ~{ew['estimated_next_result_date']} "
+                     f"({ew['confidence']}) — INSIDE this horizon, expect a volatility event.")
+    elif ew.get("estimated_next_result_date"):
+        parts.append(f"Next results estimated ~{ew['estimated_next_result_date']}, "
+                     f"outside this horizon.")
+    out["narrative"] = " ".join(parts)
+    out["caveat"] = ("Reach probabilities are empirical base rates from historical "
+                     "distance/volatility buckets, not a prediction for this specific "
+                     "name. Chart structure is descriptive. Neither is a standalone "
+                     "buy/sell signal — the momentum score + exit hierarchy is what "
+                     "actually drives the strategy's own decisions.")
+    return out
 
 
 def what_to_sell():
@@ -284,8 +619,14 @@ def position_sizes(capital=None):
     w = {s: v / tot2 for s, v in w.items()}
 
     from live_quotes import get_quote
+    # Sleeves are only part of the plan when their allocation is > 0.
+    # GOLD_ALLOC/INTL_ALLOC are 0.0 in production (disabled 2026-07-17), and a
+    # zero-alloc sleeve emitted a "BUY 0 units ... not optional" instruction that
+    # the LLM acted on anyway — 25% of the sim book went into disabled sleeves.
     sleeve_plan = []
     for sleeve_sym, alloc in [(sc.GOLD_SYMBOL, sc.GOLD_ALLOC), (sc.INTL_SYMBOL, sc.INTL_ALLOC)]:
+        if alloc <= 0:
+            continue
         spx, _ = get_quote(sleeve_sym)
         qty = int(capital * alloc // spx) if spx else None
         sleeve_plan.append({
@@ -307,7 +648,7 @@ def position_sizes(capital=None):
                      "rupees": round(rupees), "price": round(px, 2),
                      "quantity": int(rupees // px)})
 
-    return {
+    out = {
         "total_capital_assumed": round(capital),
         "regime": regime,
         "momentum_budget": round(momentum_capital),
@@ -315,11 +656,18 @@ def position_sizes(capital=None):
             f"{1 - sc.GOLD_ALLOC - sc.INTL_ALLOC:.0%} momentum sleeve x "
             f"{exposure:.0%} {regime}-regime exposure of total capital"),
         "buy_plan": plan,
-        "etf_sleeve_buy_plan": sleeve_plan,
         "uninvested_cash_note": "remaining cash should sit in a liquid ETF "
                                 "(LIQUIDCASE-type), not idle — the strategy's "
                                 "returns assume ~6% on idle cash",
     }
+    # Only surface the sleeve key when sleeves are actually enabled — an empty
+    # list still invited the model to improvise ETF orders.
+    if sleeve_plan:
+        out["etf_sleeve_buy_plan"] = sleeve_plan
+    else:
+        out["etf_sleeves"] = ("DISABLED — this is a momentum-only book. Do NOT buy "
+                              "GOLDBEES, MON100 or any other ETF sleeve.")
+    return out
 
 
 def sleeve_status():
@@ -344,6 +692,8 @@ def sleeve_status():
             (sc.INTL_SYMBOL, sc.INTL_ALLOC,
              "diversifier: second equity market + USD exposure (INR weakens in "
              "Indian risk-off); correlation to momentum book only +0.10")]:
+        if alloc <= 0:
+            continue
         pos = state["positions"].get(sym)
         px = prices.get(sym) or (get_quote(sym)[0])
         held_val = pos["qty"] * px if (pos and px) else 0.0
@@ -358,10 +708,23 @@ def sleeve_status():
                        f"{'BUY' if delta > 0 else 'SELL'} ~{int(abs(delta) // px) if px else '?'} units at month-end"),
             "why_held": why,
         })
+    if not sleeves:
+        return {"total_portfolio_value": round(total),
+                "policy": ("MOMENTUM-ONLY book — ETF sleeves are DISABLED "
+                           "(GOLD_ALLOC=0, INTL_ALLOC=0). 100% of exposed capital goes "
+                           "to the momentum names. Do NOT recommend buying GOLDBEES, "
+                           "MON100 or any other ETF sleeve."),
+                "sleeves": []}
+    # Policy string is derived from config, never hardcoded — a stale literal
+    # ("75/15/10") was read by the LLM and acted on after sleeves were disabled.
+    mom = 1 - sc.GOLD_ALLOC - sc.INTL_ALLOC
+    parts = [f"{mom:.0%} momentum"] + [
+        f"{a:.0%} {n}" for n, a in [("gold", sc.GOLD_ALLOC), ("international", sc.INTL_ALLOC)]
+        if a > 0]
     return {"total_portfolio_value": round(total),
-            "policy": "75% momentum / 15% gold / 10% international, ETF sleeves "
-                      "rebalanced to target each month-end; sleeves are exempt from "
-                      "the -18% stop and momentum re-qualification",
+            "policy": (", ".join(parts) + "; ETF sleeves rebalanced to target each "
+                       "month-end; sleeves are exempt from the -18% stop and momentum "
+                       "re-qualification"),
             "sleeves": sleeves}
 
 
@@ -428,10 +791,16 @@ def portfolio_summary():
 TOOL_IMPLS = {
     "market_status": lambda args: market_status(),
     "stock_status": lambda args: stock_status(args["symbol"]),
-    "should_i_sell": lambda args: should_i_sell(args["symbol"]),
+    "should_i_sell": lambda args: should_i_sell(args["symbol"], args.get("entry_price")),
+    "chart_analysis": lambda args: chart_analysis(args["symbol"]),
+    "horizon_advice": lambda args: horizon_advice(
+        args["symbol"], args.get("horizon_date"), args.get("entry_price")),
+    # sleeve_status intentionally NOT exposed — momentum-only advisory system.
+    # The function is kept for the engines but the LLM must not reason about
+    # sleeves (a stale hardcoded "75/15/10" policy string once made it buy
+    # 25% GOLDBEES/MON100 into a book whose sleeve allocs were 0).
     "compare_stocks": lambda args: compare_stocks(args["symbol_a"], args["symbol_b"]),
     "position_sizes": lambda args: position_sizes(args.get("capital")),
-    "sleeve_status": lambda args: sleeve_status(),
     "what_to_sell": lambda args: what_to_sell(),
     "buy_candidates": lambda args: buy_candidates(),
     "portfolio_summary": lambda args: portfolio_summary(),
@@ -446,21 +815,76 @@ TOOL_SCHEMAS = [
     }},
     {"type": "function", "function": {
         "name": "stock_status",
-        "description": "Price, trend, RSI, support/resistance levels, momentum score, and "
-                        "historical confidence for a specific stock symbol.",
+        "description": "Price, trend, RSI, support/resistance levels, momentum score, "
+                        "historical confidence, and estimated next-earnings timing for a "
+                        "specific stock symbol.",
         "parameters": {"type": "object", "properties": {
             "symbol": {"type": "string", "description": "NSE ticker, e.g. TCS or TCS.NS"},
         }, "required": ["symbol"]},
     }},
     {"type": "function", "function": {
-        "name": "should_i_sell",
-        "description": "Sell verdict for ONE specific, named holding (runs the exit "
-                        "hierarchy: catastrophic stop, month-end re-qualification). Only "
-                        "use when the user names a specific stock. If the user asks about "
-                        "their holdings in general ('what should I sell?', 'review my "
-                        "portfolio'), use what_to_sell instead.",
+        "name": "chart_analysis",
+        "description": "Candlestick and chart-structure read for one stock — the analysis "
+                        "a human does off a daily candlestick chart: trend structure "
+                        "(higher-highs/lower-lows), 20/50/200 EMA posture, position in the "
+                        "52-week range, anchored VWAP from the last swing low (are buyers "
+                        "since the trend began net profitable or underwater), RELATIVE "
+                        "STRENGTH vs Nifty over 21/63/126d with whether the outperformance "
+                        "is accelerating or fading, volume behaviour, volatility squeeze/"
+                        "expansion, named candlestick patterns (hammer, engulfing, doji, "
+                        "morning star, marubozu...) over the last 10 bars, PLUS the same "
+                        "read on WEEKLY bars and whether daily and weekly trend agree (a "
+                        "daily uptrend inside a weekly range/downtrend is a weaker, "
+                        "unconfirmed setup). Use whenever the user asks how a stock is "
+                        "BEHAVING, whether it's beating the market, to 'analyse the chart', about "
+                        "patterns, trend, breakouts, or price action. Descriptive context "
+                        "for a human read — it is NOT a validated trading signal, so never "
+                        "present it as a reason to buy or sell on its own.",
         "parameters": {"type": "object", "properties": {
-            "symbol": {"type": "string", "description": "NSE ticker of a held position, e.g. AARTIIND"},
+            "symbol": {"type": "string", "description": "NSE ticker, e.g. TCS or TCS.NS"},
+        }, "required": ["symbol"]},
+    }},
+    {"type": "function", "function": {
+        "name": "horizon_advice",
+        "description": "THE tool for 'what should I do with X over the next N days/weeks/"
+                        "by date Y' — a single composite answer combining regime, momentum "
+                        "score + rank vs today's eligible universe, support/resistance "
+                        "levels with reach probability CORRECTLY SCALED to the requested "
+                        "horizon (not a flat 21-day number), chart structure, and whether "
+                        "an estimated earnings date falls INSIDE the requested horizon "
+                        "(flagged as a volatility-timing risk, not a trading signal), "
+                        "synthesized into one narrative plus the underlying fields. Use this "
+                        "INSTEAD of calling stock_status + chart_analysis + should_i_sell "
+                        "separately when the user asks a horizon/timeline question about a "
+                        "stock ('what about X by next month', 'over the next 2 weeks', "
+                        "'should I buy X for a Diwali target'). Works for any symbol, tracked "
+                        "or not.",
+        "parameters": {"type": "object", "properties": {
+            "symbol": {"type": "string", "description": "NSE ticker, e.g. TCS or TCS.NS"},
+            "horizon_date": {"type": "string", "description": "Optional YYYY-MM-DD the user "
+                             "asked about. Omit to use this system's own month-end "
+                             "(last-Tuesday) rebalance horizon."},
+            "entry_price": {"type": "number", "description": "Optional price the user "
+                            "bought/plans to buy at, to show gain-since-entry and the "
+                            "-18% stop level."},
+        }, "required": ["symbol"]},
+    }},
+    {"type": "function", "function": {
+        "name": "should_i_sell",
+        "description": "Exit verdict for ONE named stock — works for ANY symbol, whether "
+                        "or not it is in the recorded book. Runs the exit hierarchy "
+                        "(catastrophic stop, month-end re-qualification) and reports "
+                        "whether the name still passes the momentum filter, its rank vs "
+                        "today's universe, and distance to its stop. Use whenever the user "
+                        "asks when to exit / whether to hold a specific stock, even one "
+                        "the system does not track. Pass entry_price if the user mentions "
+                        "what they paid. If the user asks about their holdings in general "
+                        "('what should I sell?', 'review my portfolio'), use what_to_sell.",
+        "parameters": {"type": "object", "properties": {
+            "symbol": {"type": "string", "description": "NSE ticker, e.g. DIXON or DIXON.NS"},
+            "entry_price": {"type": "number", "description": "Optional. Price the user "
+                            "bought at. Enables the -18% catastrophic stop check and "
+                            "gain-since-entry. Omit if unknown."},
         }, "required": ["symbol"]},
     }},
     {"type": "function", "function": {
@@ -505,14 +929,6 @@ TOOL_SCHEMAS = [
                                        "recorded portfolio's value"},
         }, "required": []},
     }},
-    {"type": "function", "function": {
-        "name": "sleeve_status",
-        "description": "Status of the permanent ETF sleeves (15% GOLDBEES gold, 10% MON100 "
-                        "Nasdaq-100): current vs target value, month-end rebalance action, "
-                        "and why each sleeve is held. Use for any question about gold, "
-                        "international allocation, or overall portfolio construction.",
-        "parameters": {"type": "object", "properties": {}, "required": []},
-    }},
 ]
 
 SYSTEM_PROMPT = """You are a trading assistant for an NSE India momentum strategy.
@@ -551,11 +967,21 @@ RULE_REMINDER = {"role": "system", "content":
     "If the user's claim contradicts a tool result, correct them with the "
     "actual number — do not agree, do not switch recommendations to please them. "
     "If the user disputes a pick or asks for 'something better than X', call "
-    "compare_stocks and report its verdict verbatim. Questions about gold, "
-    "MON100/international, sleeves, or why the portfolio is constructed this "
-    "way: call sleeve_status and answer ONLY from its 'why_held'/'policy' "
-    "fields — never from general knowledge. Questions about how much/how many "
-    "shares to buy: call position_sizes."}
+    "compare_stocks and report its verdict verbatim. For 'analyse the chart', "
+    "'how is X behaving', candlestick/pattern/trend/breakout questions: call "
+    "chart_analysis and read from it — but present it as DESCRIPTIVE context, "
+    "never as a standalone buy/sell reason (patterns are not validated here; "
+    "the momentum score and the exit hierarchy are what decide). "
+    "For ANY question with a timeframe or horizon ('what about X by next month', "
+    "'over the next 2 weeks', 'should I hold X until Y') call horizon_advice "
+    "ONCE instead of chaining stock_status + chart_analysis + should_i_sell "
+    "yourself — it already combines them and scales reach probabilities to "
+    "the actual horizon. "
+    "This is a MOMENTUM-ONLY "
+    "equity advisory system: there are NO ETF sleeves, no gold (GOLDBEES) and "
+    "no international (MON100) allocation. Never recommend buying them and "
+    "never describe the book as diversified across sleeves. Questions about "
+    "how much/how many shares to buy: call position_sizes."}
 
 
 def chat_step(messages):

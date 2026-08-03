@@ -66,8 +66,9 @@ Below is today's conversation with your advisor about YOUR portfolio.
 
 Decide what you will ACTUALLY do today. Rules:
 - You generally follow the advisor's recommendations, including quantities.
-- ETF sleeve buys/rebalances (GOLDBEES, MON100) the advisor lists are real
-  orders too — include them, don't treat them as optional commentary.
+- If (and only if) the advisor explicitly lists ETF sleeve buys/rebalances with
+  a non-zero quantity, they are real orders too — include them. If the advisor
+  does not list them, do NOT invent ETF orders.
 - You may skip or size down a trade if you state a reason.
 - Only trade what was discussed. No inventing symbols.
 - If the advisor says nothing needs doing, do nothing.
@@ -206,8 +207,7 @@ def step():
     elif fresh_book:
         cash_now = _ls()["cash"]
         question = (f"I'm starting fresh with ₹{cash_now:,.0f} in cash and no positions. "
-                    f"What exactly should I buy today and how many shares of each? "
-                    f"Include the ETF sleeves.")
+                    f"What exactly should I buy today and how many shares of each?")
     else:
         question = ("Daily check: any exit alerts or stops on my holdings today? "
                     "Should I do anything right now?")

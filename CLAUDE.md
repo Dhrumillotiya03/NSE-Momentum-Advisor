@@ -1,9 +1,77 @@
 # stock_ai — Project Context
 
 ## What this is
-Quant momentum trading system for NSE India. Not a toy project — this is being
+Quant momentum ADVISORY system for NSE India. Not a toy project — this is being
 prepared for real capital deployment via Zerodha. Side income goal, not day trading —
 decisions made weekly/monthly.
+
+PRIMARY USE (clarified 2026-08-01, supersedes the portfolio-manager framing):
+this is a SIGNAL/ADVICE engine, not a portfolio manager. The questions it must
+answer well are (1) which stocks to buy right now, (2) at what price, (3) when
+to exit a named stock — INCLUDING stocks the system does not track — and (4)
+what to do over a stated horizon, with chart/level analysis. The user's real
+Zerodha book, capital figure and cash balance are NOT the focus; do not build
+around them or nag about them. NO SLEEVES: gold (GOLDBEES) and international
+(MON100) were diversification features for a portfolio-manager framing the user
+does not want — GOLD_ALLOC/INTL_ALLOC stay 0.0 and the LLM must never
+recommend them (sleeve_status is deliberately NOT in the assistant's toolset).
+
+## Live data (2026-08-03 — Kite Connect, first paid dependency)
+User is now open to reacting faster on existing swing positions (NOT a new
+same-day-trading strategy) and wanted TRUE live/real-time NSE quotes, not
+yfinance's ~15-min delay. Added Zerodha Kite Connect (₹500/month) — this
+SUPERSEDES the "zero-cost tooling only" mandate in memory
+trading-mandate-constraints for price DATA specifically (strategy logic,
+universe, everything else stays as before; no automated order placement
+was added — record_fill.py's signals-only rule is unchanged).
+- **The Kite Connect account belongs to a COLLABORATOR, not the user** —
+  his Zerodha login, his ₹500/month subscription. His ACCOUNT PASSWORD is
+  deliberately never stored anywhere in this system: the one-time browser
+  login (`kite_auth.py login`) is designed so he types it directly into
+  Zerodha's own page, never into any script or file here.
+- Credentials live in `data/secrets/` (api key/secret, TOTP secret, cached
+  daily access token) — `600` perms, directory `700`, covered by
+  `.gitignore`'s `data/` rule (verify with `git check-ignore -v
+  data/secrets/*` before ever touching this directory) — the repo's history
+  of accidentally publishing personal data (see memory
+  repo-public-data-exposure) makes this a real risk, not a formality.
+- `kite_auth.py` — SEMI-automated daily refresh (2026-08-03), since Kite's
+  `request_token` can only come from an actual browser login and Zerodha
+  provides no programmatic password-login endpoint. `python kite_auth.py
+  refresh` (the recommended daily command) opens the login page in a
+  browser automatically, prints a fresh TOTP code (generated from the
+  stored secret via `pyotp`) right when needed, then waits for the
+  collaborator/user to paste back the `request_token` from the redirected
+  URL and exchanges it immediately — about 30 seconds of manual work
+  (Client ID + his password, typed live + the printed TOTP), everything
+  else automatic. Caches the access token to
+  `data/secrets/kite_access_token.json`. FULL automation (storing the
+  account password to script the login itself) was explicitly considered
+  and REJECTED, even after the collaborator provided written approval to
+  store it — the password is HIS account's master credential, doing this
+  would mean reverse-engineering Zerodha's login page (unofficial, fragile,
+  breaks whenever they change it, real risk to his account standing with
+  the broker), and consent doesn't change what happens if it leaks from a
+  repo with a documented history of exactly that. See memory
+  kite-connect-live-feed-2026-08. Lower-level `login`/`exchange` subcommands
+  still exist for scripting/debugging. Access tokens expire ~24h.
+- `live_quotes.py` now tries Kite Connect FIRST (true real-time, if a
+  token is cached and valid), falls back to yfinance (~15-min delayed) if
+  Kite is unavailable for any reason, then the last CSV close (flagged
+  stale). This fallback chain means EVERY existing consumer
+  (`should_i_sell`, `intraday_watch.py`, `horizon_advice`, exit checks)
+  transparently gets true live prices with zero changes to their own code
+  when Kite is connected, and degrades gracefully to the old behavior on a
+  day the token wasn't refreshed — nothing breaks either way.
+  `get_quotes()` (plural) batches ALL symbols into ONE Kite API call.
+- `live_ticker.py` — a terminal, tick-by-tick live price display (like
+  Kite's own watchlist), built on `KiteTicker` (websocket, not polling).
+  DISPLAY ONLY: reads no signals, writes nothing, not called by any other
+  script — closing it has zero effect on the pipeline. Defaults to held
+  positions + today's top-10 buy candidates; accepts explicit symbols as
+  args. Needs a real terminal (curses) — cannot be smoke-tested headlessly;
+  the underlying pieces (token resolution, websocket tick reception) were
+  verified working in isolation before wiring the display on top.
 
 ## Machine / environment
 - Ubuntu, Anaconda `base` env, Python
@@ -145,11 +213,18 @@ stock_ai/
   months with no review), NOT a forced full liquidation. A name still in
   the new sector-capped top-N is HELD (rebalanced to its new target weight
   only, cost on the delta, no realized gain/tax event); a name dropping out
-  is SOLD; new names are bought next session. Early intra-month exits
-  beyond the -18% stop are still not built in (both tested price-based
-  variants lost in walk-forward; non-price overlays on holdings tested via
-  corporate announcements 2026-07-12 and REJECTED — see memory
-  exit-announcements-rejected). Adopting laggards-only itself: costs ~0.8pp
+  is SOLD; new names are bought next session. MANDATE RELAXED 2026-08-01:
+  selling is now allowed AT ANY TIME (no compulsion to wait for month-end);
+  only the month-end REBALANCE remains compulsory. That is a PERMISSION, not
+  a signal — early intra-month exits are still not built in, because all
+  THREE tested price-based variants lost in walk-forward: tight trailing/50MA,
+  resistance-fade, and (2026-08-01) a ratcheting giveback trailing stop
+  (-5 to -6pp mean CAGR, wins only 4-6/19 windows, adds a negative window;
+  research handle kept as run_backtest_laggards_only(trail_stop=...), default
+  None). Non-price overlays tested via corporate announcements 2026-07-12 and
+  REJECTED — see memory exit-announcements-rejected. Discretionary early
+  sells by the user are fine; just record them via record_fill.py.
+  Adopting laggards-only itself: costs ~0.8pp
   gross CAGR (fewer round-trips lose a little raw return) but SAVES ~3pp/yr
   NET CAGR — fewer taxable events, NOT LTCG conversion (that barely fires:
   momentum's own turnover displaces names from top-N well before 365 days).
@@ -201,9 +276,12 @@ stock_ai/
 - Current backtest (F&O-gated universe, SIDEWAYS=3, BEAR=4, boosted
   exposure, MOMENTUM-ONLY — sleeves disabled 2026-07-17, so the production
   default run_backtest_gold_blend degenerates to laggards_only + cash
-  yield; data as of 2026-07-17): 21.79% CAGR, Sharpe 1.01, max DD 33.4%.
-  Walk-forward (19 overlapping 3y windows): mean CAGR 26.9%, median 25.8%,
-  mean Sharpe 1.18, worst window DD 29.2%, 2/19 negative windows. For
+  yield; RE-RUN 2026-08-01 on current data): 19.18% CAGR, Sharpe 0.92,
+  max DD 37.12%. Walk-forward (19 overlapping 3y windows): mean CAGR
+  26.22%, median 27.24%, mean Sharpe 1.16, worst window DD 29.1%, 1/19
+  negative windows. (The previously documented 21.79%/1.01/33.4% was data
+  as of 2026-07-17 — two more weeks of BEAR tape moved it. Re-run the
+  backtest before quoting these; they drift with every download.) For
   comparison the three-sleeve config on the SAME data: 22.22%/1.32/22.6%,
   0/19 negative windows — the sleeves' loss shows up in DD/consistency,
   not CAGR. Post-tax net ≈ momentum 20% STCG FY-netted
@@ -377,6 +455,154 @@ stock_ai/
   scores each completed paper month at its percentile of the production
   backtest's 21d-return distribution; this is the deployment gate made
   quantitative (2+ months below p10 = live path diverges, investigate).
+- STALE-DATA GUARD ON THE ADVISOR (2026-08-01, full_advisor.py): the nightly
+  data_integrity_check.py can WARN on a stale CSV, but nothing stopped
+  full_advisor.py from issuing a BUY call quoting a days-old close as
+  "current price" in between checks. compute_buy_calls now compares each
+  candidate's last bar against the INDEX's last bar (not wall-clock — the
+  market can be legitimately closed with zero staleness) and excludes any
+  name more than MAX_STALE_SESSIONS=3 sessions behind, surfacing the skip
+  list in both the quiet (`--log`) and full report output. Returns a 4-tuple
+  now: (regime, top_sectors, buy_list, stale_skipped).
+- BACKTEST UNIVERSE COVERAGE BUG FIXED 2026-08-01 (backtest_portfolio.
+  load_price_matrix): the NaN-share filter was computed over the FULL
+  2015-2026 panel, so any name listed after ~2020 necessarily had >20%
+  leading NaN and was dropped for its ENTIRE history. 185 of 498 candidate
+  columns were being silently excluded — 100% pure leading-NaN (recent
+  listing), 0% genuine interior gaps, confirmed by inspection before
+  changing anything. 39% of TODAY's live-eligible universe (35 of 89 names,
+  including the entire current top-4: WELCORP/LAURUSLABS/RADICO/ADANIENSOL)
+  had literally never appeared in any backtest. The engines were already
+  point-in-time safe for this (momentum_score/liquid_symbols_at both return
+  None/skip on insufficient history up to bar i) — only the matrix loader's
+  filter was global instead of per-column-since-listing. Fixed: NaN share
+  now measured from each column's own first valid date. Coverage is now
+  100% (89/89 eligible names present). Result: 19.18%->27.18% CAGR,
+  Sharpe 0.92->1.09, MaxDD 37.1%->27.65%; walk-forward mean CAGR
+  26.22%->31.47%, mean Sharpe 1.16->1.24, still 1/19 negative windows.
+  SANITY-CHECKED against curve-fitting via the recently-listed tail: names
+  listed pre-2021 ALONE already deliver 23.26% CAGR/Sharpe 1.00 (most of
+  the gain), and walk-forward on that mature-only subset (32.86%/1.31)
+  slightly BEATS the full-universe walk-forward — the improvement is not
+  concentrated in thin, fragile recent-IPO history. 52 of the newly-restored
+  pre-2021 names are established F&O constituents that had been silently
+  excluded from every backtest since this bug existed (HAL, HDFCLIFE,
+  HDFCAMC, AUBANK, BANDHANBNK, DIXON, CAMS, ADANIGREEN, CDSL...). This is
+  the new production baseline — re-run before quoting older numbers.
+- MONTH-END = LAST TUESDAY (2026-08-01 user spec, fixed in code). The trading
+  engine used the last CALENDAR trading day while the S/R subsystem already used
+  the last Tuesday — so live rebalances ran up to 3 days LATE nearly every month
+  (July 2026 fired 07-31; spec says 07-28). `exit_engine.is_last_trading_day_of_month`
+  now resolves via `exit_engine.rebalance_day()` → sr_horizon.last_tuesday_of_month,
+  rolled BACK to the prior session if that Tuesday is an NSE holiday (March 2026
+  → Mon 03-30). One definition now drives exit_engine, paper_trader, agent_sim and
+  ai_assistant; verified to fire exactly once per month across 199 months. The
+  BACKTEST is unaffected — it rebalances on a fixed 21-day grid, not calendar
+  dates (still 20.80% CAGR after the change).
+- CHART ANALYSIS (chart_analysis.py, new 2026-08-01) — candlestick/price-action
+  read: trend structure (higher-highs/lower-lows via swing points), 20/50/200 EMA
+  posture + stacking, position in 52w range, volume behaviour (surge, up-vs-down
+  volume), volatility squeeze/expansion, and named candle patterns (hammer,
+  shooting star, engulfing, doji, marubozu, morning/evening star) over the last
+  10 bars, each with date + bars_ago so a claim is checkable. MULTI-TIMEFRAME
+  (2026-08-01): every function is a pure OHLC-in dict-out call, so the SAME
+  trend/MA/range logic also runs on weekly-resampled bars (resample_weekly,
+  W-FRI) — no separate weekly code path to drift. `timeframe_agreement`
+  reports ALIGNED/MIXED/CONFLICTING between daily and weekly trend structure
+  (e.g. daily UPTREND inside a weekly RANGE/DOWNTREND = unconfirmed setup,
+  not a real breakout). Needs ~60 weekly bars (~14mo); below that the weekly
+  key degrades to an explicit "insufficient history" rather than a spurious
+  read. On 2026-08-01's top-8 advisor candidates, 5/8 showed daily UPTREND
+  vs weekly RANGE_OR_TRANSITION — genuinely differentiating, not decorative.
+  Exposed as the assistant's `chart_analysis` tool and printed per buy call
+  in full_advisor. HARD RULE: it is DESCRIPTIVE ONLY. Nothing in chart_analysis.py may be wired
+  into exit_engine/paper_trader/agent_sim or the scorer — candle patterns are
+  not walk-forward validated here, and every auxiliary overlay tested so far
+  (delivery%, OI/PCR, announcements, resistance-fade, trailing stop) was
+  REJECTED. Thresholds are the conventional textbook ones, deliberately NOT
+  tuned on this universe (tuning them here would be curve-fitting).
+  ANCHORED VWAP (2026-08-01, anchored_vwap_from_last_swing_low): volume-
+  weighted average price from the most recent swing low to now — "are buyers
+  since this trend attempt began net profitable or underwater". Distinct
+  from support_resistance.py's fixed-252d volume-profile HISTOGRAM (that
+  module is separately owned/tuned, not touched); {} fallback if no volume.
+  RELATIVE STRENGTH (2026-08-01, relative_strength): stock return minus
+  Nifty return over 21/63/126d, PLUS whether the RS LINE (price/index ratio)
+  itself is trending — catches "up 20% in an 18%-up market" (barely
+  outperforming despite a strong raw number) and separates ACCELERATING
+  outperformance from a fading one. Needs an index series passed in
+  (core.load_index()) — this is the one chart_analysis function that isn't
+  pure-df, since relative strength is definitionally vs an external
+  benchmark; callers (ai_assistant, full_advisor) load the index once and
+  pass it through, not per-symbol.
+- HORIZON ADVICE (ai_assistant.horizon_advice, new 2026-08-01) — the
+  composite "what should I do with X over horizon Y" tool: ties regime +
+  momentum score/rank + S/R levels (with reach probability correctly scaled
+  to the ACTUAL requested horizon via sr_horizon, never a flat 21d number)
+  + chart_analysis into one narrative. Works for any symbol, tracked or not;
+  accepts an optional horizon_date (defaults to this system's month-end/
+  last-Tuesday horizon) and optional entry_price. Read-only composition over
+  already-validated/already-descriptive components — computes nothing new,
+  so it inherits the "descriptive, not a signal" status of its parts. Flags
+  a support/resistance level as `too_far_to_be_relevant` past 15% distance
+  (a momentum breakout name's nearest support is routinely 40-80% below
+  price — technically correct but meaningless to surface as a bare
+  percentage without that flag). Assistant toolset is now 10 tools.
+- EARNINGS AWARENESS (ai_assistant.earnings_watch, new 2026-08-01) —
+  DISPLAY-ONLY estimated next-earnings date, surfaced in stock_status and
+  horizon_advice (flagged if it falls inside the requested horizon: "expect
+  a volatility event"). Method: NSE 'Outcome of Board Meeting' announcements
+  whose text matches "financial result" or "financial statem" (NSE phrasing
+  varies and data/announcements/ text is truncated) ARE the historical
+  earnings dates; projects the next one as last_result + median(sane
+  trailing gaps, 75-100 days, filtering backfill/pagination artifacts in the
+  announcement history — verified against RELIANCE's real gaps which
+  included spurious 545-546-day values). Prefers a formally-SCHEDULED board
+  meeting date (companies announce ~1 week ahead) over the cadence estimate
+  when one exists and is still in the future. Surfaces
+  `announcements_data_age_days` and a `data_stale_warning` above 14 days —
+  download_announcements.py is a ONE-TIME backfill script, NOT in the nightly
+  run_daily_log.sh pipeline, so this data goes stale in practice (measured
+  20-22 days stale on 2026-08-01) unless re-run manually or added to the
+  nightly pipeline (an ops decision, not made here — adds an NSE network
+  call to the daily run). NEVER wired into exit_engine/scoring — same
+  descriptive-only status as chart_analysis, and the automated announcement-
+  driven exit VETO was separately backtested and REJECTED already (memory
+  exit-announcements-rejected) — this is awareness, not a trading rule.
+  BUG CAUGHT DURING TESTING: horizon_end_date must be compared as a
+  CALENDAR date, not a trading-day count — an earlier version compared a
+  calendar-day projection against sr_horizon's trading-day count and
+  produced a false "outside horizon" on a real case (WELCORP: estimate 21
+  calendar days out, horizon 17 trading days, both correctly inside the same
+  ~25-calendar-day window). Fixed to compare against the actual end date.
+- ADVISOR REBUILT 2026-08-01 (full_advisor.py) — it was recommending stocks the
+  validated strategy would never buy. Three structural defects, all fixed:
+  (1) a TOP-3 SECTOR GATE that isn't in the backtest at all (backtest ranks the
+  whole gated universe + 2-per-sector CAP). It blocked 9 of the top 10 names by
+  momentum score; advisor called DIXON (score 13.8) while the strategy wanted
+  WELCORP/LAURUSLABS/RADICO/ADANIENSOL (40-51). ZERO overlap. Sector scores were
+  noise-level apart (0.117 vs 0.088) — PHARMA missed the cut by 0.007 and took
+  LAURUSLABS with it. Gate removed; select_top_n_capped now applied, and each
+  call carries `in_strategy_top_n`. (2) LEVELS WERE ANTI-MOMENTUM: entry was
+  priced AT nearest support and rr measured against it, but momentum leaders sit
+  35-44% above support ⇒ unfillable limits, rr 0.01-0.71 always failing rr>=1,
+  and stops far wider than the -18% engine stop. get_trade_levels is now ATR-based
+  (ENTRY/STOP/TARGET_ATR_MULT in full_advisor.py): shallow pullback entry floored
+  at nearby support, stop capped at CATASTROPHIC_STOP, target = resistance or ATR
+  projection for names at 52w highs. (3) hardcoded RSI>75 hard-reject contradicted
+  RSI_OVERBOUGHT=80 being ADVISORY — now a flag, not a filter. Result: 3 → 73
+  candidates, entries 0.6-2.3% below close, and the advisor's top-4 now EQUALS
+  the strategy's top-4. The July ledger's 1/8 fill rate was this bug, so
+  pre-2026-08-01 advisor_calls_log rows are NOT comparable to later ones.
+- SECTORS.JSON GAP FIXED 2026-08-01: 14 eligible names (WELCORP, RADICO,
+  LLOYDSME, SONACOMS, M&MFIN, NAM-INDIA, EXIDEIND, HEG, CHENNPETRO, IIFL,
+  360ONE, PPLPHARMA, ANANTRAJ, MANAPPURAM) were unmapped and all shared ONE
+  "UNMAPPED" bucket in select_top_n_capped — so unrelated businesses consumed
+  the 2-per-sector cap against each other. Now mapped (backup:
+  data/_quarantine/sectors_pre_2026-08-01.json). Backtest 19.18%→20.80% CAGR,
+  but walk-forward says +0.72pp mean CAGR / +0.03 Sharpe winning only 11/19
+  and 10/19 windows — NOT significant by this repo's bar. Justification is
+  MECHANICAL (a data defect), not performance; don't cite it as an edge.
 - ETF data (GOLDBEES, MON100) lives in `data/etf_data/` (download_etf.py), NOT price_data/ —
   price_data is globbed as the universe by core.market_breadth_pct/liquid_universe,
   and a high-turnover ETF there would enter the tradable top-200 and could get bought

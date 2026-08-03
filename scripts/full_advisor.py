@@ -6,7 +6,9 @@ import pandas as pd
 import numpy as np
 
 import yaml
-from core import load_stock, market_regime as _core_market_regime, compute_atr, compute_rsi, SECTOR_FILE, liquid_universe
+import strategy_config as sc
+import chart_analysis as ca
+from core import load_stock, load_index, market_regime as _core_market_regime, compute_atr, compute_rsi, SECTOR_FILE, liquid_universe
 from support_resistance import get_levels, strength_label
 
 # Advisory-call ledger: every BUY recommendation this advisor emits is
@@ -16,11 +18,31 @@ from support_resistance import get_levels, strength_label
 # not the run date, per the partial-candle convention (see CLAUDE.md).
 CALLS_LOG = "../data/advisor_calls_log.csv"
 CALL_COLUMNS = ["date", "symbol", "sector", "regime", "rank", "alpha",
-                "price", "buy_at", "target", "stop", "rr", "s_str", "r_str"]
+                "price", "buy_at", "target", "stop", "rr", "s_str", "r_str",
+                # added 2026-08-01: lets call_report separate the strategy's
+                # own book from merely-passing names, and flag overbought entries
+                "in_strategy_top_n", "rsi"]
 with open("../config.yaml") as f:
     cfg = yaml.safe_load(f)
 CAPITAL = cfg["capital"]
 RISK_PER_TRADE = cfg["risk"]["risk_per_trade"]
+
+# Stale-data guard (added 2026-08-01): data_integrity_check.py runs nightly
+# and WARNs on stale CSVs, but nothing stopped the advisor itself from
+# issuing a call built on days-old data in between checks (a parallel
+# download failure, a missed cron run, a name that quietly stopped updating).
+# A call quoting a 5-session-old close as "current price" is actively
+# misleading. Measured against the INDEX's last bar, not wall-clock time —
+# the market can be legitimately closed (weekend/holiday) with no staleness
+# at all; what matters is whether this NAME lags the rest of the data pull.
+MAX_STALE_SESSIONS = 3
+
+# Momentum-call level construction (see get_trade_levels). ATR multiples, not
+# S/R distances — momentum names trade far above their supports.
+ENTRY_ATR_MULT = 0.5    # shallow pullback from last close; fills in normal noise
+STOP_ATR_MULT = 2.0     # ~2 ATR below entry, hard-capped at the -18% engine stop
+TARGET_ATR_MULT = 4.0   # used when there is no overhead resistance (52w highs)
+MIN_RR = 1.5            # momentum calls should offer >=1.5R; ATR targets give 2R
 
 
 # ---------- MARKET REGIME ----------
@@ -122,13 +144,51 @@ def compute_supertrend(df, period=10, multiplier=3):
     return direction.iloc[-1], supertrend_line.iloc[-1]
 
 def get_trade_levels(df, atr_stop=None):
+    """Entry/stop/target for a MOMENTUM call.
+
+    REWRITTEN 2026-08-01. The old construction priced entry AT the nearest
+    support and measured rr against it. For strong momentum names that support
+    sits 35-44% below price (WELCORP 44.4%, LAURUSLABS 43.6% on 2026-08-01) —
+    an unfillable limit, an rr of 0.01-0.71 that always failed the rr>=1 gate,
+    and a stop 40%+ wide that the -18% strategy stop would fire long before.
+    Net effect: the advisor structurally excluded the exact names the validated
+    strategy buys (fill rate 1/8 on the July ledger). Momentum entries are
+    pullback/breakout entries near price, not support bounces.
+
+    Entry: a shallow ATR pullback from the last close (fills in normal noise),
+    floored at the nearest support if that support is close by.
+    Stop:  ATR-based, but never wider than the strategy's own -18% catastrophic
+           stop — a call whose stop is looser than the engine's is incoherent.
+    Target: nearest resistance if it offers real upside, else an ATR projection
+           (a momentum name at 52w highs has no overhead resistance to use).
+    """
     current = float(df["Close"].iloc[-1])
     support, resistance, s_str, r_str = get_levels(df)
-    stop   = round(support * 0.97, 2)
-    risk   = current - stop
-    reward = resistance - current
-    rr     = round(reward / risk, 2) if risk > 0 else 0
-    return current, stop, resistance, support, resistance, rr, s_str, r_str
+    atr = atr_stop if atr_stop and not np.isnan(atr_stop) else current * 0.02
+
+    # --- entry: shallow pullback, not a deep support bounce ---
+    buy_at = current - ENTRY_ATR_MULT * atr
+    if support and current > support > buy_at:
+        buy_at = support          # support is nearer than the ATR pullback
+    buy_at = round(min(buy_at, current), 2)
+
+    # --- stop: ATR-wide, capped at the strategy's catastrophic stop ---
+    stop = buy_at - STOP_ATR_MULT * atr
+    floor = buy_at * sc.CATASTROPHIC_STOP      # never wider than -18%
+    stop = round(max(stop, floor), 2)
+
+    # --- target: real resistance, else ATR projection ---
+    risk = buy_at - stop
+    min_target = buy_at + risk                  # at least 1R
+    if resistance and resistance > min_target:
+        target = resistance
+    else:
+        target = buy_at + TARGET_ATR_MULT * atr
+    target = round(target, 2)
+
+    reward = target - buy_at
+    rr = round(reward / risk, 2) if risk > 0 else 0
+    return buy_at, stop, target, support, resistance, rr, s_str, r_str
 
 def position_size(price, atr):
     stop_dist = 2 * atr
@@ -148,6 +208,7 @@ def compute_buy_calls():
     buy_list is a list of dicts sorted by alpha descending."""
     regime = market_regime()
     sectors = load_sectors()
+    nifty_index = load_index()   # loaded once, reused for relative_strength per name
 
     # F&O liquidity gate (see strategy_config.py's Universe gate comment /
     # memory fno-universe-migration) — restrict both sector scoring and the
@@ -161,21 +222,44 @@ def compute_buy_calls():
     ranked_sec = sorted(sec_scores.items(), key=lambda x: x[1], reverse=True)
     top_sectors = [s[0] for s in ranked_sec[:3]]
 
+    index_last_date = load_index().index[-1]
+    stale_skipped = []
+
+    # SECTOR GATE REMOVED 2026-08-01. The advisor used to scan ONLY the top-3
+    # sectors, which is NOT the validated selection path (the backtest ranks
+    # the whole gated universe and applies a 2-per-sector CAP). Measured on
+    # 2026-08-01 the gate blocked 9 of the top 10 names by momentum score and
+    # left ZERO overlap with the strategy's actual top-4: the advisor called
+    # DIXON (score 13.8) while the strategy wanted WELCORP/LAURUSLABS/RADICO/
+    # ADANIENSOL (scores 40-51). Sector scores were also statistically
+    # indistinguishable (0.117 vs 0.088), so a top-3 cut was noise discarding
+    # most of the universe — PHARMA missed the cut by 0.007 and took
+    # LAURUSLABS (49.42) with it. top_sectors is retained for DISPLAY only.
     buy_list = []
     for sector, symbols in sectors.items():
-        if sector not in top_sectors:
-            continue
-
         for sym in symbols:
             df = load_stock(sym)
             if df is None:
                 continue
 
+            # refuse to issue a call on data that lags the rest of the pull —
+            # a stale close quoted as "current price" is actively misleading,
+            # not just conservative
+            gap = np.busday_count(df.index[-1].date(), index_last_date.date())
+            if gap > MAX_STALE_SESSIONS:
+                stale_skipped.append((sym, df.index[-1].date(), gap))
+                continue
+
             alpha = compute_alpha(df)
             if alpha is None or alpha <= 0:
                 continue
-            if compute_rsi(df["Close"]) > 75:
-                continue
+            # RSI is ADVISORY per strategy_config.RSI_OVERBOUGHT (=80), not a
+            # hard reject — full_advisor previously hardcoded 75 and dropped
+            # names the strategy itself would buy (LAURUSLABS RSI 84 on
+            # 2026-08-01, momentum score 49.4, a strategy top-4 name).
+            # Reported as an overbought flag so the human can judge entry
+            # timing, rather than silently discarding a valid signal.
+            rsi_now = compute_rsi(df["Close"])
 
             price = df["Close"].iloc[-1]
             atr = compute_atr(df)
@@ -185,26 +269,47 @@ def compute_buy_calls():
             shares, value, stop_atr = position_size(price, atr)
             entry, stop, target, support, resistance, rr, s_str, r_str = get_trade_levels(df, atr)
 
-            if rr < 1.0:
-                continue
-            if s_str < 2:
-                continue
-
-            # skip if buy zone is more than 6% away — too far to wait
-            dist_to_support = (price - support) / price
-            if dist_to_support > 0.06:
+            # FILTERS RELAXED 2026-08-01 — the old rr>=1.0 / s_str>=2 /
+            # "support within 6%" trio encoded a support-BOUNCE premise and so
+            # structurally rejected momentum leaders (their nearest support is
+            # 35-44% away and freshly-broken-out levels have 1 touch). Entry is
+            # now an ATR pullback near price, so the distance test is inherent
+            # and s_str is reported as context rather than used as a gate.
+            if rr < MIN_RR:
                 continue
 
             buy_list.append({
                 "symbol": sym, "sector": sector, "alpha": alpha,
                 "price": float(price), "shares": shares, "value": value,
-                "buy_at": support, "target": resistance, "stop": stop,
+                "buy_at": entry, "target": target, "stop": stop,
                 "rr": rr, "s_str": s_str, "r_str": r_str,
+                "rsi": round(float(rsi_now), 1),
+                "overbought": bool(rsi_now > sc.RSI_OVERBOUGHT),
+                # descriptive chart context (chart_analysis.py) — shown to the
+                # human, NEVER used to include/exclude a call
+                "chart": ca.summarise(ca.analyse(df, index=nifty_index)),
                 "date": str(df.index[-1].date()),
             })
 
     buy_list.sort(key=lambda x: x["alpha"], reverse=True)
-    return regime, top_sectors, buy_list
+
+    # Apply the SAME 2-per-sector cap the backtest enforces
+    # (backtest_portfolio.select_top_n_capped), so the advised names are the
+    # names the validated strategy would actually hold. Names are flagged
+    # rather than dropped: in_strategy_top_n marks the ones inside the current
+    # regime's book, so the display can separate "the strategy's picks" from
+    # "also passing the filters".
+    from backtest_portfolio import select_top_n_capped, load_sector_map
+    smap = load_sector_map()
+    alphas = {b["symbol"]: b["alpha"] for b in buy_list}
+    n_regime = sc.REGIME_NAMES.get(regime, sc.REGIME_NAMES.get("SIDEWAYS", 3))
+    book = set(select_top_n_capped(alphas, n_regime, smap, sc.MAX_PER_SECTOR))
+    capped = set(select_top_n_capped(alphas, len(alphas), smap, sc.MAX_PER_SECTOR))
+    for b in buy_list:
+        b["in_strategy_top_n"] = b["symbol"] in book
+        b["passes_sector_cap"] = b["symbol"] in capped
+    buy_list.sort(key=lambda x: (not x["in_strategy_top_n"], -x["alpha"]))
+    return regime, top_sectors, buy_list, stale_skipped
 
 
 def log_calls(regime, buy_list, top_n=8):
@@ -228,7 +333,9 @@ def log_calls(regime, buy_list, top_n=8):
                      "alpha": round(c["alpha"], 4), "price": round(c["price"], 2),
                      "buy_at": round(c["buy_at"], 2), "target": round(c["target"], 2),
                      "stop": round(c["stop"], 2), "rr": c["rr"],
-                     "s_str": c["s_str"], "r_str": c["r_str"]})
+                     "s_str": c["s_str"], "r_str": c["r_str"],
+                     "in_strategy_top_n": bool(c.get("in_strategy_top_n")),
+                     "rsi": c.get("rsi")})
     if rows:
         pd.DataFrame(rows, columns=CALL_COLUMNS).to_csv(
             CALLS_LOG, mode="a", header=not os.path.exists(CALLS_LOG), index=False)
@@ -239,12 +346,15 @@ def log_calls(regime, buy_list, top_n=8):
 
 def main():
     quiet = "--log" in sys.argv    # nightly pipeline mode: ledger + one line
-    regime, top_sectors, buy_list = compute_buy_calls()
+    regime, top_sectors, buy_list, stale_skipped = compute_buy_calls()
     n_logged = log_calls(regime, buy_list)
 
     if quiet:
         print(f"advisor calls: {len(buy_list[:8])} live, {n_logged} newly logged "
               f"({regime}, sectors: {', '.join(top_sectors)})")
+        if stale_skipped:
+            print(f"  WARN: {len(stale_skipped)} name(s) skipped for stale data: "
+                  + ", ".join(f"{s} ({d}, {g}d behind)" for s, d, g in stale_skipped[:5]))
         return
 
     print("\n==============================")
@@ -253,6 +363,11 @@ def main():
 
     print("\nMarket Regime:", regime)
     print("Top Sectors:", ", ".join(top_sectors))
+    if stale_skipped:
+        print(f"\n⚠️  {len(stale_skipped)} name(s) EXCLUDED — data lags the index "
+              f"by more than {MAX_STALE_SESSIONS} sessions:")
+        for s, d, g in stale_skipped:
+            print(f"    {s}: last bar {d} ({g} sessions behind)")
 
     print("\n📈 BUY RECOMMENDATIONS:\n")
 
@@ -268,10 +383,18 @@ def main():
         print(f"  Shares:         {c['shares']}")
         print(f"  Position Value: ₹{c['value']:,.0f}")
         print(f"  ─────────────────────────────────────")
-        print(f"  📥 Buy at:   ₹{c['buy_at']:.2f}  [{strength_label(c['s_str'])} — {c['s_str']} touches]")
-        print(f"  🎯 Target:   ₹{c['target']:.2f}  [{strength_label(c['r_str'])} — {c['r_str']} touches]")
-        print(f"  🛑 Stop:     ₹{c['stop']:.2f}  (3% below support)")
-        print(f"  ⚖️  R:R:      1:{c['rr']}")
+        dist = (c["price"] - c["buy_at"]) / c["price"] * 100
+        stop_pct = (c["stop"] / c["buy_at"] - 1) * 100
+        tgt_pct = (c["target"] / c["buy_at"] - 1) * 100
+        book = "  ⭐ STRATEGY TOP-N" if c.get("in_strategy_top_n") else ""
+        print(f"  📥 Buy at:   ₹{c['buy_at']:.2f}  ({dist:.1f}% below last close){book}")
+        print(f"  🎯 Target:   ₹{c['target']:.2f}  ({tgt_pct:+.1f}%)  "
+              f"[nearest resistance: {strength_label(c['r_str'])} — {c['r_str']} touches]")
+        print(f"  🛑 Stop:     ₹{c['stop']:.2f}  ({stop_pct:+.1f}% from entry)")
+        print(f"  ⚖️  R:R:      1:{c['rr']}"
+              + (f"   ⚠️ RSI {c['rsi']:.0f} overbought" if c.get("overbought") else ""))
+        if c.get("chart"):
+            print(f"  📉 Chart:    {c['chart']}")
         print()
 
     if n_logged:

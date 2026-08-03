@@ -63,8 +63,25 @@ def load_price_matrix():
     # Forward fill up to 5 days (handles holidays/halts)
     matrix = matrix.ffill(limit=5)
 
-    # Drop stocks missing more than 20% of dates in this window
-    matrix = matrix.loc[:, matrix.isna().mean() <= 0.20]
+    # Drop stocks missing more than 20% of dates SINCE THEIR LISTING (not
+    # over the full 2015-2026 panel). The old global test measured NaN share
+    # against the whole matrix's date range, so any name listed after ~2020
+    # necessarily has >20% leading NaN and was dropped for its ENTIRE
+    # history — silently shrinking the tradeable/backtestable universe as
+    # the index ages. Verified 2026-08-01: of 185 names this dropped, 100%
+    # were pure leading-NaN (recent listing), 0% had genuine interior gaps —
+    # so this is a coverage bug, not a data-quality relaxation. The engines
+    # were ALREADY point-in-time safe for this (momentum_score/
+    # liquid_symbols_at both return None/skip on insufficient history up to
+    # bar i), so a name just enters scoring once it has enough real bars.
+    def _post_listing_nan_frac(col):
+        first = col.first_valid_index()
+        if first is None:
+            return 1.0
+        return col.loc[first:].isna().mean()
+
+    keep = matrix.apply(_post_listing_nan_frac) <= 0.20
+    matrix = matrix.loc[:, keep]
 
     return matrix
 
@@ -177,6 +194,68 @@ def get_regime(index, date, breadth=None):
     if price < ma200:
         return "BEAR"
     return "SIDEWAYS"
+
+
+# ---------- Regime hysteresis (RESEARCH, 2026-08-01) ----------
+#
+# get_regime is a same-day flip on the 50/200DMA crossing — measured
+# 2026-08-01: at rebalance cadence (137 samples over full history), 11 of 45
+# regime "runs" (24%) last exactly ONE rebalance period before reverting, and
+# the raw daily signal flips 270 times over the full history. That's genuine
+# whipsaw right at the MA boundary, not a rare edge case, so it's worth
+# testing an N-day confirmation delay.
+#
+# NOTE: symmetric breadth-gating for BEAR/SIDEWAYS (extending the existing
+# BULL-only weak-breadth demotion) was considered and DROPPED before building
+# anything — measured first: breadth level has ~zero-to-slightly-NEGATIVE
+# correlation with forward 21d index return within BEAR (-0.066, n=30) and
+# SIDEWAYS (-0.114, n=34) periods, the opposite sign a "weak breadth confirms
+# bearishness" gate would assume. Only the existing BULL-side demotion has a
+# measured basis; hysteresis is the only piece worth testing.
+
+def confirmed_regime_fn(index, breadth, confirm_days=5):
+    """Returns a regime_fn(index, date, breadth) closure implementing N-day
+    hysteresis: a regime change only takes effect once the RAW get_regime
+    signal has agreed for `confirm_days` consecutive trading sessions,
+    otherwise the prior confirmed regime persists. Precomputes the raw daily
+    regime series once (vectorized) rather than recomputing get_regime's
+    lookback windows on every call."""
+    ma50 = index.rolling(50).mean()
+    ma200 = index.rolling(200).mean()
+    price = index
+    raw = pd.Series("SIDEWAYS", index=index.index)
+    bull_mask = (price > ma50) & (ma50 > ma200)
+    bear_mask = price < ma200
+    raw[bull_mask] = "BULL"
+    raw[bear_mask] = "BEAR"
+    if breadth is not None:
+        b_aligned = breadth.reindex(index.index).ffill()
+        demote = bull_mask & (b_aligned < sc.BREADTH_BULL_MIN)
+        raw[demote] = "SIDEWAYS"
+    if len(index) >= 200:
+        raw.iloc[:199] = "UNKNOWN"
+    else:
+        raw[:] = "UNKNOWN"
+
+    confirmed = raw.copy()
+    current = raw.iloc[0]
+    run_val = raw.iloc[0]
+    run_len = 1
+    out = [current]
+    for v in raw.iloc[1:]:
+        if v == run_val:
+            run_len += 1
+        else:
+            run_val, run_len = v, 1
+        if run_len >= confirm_days and v != current:
+            current = v
+        out.append(current)
+    confirmed[:] = out
+
+    def regime_fn(index_arg, date, breadth_arg):
+        past = confirmed[confirmed.index <= date]
+        return past.iloc[-1] if len(past) else "UNKNOWN"
+    return regime_fn
 
 
 # ---------- Exit simulation ----------
@@ -323,8 +402,93 @@ def run_backtest(matrix, index, turnover_matrix=None, exposure_fn=None):
 # CAGR (fewer taxable events — NOT LTCG conversion, which barely fires:
 # momentum's own turnover displaces names from top-N well before 365 days).
 
+# ---------- Correlation-aware sizing (RESEARCH, 2026-08-01) ----------
+#
+# Production sizing is pure inverse-vol (1/vol_63, capped at MAX_WEIGHT,
+# renormalized) — it treats two names as independent risk even when they move
+# together. Measured 2026-08-01 on the current top-10 book: pairwise 126d
+# return correlation mean 0.26 (up to 0.45), diversification ratio (avg
+# single-name vol / portfolio vol) only 1.62 — real but leaves risk-reduction
+# on the table relative to a sizing rule that accounts for it. This targets a
+# STRUCTURAL gap (inverse-vol sizing provably ignores correlation), not a
+# pattern mined from returns — the bar this project's hygiene memo asks for.
+#
+# risk_parity_weights: equal-risk-contribution weights from a SHRUNK
+# covariance matrix. Shrinkage matters here — with ~63-126 daily returns and
+# up to 10 names, the raw sample correlation matrix is noisy and a naive ERC
+# solve will overreact to spurious correlation estimates. Uses Ledoit-Wolf-
+# style shrinkage toward the diagonal (shrink correlations toward 0, keep
+# each name's own variance), which is standard practice for exactly this
+# small-sample regime.
+
+def _shrunk_corr(returns, shrink=0.3):
+    """Shrink the sample correlation matrix toward the identity (uncorrelated)
+    by `shrink`. returns: DataFrame of daily returns, columns = symbols."""
+    corr = returns.corr()
+    n = len(corr)
+    target = np.eye(n)
+    shrunk = (1 - shrink) * corr.values + shrink * target
+    return pd.DataFrame(shrunk, index=corr.index, columns=corr.columns)
+
+
+def risk_parity_weights(returns, vols, names, shrink=0.3, max_iter=200):
+    """Equal-risk-contribution weights over `names`, using shrunk correlation
+    (see _shrunk_corr) and the SAME vol_63 estimates the rest of the engine
+    uses (not returns.std(), to stay consistent with the canonical scorer).
+
+    returns: DataFrame of daily returns for `names` (recent window, e.g. 63d).
+    vols: dict {name: vol_63} — annualized-consistent per-name vol already
+    computed by momentum_score.
+
+    Falls back to plain inverse-vol (the production rule) if returns has too
+    few rows/names for a stable solve, or if the iteration doesn't converge —
+    silently degrading to the validated default is safer than a bad correlation
+    estimate producing extreme weights.
+    """
+    names = list(names)
+    if len(names) < 2 or returns is None or len(returns) < 20:
+        inv = {s: 1.0 / vols[s] for s in names}
+        tot = sum(inv.values())
+        return {s: v / tot for s, v in inv.items()}
+
+    sub = returns[names].dropna(how="all")
+    if len(sub) < 20:
+        inv = {s: 1.0 / vols[s] for s in names}
+        tot = sum(inv.values())
+        return {s: v / tot for s, v in inv.items()}
+    sub = sub.fillna(0.0)
+
+    corr = _shrunk_corr(sub, shrink=shrink).values
+    sigma = np.array([vols[s] for s in names])
+    cov = corr * np.outer(sigma, sigma)
+
+    # ERC via simple multiplicative fixed-point iteration (Spinu-style):
+    # start at inverse-vol, then converge so each name's risk contribution
+    # (w_i * (cov @ w)_i) is equal.
+    w = 1.0 / sigma
+    w = w / w.sum()
+    for _ in range(max_iter):
+        mrc = cov @ w                      # marginal risk contribution
+        port_var = w @ mrc
+        if port_var <= 0 or np.any(mrc <= 0):
+            inv = {s: 1.0 / vols[s] for s in names}
+            tot = sum(inv.values())
+            return {s: v / tot for s, v in inv.items()}
+        rc = w * mrc                       # risk contribution per name
+        target = port_var / len(names)
+        w_new = w * (target / rc)
+        w_new = np.clip(w_new, 1e-6, None)
+        w_new = w_new / w_new.sum()
+        if np.max(np.abs(w_new - w)) < 1e-8:
+            w = w_new
+            break
+        w = w_new
+    return dict(zip(names, w))
+
+
 def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=None,
-                               skip_days=0):
+                               skip_days=0, trail_stop=None, sizing_fn=None,
+                               regime_fn=None, stage_days=1):
     """Same selection/sizing/regime logic as run_backtest, but positions
     still in the new top-N carry over (rebalanced to target weight, cost on
     the delta only) instead of being sold and rebought every 21 days.
@@ -332,13 +496,38 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     skip_days: measure the momentum legs up to i - skip_days instead of i
     (the academic '12-2' construction — the most recent month contains
     short-term reversal, not momentum). 0 = production behavior; nonzero is
-    research-only (research_skip_month.py) unless explicitly adopted."""
+    research-only (research_skip_month.py) unless explicitly adopted.
+
+    trail_stop: if set (e.g. 0.85), exit intra-month when price falls that
+    fraction below the position's HIGH SINCE ENTRY (a ratcheting giveback
+    stop), instead of only the fixed -18%-from-entry catastrophic stop.
+    None = production behavior. RESEARCH-ONLY until walk-forward validated —
+    tight trailing exits have twice tested negative on this strategy.
+
+    sizing_fn: optional callable(matrix, i, top, vols) -> {sym: weight in
+    [0,1] summing to 1}, replacing the production inverse-vol sizing (see
+    risk_parity_weights above for a correlation-aware alternative). None =
+    production behavior (plain inverse-vol, MAX_WEIGHT-capped).
+
+    regime_fn: optional callable(index, date, breadth) -> regime string,
+    replacing get_regime (see confirmed_regime_fn below for an N-day
+    hysteresis alternative). None = production behavior (raw get_regime,
+    no confirmation delay).
+
+    stage_days: for a brand NEW position (not a top-up of an existing
+    holding), average the fill price over the next `stage_days` closes
+    starting at i (equal-thirds-style staged entry) instead of filling the
+    whole position at the single close on day i. Models reduced single-print
+    risk from spreading a buy over a few sessions. 1 = production behavior
+    (single-close fill). RESEARCH-ONLY — see the rejection note in
+    strategy_config.py before re-testing."""
     dates = matrix.index
     n_dates = len(dates)
     breadth = compute_breadth_series(matrix)
     sector_map = load_sector_map()
     if turnover_matrix is None:
         turnover_matrix = load_turnover_matrix(matrix)
+    regime_of = regime_fn if regime_fn is not None else get_regime
 
     capital = float(INITIAL_CAPITAL)
     equity = []
@@ -349,7 +538,7 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
 
     for i in range(LOOKBACK + 21, n_dates - HOLD, HOLD):
         date = dates[i]
-        regime = get_regime(index, date, breadth)
+        regime = regime_of(index, date, breadth)
         gated_symbols = liquid_symbols_at(turnover_matrix, i) & set(matrix.columns)
 
         scores, vols = {}, {}
@@ -392,9 +581,16 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
             proceeds = pos["cur_value"] * (1 - COST)
             capital += proceeds
 
-        inv = {s: 1.0 / vols[s] for s in top}
-        tot = sum(inv.values())
-        w = {s: min(v / tot, sc.MAX_WEIGHT) * tot for s, v in inv.items()}
+        if sizing_fn is not None:
+            raw_w = sizing_fn(matrix, i, top, vols)
+        else:
+            inv = {s: 1.0 / vols[s] for s in top}
+            tot = sum(inv.values())
+            raw_w = {s: v / tot for s, v in inv.items()}
+        # MAX_WEIGHT cap + renormalize applies regardless of sizing method —
+        # it's a separate single-name concentration control, not part of the
+        # sizing rule itself.
+        w = {s: min(v, sc.MAX_WEIGHT) for s, v in raw_w.items()}
         tot2 = sum(w.values())
         w = {s: v / tot2 for s, v in w.items()}
 
@@ -416,7 +612,13 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
 
         for s in new_names:
             target_val = invested_target * w[s]
-            px = matrix[s].iloc[i]
+            if stage_days > 1:
+                window = matrix[s].iloc[i:min(i + stage_days, n_dates)]
+                window = window.dropna()
+                window = window[window > 0]
+                px = float(window.mean()) if len(window) else np.nan
+            else:
+                px = matrix[s].iloc[i]
             if pd.isna(px) or px <= 0:
                 continue
             capital -= target_val * (1 + COST)
@@ -428,6 +630,10 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
             pos = book[s]
             col = matrix[s]
             entry_ref = pos["entry_price"]
+            # high-water mark carries across rebalances for a held name, so a
+            # trailing stop ratchets on the whole holding period, not just the
+            # current 21-day window.
+            peak = pos.get("peak", entry_ref)
             stopped = False
             for off in range(1, HOLD + 1):
                 idx = i + off
@@ -436,12 +642,20 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
                 p = col.iloc[idx]
                 if pd.isna(p):
                     continue
-                if p < entry_ref * CATASTROPHIC_STOP:
+                if p > peak:
+                    peak = p
+                hit = p < entry_ref * CATASTROPHIC_STOP
+                if trail_stop is not None and p < peak * trail_stop:
+                    hit = True
+                if hit:
                     proceeds = pos["shares"] * p * (1 - COST)
                     capital += proceeds
                     del book[s]
                     stopped = True
                     break
+            pos_still = book.get(s)
+            if pos_still is not None:
+                pos_still["peak"] = peak
             if not stopped:
                 final_idx = min(i + HOLD, n_dates - 1)
                 fp = col.iloc[final_idx]

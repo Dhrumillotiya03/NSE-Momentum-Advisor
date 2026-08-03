@@ -54,7 +54,9 @@
     "FORCEMOT.NS",
     "OLAELEC.NS",
     "ATHERENERG.NS",
-    "OLECTRA.NS"
+    "OLECTRA.NS",
+    "SONACOMS.NS",
+    "EXIDEIND.NS"
   ],
   "PHARMA": [
     "SUNPHARMA.NS",
@@ -71,7 +73,8 @@
     "LUPIN.NS",
     "TORNTPHARM.NS",
     "WOCKPHARMA.NS",
-    "ZYDUSLIFE.NS"
+    "ZYDUSLIFE.NS",
+    "PPLPHARMA.NS"
   ],
   "ENERGY": [
     "RELIANCE.NS",
@@ -97,7 +100,8 @@
     "SUZLON.NS",
     "WAAREEENER.NS",
     "ENRIN.NS",
-    "JPPOWER.NS"
+    "JPPOWER.NS",
+    "CHENNPETRO.NS"
   ],
   "FMCG": [
     "HINDUNILVR.NS",
@@ -110,7 +114,8 @@
     "TATACONSUM.NS",
     "UNITDSPR.NS",
     "VBL.NS",
-    "PAGEIND.NS"
+    "PAGEIND.NS",
+    "RADICO.NS"
   ],
   "METALS": [
     "TATASTEEL.NS",
@@ -123,7 +128,10 @@
     "JINDALSTEL.NS",
     "NATIONALUM.NS",
     "NMDC.NS",
-    "SAIL.NS"
+    "SAIL.NS",
+    "WELCORP.NS",
+    "LLOYDSME.NS",
+    "HEG.NS"
   ],
   "DEFENCE": [
     "HAL.NS",
@@ -184,7 +192,8 @@
     "OBEROIRLTY.NS",
     "PRESTIGE.NS",
     "LODHA.NS",
-    "PHOENIXLTD.NS"
+    "PHOENIXLTD.NS",
+    "ANANTRAJ.NS"
   ],
   "NBFC": [
     "BAJFINANCE.NS",
@@ -208,7 +217,12 @@
     "CAMS.NS",
     "CDSL.NS",
     "MCX.NS",
-    "KFINTECH.NS"
+    "KFINTECH.NS",
+    "M&MFIN.NS",
+    "NAM-INDIA.NS",
+    "IIFL.NS",
+    "360ONE.NS",
+    "MANAPPURAM.NS"
   ],
   "RETAIL_CONSUMER": [
     "DMART.NS",

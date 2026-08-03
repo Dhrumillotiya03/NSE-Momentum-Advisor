@@ -68,6 +68,19 @@ def save_state(state):
         json.dump(state, f, indent=2)
 
 
+def logged_dates():
+    """Every date already present in the equity log — the real idempotency
+    record (state['last_run'] only remembers the most recent one)."""
+    if not os.path.exists(EQUITY_PATH):
+        return set()
+    out = set()
+    with open(EQUITY_PATH, newline="") as f:
+        for row in csv.DictReader(f):
+            if row.get("date"):
+                out.add(row["date"].strip())
+    return out
+
+
 def append_csv(path, row, headers):
     new = not os.path.exists(path)
     with open(path, "a", newline="") as f:
@@ -119,6 +132,19 @@ def step():
     state = load_state()
     if state["last_run"] == today_str:
         print(f"[paper] already ran for {today_str}")
+        return
+    # last_run alone only catches a repeat of the MOST RECENT date. A clock
+    # regression or a backfilled index date re-ran an already-logged day and
+    # wrote duplicate/out-of-order rows (2026-07-22 twice, with 07-21 between
+    # them). Treat any date already in the equity log as done.
+    if today_str in logged_dates():
+        print(f"[paper] {today_str} already in equity log — skipping (clock/date regression?)")
+        state["last_run"] = today_str
+        save_state(state)
+        return
+    if state["last_run"] and today_str < state["last_run"]:
+        print(f"[paper] index date {today_str} is BEFORE last run {state['last_run']} "
+              f"— refusing to step backwards")
         return
     if state["start_date"] is None:
         state["start_date"] = today_str

@@ -32,6 +32,15 @@ FILL_WINDOW = 10       # trading days to wait for the buy-at level
 HORIZON = 42           # trading days from fill for the target/stop race
 MARK_DAYS = 21
 
+# full_advisor.py was REBUILT 2026-08-01 (see memory advisor-strategy-
+# divergence-2026-08): before this date, entries were priced AT nearest
+# support with rr measured against it — structurally anti-momentum, produced
+# unfillable limits, and had ZERO overlap with the validated strategy's own
+# picks. Calls logged before the rebuild are NOT comparable to calls logged
+# after it; pooling them into one hit-rate silently averages a broken
+# construction into a fixed one. Segment on this date, always.
+ADVISOR_REBUILD_DATE = pd.Timestamp("2026-08-01")
+
 
 def load_ohlc(sym):
     for d in ("../data/price_data", "../data/etf_data"):
@@ -106,6 +115,7 @@ def main():
     if calls.empty:
         print("ledger is empty")
         return
+    calls["date"] = pd.to_datetime(calls["date"], errors="coerce")
 
     scored = []
     for _, call in calls.iterrows():
@@ -114,11 +124,27 @@ def main():
             continue
         scored.append({**call.to_dict(), **score_call(call, ohlc, args.horizon)})
     df = pd.DataFrame(scored)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+
+    pre = df[df["date"] < ADVISOR_REBUILD_DATE]
+    if len(pre):
+        print(f"NOTE: {len(pre)} call(s) logged before the {ADVISOR_REBUILD_DATE.date()} "
+              f"full_advisor.py rebuild (support-priced entries, structurally anti-"
+              f"momentum, zero overlap with the validated strategy). EXCLUDED from "
+              f"the report below — not comparable to post-rebuild calls. See memory "
+              f"advisor-strategy-divergence-2026-08.")
+        df = df[df["date"] >= ADVISOR_REBUILD_DATE]
+        if df.empty:
+            print("\nno post-rebuild calls yet.")
+            return
 
     print("==============================")
     print("📋 ADVISORY-CALL REPORT")
     print("==============================")
-    print(f"calls logged: {len(df)}  |  span: {df['date'].min()} → {df['date'].max()}")
+    print(f"calls logged: {len(df)}  |  span: {df['date'].min().date()} → {df['date'].max().date()}")
+    if "in_strategy_top_n" in df.columns:
+        top_n_calls = df["in_strategy_top_n"].astype(str).str.lower().isin(["true", "1"])
+        print(f"  of which in the strategy's own regime top-N: {top_n_calls.sum()}/{len(df)}")
 
     filled = df[df["fill"] == "FILLED"]
     print(f"\nfill rate (Low touched buy-at within {FILL_WINDOW}d): "
