@@ -449,6 +449,18 @@ stock_ai/
   are recomputed from scratch on every write and rows dedupe on
   (Date, Symbol), so re-running a day REPLACES its row rather than
   double-counting it into the mean.
+- VOLATILITY IS ALREADY THE TABLE'S 2nd AXIS — don't "add" it. The P(touch)
+  table is keyed on (distance x realised vol) and the vol axis carries real
+  signal: at 8-12% distance, 21d P(touch) is 14.6% for a <25%-vol name vs
+  38.1% for a 45%+ one. A PARKINSON high-low-range estimator was tested as a
+  drop-in replacement for the close-to-close one (research_sr_vol_estimator.py,
+  pre-registered rule: adopt only if OOS corr +>=0.02 AND wins a majority of
+  horizons) and REJECTED — it loses at all four: 5d -0.0012, 10d -0.0021,
+  15d -0.0028, 21d -0.0024. Mechanism: the two correlate 0.89 and disagree on
+  bucket for only 27% of names, and Parkinson ignores OVERNIGHT GAPS, which on
+  NSE carry a real share of the move to a level. See memory
+  sr-vol-estimator-rejected-2026-08; don't re-test without a gap-preserving
+  estimator (Garman-Klass / Rogers-Satchell) or a separate gap feature.
 - S2/R2 ARE NOW ALWAYS LOGGED (2026-07-31). They used to be written only when
   their probability beat the base rate, but the log is the MEASUREMENT record:
   a level never written can never be scored, so the gate was destroying
