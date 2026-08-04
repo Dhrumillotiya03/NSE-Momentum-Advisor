@@ -22,7 +22,7 @@ from datetime import datetime
 import pandas as pd
 
 from support_resistance import (load_stock, get_all_levels, reach_probability_v2,
-                                _load_reach_table, INDEX_FILES)
+                                _load_reach_table, INDEX_FILES, is_market_open)
 import sr_horizon as H
 
 LOG_PATH = "../data/sr_daily_log.csv"
@@ -340,19 +340,33 @@ def main():
     print("─" * 50)
 
     # Live quotes drive CMP (and therefore level selection) so a mid-session
-    # run reflects where price actually is. After the close the live quote is
-    # that day's close, so the evening pipeline row is unchanged.
-    # Indices have no tradable quote — exclude them from the live fetch rather
-    # than asking the broker for a ticker that doesn't exist.
-    syms = [s for s in (normalize_symbol(x) for x in symbols)
-            if s not in INDEX_FILES]
+    # run reflects where price actually is.
+    #
+    # MARKET-HOURS GUARD (added 2026-08-05, after a real corruption). The
+    # earlier comment claimed "after the close the live quote is that day's
+    # close, so the evening row is unchanged". That is FALSE in practice:
+    # Kite keeps serving a last-traded price after 15:30 which need not equal
+    # the official close, and yfinance can serve a delayed or pre-open tick.
+    # On 2026-08-04 that wrote CMP 420.00 for ABCAPITAL whose close was 417.00
+    # (and whose PREVIOUS close was 424.35) — so the row matched neither day,
+    # and because CMP drives level selection, S1/R1 came out nearly identical
+    # to 08-03's, looking like duplicated data.
+    #
+    # The log is the MEASUREMENT RECORD. A row must describe one point in time:
+    # during the session, the live price; outside it, that session's CLOSE.
+    # Never a stale tick pretending to be either.
     live = {}
-    try:
-        from support_resistance import fetch_live_prices
-        live_prices, _ = fetch_live_prices(syms)
-        live = live_prices or {}
-    except Exception as e:
-        print(f"  ⚠️  live quotes unavailable ({e}) — using last close.")
+    if is_market_open():
+        syms = [s for s in (normalize_symbol(x) for x in symbols)
+                if s not in INDEX_FILES]
+        try:
+            from support_resistance import fetch_live_prices
+            live_prices, _ = fetch_live_prices(syms)
+            live = live_prices or {}
+        except Exception as e:
+            print(f"  ⚠️  live quotes unavailable ({e}) — using last close.")
+    else:
+        print("  ⓘ Market closed — CMP = last completed close (no live fetch).")
 
     rows = []
     for sym in symbols:

@@ -350,10 +350,63 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
     if not supports    and lo52 < cur: supports    = [(lo52, 1, 1.0)]
     if not resistances and hi52 > cur: resistances = [(hi52, 1, 1.0)]
 
-    supports.sort(key=lambda x: -x[0])
-    resistances.sort(key=lambda x:  x[0])
+    # MIN_SEPARATION (2026-08-05). Ordering used to be PURELY by proximity, so
+    # S1 was whatever pivot sat closest to price even when that was 0.1% away
+    # and structurally meaningless. Measured on the 2026-08-04 panel: 20/61
+    # names had a level inside 0.5% and median S1 was -2.1%, with P(touch)
+    # >90% — a number that is trivially true and useless for a month-horizon
+    # decision ("of course price revisits a level 0.4% away").
+    #
+    # The `final` strength score was already being computed and then THROWN
+    # AWAY by the sort. This keeps proximity ordering (S1 should still be the
+    # nearest *usable* level) but drops candidates hugging spot, so S1/R1
+    # describe structure rather than noise around the current tick.
+    #
+    # Threshold is volatility-scaled, not fixed: 1% is meaningful for a 15%-vol
+    # name and pure noise for a 60%-vol one.
+    #
+    # Scaled to the HORIZON's sigma, not the day's. The question this subsystem
+    # answers is "where might price go before month-end", so the yardstick is
+    # roughly a month of movement (~21 trading days), not one session. A first
+    # attempt used 0.35x DAILY sigma and was far too weak — it gave a 35%-vol
+    # name only 0.77% of separation, so a level 1.9% away still survived as
+    # "S1", which is the exact complaint this fix exists to answer.
+    #
+    # 0.25x the 21-day sigma: enough that a level must be a real fraction of a
+    # month's expected range, not so much that legitimate nearby structure is
+    # discarded. Floored at 1% (below that it is noise for any NSE name) and
+    # capped at 6% (a very wild name should not have every level filtered out).
+    ret = df["Close"].pct_change().dropna().tail(252)
+    day_sigma = float(ret.std()) if len(ret) >= 30 else 0.02
+    horizon_sigma = day_sigma * (21 ** 0.5)
+    min_sep = min(max(horizon_sigma * 0.25, 0.01), 0.06)
 
-    return supports[:3], resistances[:3]
+    def _spread(levels, sign):
+        """Keep levels at least `min_sep` from price AND from each other.
+
+        Without the pairwise check, S1/S2/S3 can be three points inside one
+        cluster — nominally three levels, one piece of information.
+        """
+        out = []
+        for lv in sorted(levels, key=lambda x: -sign * x[0]):
+            if abs(lv[0] - cur) / cur < min_sep:
+                continue
+            if any(abs(lv[0] - k[0]) / cur < min_sep for k in out):
+                continue
+            out.append(lv)
+        return out
+
+    sup_f, res_f = _spread(supports, 1), _spread(resistances, -1)
+
+    # Never return NOTHING because the filter was strict: a far-but-real level
+    # beats no level, and a caller that gets None cannot tell "no structure
+    # here" from "filtered out". Fall back to the unfiltered nearest.
+    if not sup_f and supports:
+        sup_f = sorted(supports, key=lambda x: -x[0])
+    if not res_f and resistances:
+        res_f = sorted(resistances, key=lambda x: x[0])
+
+    return sup_f[:3], res_f[:3]
 
 
 # ──────────────────────────────────────────────
@@ -1026,6 +1079,29 @@ def analyse(symbols):
         print(f"\n  📥 Buy ₹{buy:,.2f}   🎯 Target ₹{tgt:,.2f} (+{round((tgt-buy)/buy*100,1)}%)")
         print(f"  🛑 Stop ₹{stop:,.2f}   ⚖️  R:R 1:{rr}")
         print(f"{'═'*66}\n")
+
+
+def is_market_open(now=None):
+    """True during NSE cash-session hours (Mon-Fri 09:15-15:30 IST).
+
+    Shared so every caller uses ONE definition. Written 2026-08-05 after a real
+    corruption of sr_daily_log.csv: the logger fetched a "live" quote at any
+    hour, and Kite keeps serving a last-traded price after 15:30 that need not
+    equal the official close. That wrote ABCAPITAL CMP 420.00 on a day whose
+    close was 417.00 and whose prior close was 424.35 — matching neither
+    session. Since CMP drives level selection, the resulting S1/R1 duplicated
+    the previous day's and looked like the pipeline had run twice.
+
+    Deliberately does NOT consult a holiday calendar: this gates whether to ASK
+    for a live price, and on a holiday the fetch simply returns nothing usable
+    and the caller falls back to the last close. Adding a calendar here would
+    couple quote-fetching to calendar data for no behavioural gain.
+    """
+    now = now or datetime.now()
+    if now.weekday() > 4:
+        return False
+    mins = now.hour * 60 + now.minute
+    return 9 * 60 + 15 <= mins <= 15 * 60 + 30
 
 
 def drop_partial_candle(df, now=None):

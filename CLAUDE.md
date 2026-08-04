@@ -521,6 +521,27 @@ stock_ai/
   horizon-scaled probability must scale its THRESHOLD by the same horizon —
   a raw base-rate gate against scaled probs empties S2/R2 exactly when the
   window is tightest.
+- LEVEL MIN-SEPARATION (2026-08-05, get_all_levels) — S1/R1 used to be ordered
+  PURELY by proximity, so S1 was whatever pivot sat closest to spot even at
+  0.1% away. Measured on the 2026-08-04 panel: 20/61 names had a level inside
+  0.5%, median S1 −2.1% / R1 +1.9%, and 30/61 carried S1_prob ≥90% — trivially
+  true and useless for a month-horizon decision. The `final` strength score was
+  already computed and then THROWN AWAY by the sort. Levels are now filtered to
+  be at least `min_sep` from spot AND from each other (pairwise, so S1/S2/S3
+  cannot be three points in one cluster). min_sep = 0.25x the 21-day sigma,
+  floored 1%, capped 6% — scaled to the HORIZON's movement, not the day's,
+  because the question is "where might price go by month-end". A first attempt
+  used 0.35x DAILY sigma and was far too weak (0.77% on a 35%-vol name). Result:
+  median S1 −2.1%→−4.5%, R1 +1.9%→+4.0%, levels within 0.5% 20/61→1/61,
+  S1_prob≥90 30→1. Names showing S1 beyond −15% are NOT over-filtered — they
+  are at 85-93% of their 52w range, where no nearby support exists, and their
+  4-8% probabilities correctly say so. Falls back to the unfiltered nearest if
+  the filter would return nothing (a caller receiving None cannot distinguish
+  "no structure" from "filtered out"). CSV COLUMNS ARE UNCHANGED. The P(touch)
+  tables stay valid — they are keyed on (distance x vol), not on which pivot
+  was picked, so a 4.5% level gets the correct 4-6% bucket either way; but the
+  far cells now see more use than when the tables were built, so re-check
+  calibration at the next sr_monthend_analysis run.
 - MONTHLY CONTAINMENT BAND (2026-08-04, containment_band.py) — S1/R1 answer
   P(TOUCH) ("will price reach this"), which is the WRONG QUANTITY for the
   user's actual question ("a level it won't dip below this month"). Verified on
