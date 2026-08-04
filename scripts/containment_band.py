@@ -241,11 +241,26 @@ def main():
     if not syms:
         print(__doc__.split("Usage:")[1]); return
 
+    show_all = "--levels" in argv
     for s in syms:
         sym = s if s.endswith(".NS") else s + ".NS"
         df = load_stock(sym)
         b = containment_band(df, horizon=horizon, alpha=alpha)
         print(format_band(s, b))
+        if show_all and b:
+            # Same stock at several confidence levels, so the tradeability
+            # tradeoff is visible: tighter bands are nearer but break more.
+            print("\n  Other confidence levels:")
+            print(f"    {'conf':>6} {'FLOOR':>11} {'CEILING':>11} "
+                  f"{'floor%':>9} {'ceil%':>8}")
+            for a in (0.25, 0.15, 0.10, 0.05):
+                bb = containment_band(df, horizon=horizon, alpha=a)
+                if not bb:
+                    continue
+                print(f"    {(1-a)*100:>5.0f}% {bb['floor']:>11.2f} "
+                      f"{bb['ceiling']:>11.2f} "
+                      f"{-bb['floor_width']*100:>8.1f}% "
+                      f"{bb['ceiling_width']*100:>7.1f}%")
         print()
 
 

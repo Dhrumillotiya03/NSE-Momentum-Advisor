@@ -104,9 +104,14 @@ def collect(symbols, horizons):
 
 def main():
     argv = sys.argv[1:]
-    alpha = 0.15
+    # Fit SEVERAL confidence levels in one pass. The data collection dominates
+    # runtime, and quantiles are cheap once collected, so there is no reason to
+    # force a single alpha and re-run for another. 0.25/0.15/0.10/0.05 spans
+    # "tradeable but breaks often" to "rarely breaks but far away".
+    alphas = [0.25, 0.15, 0.10, 0.05]
     if "--alpha" in argv:
-        alpha = float(argv[argv.index("--alpha") + 1])
+        alphas = [float(x) for x in argv[argv.index("--alpha") + 1].split(",")]
+    alpha = alphas[0]
     split = pd.Timestamp("2022-01-01")
     if "--split" in argv:
         split = pd.Timestamp(argv[argv.index("--split") + 1])
@@ -126,24 +131,25 @@ def main():
     print(f"train spans {train['td'].min().date()} -> {train['td'].max().date()}")
 
     table, report = {}, []
-    for H in HORIZONS:
-        for vb in VOL_LABELS:
-            c = train[(train["H"] == H) & (train["vb"] == vb)]
-            if len(c) < MIN_CELL:
-                continue
-            fw = float(-c["min_ret"].quantile(alpha))
-            cw = float(c["max_ret"].quantile(1 - alpha))
-            table[f"{vb}|{H}|{int(round(alpha*100))}"] = {
-                "floor_width": round(max(fw, 0.0), 4),
-                "ceiling_width": round(max(cw, 0.0), 4),
-                "n": len(c),
-            }
-            h = hold[(hold["H"] == H) & (hold["vb"] == vb)]
-            if len(h) >= MIN_CELL:
-                report.append((H, vb, fw, cw, len(c), len(h),
-                               float((h["min_ret"] > -fw).mean()),
-                               float(((h["min_ret"] > -fw) &
-                                      (h["max_ret"] < cw)).mean())))
+    for a in alphas:
+        for H in HORIZONS:
+            for vb in VOL_LABELS:
+                c = train[(train["H"] == H) & (train["vb"] == vb)]
+                if len(c) < MIN_CELL:
+                    continue
+                fw = float(-c["min_ret"].quantile(a))
+                cw = float(c["max_ret"].quantile(1 - a))
+                table[f"{vb}|{H}|{int(round(a*100))}"] = {
+                    "floor_width": round(max(fw, 0.0), 4),
+                    "ceiling_width": round(max(cw, 0.0), 4),
+                    "n": len(c),
+                }
+                h = hold[(hold["H"] == H) & (hold["vb"] == vb)]
+                if len(h) >= MIN_CELL and a == alpha:
+                    report.append((H, vb, fw, cw, len(c), len(h),
+                                   float((h["min_ret"] > -fw).mean()),
+                                   float(((h["min_ret"] > -fw) &
+                                          (h["max_ret"] < cw)).mean())))
 
     print("\n" + "=" * 78)
     print(f"HOLDOUT CALIBRATION — claimed {(1-alpha)*100:.0f}% floor hold rate")
@@ -163,6 +169,7 @@ def main():
         "metric": "containment",
         "source": "daily archive (yfinance-adjusted), 2015-2026",
         "alpha": alpha,
+        "alphas": alphas,
         "vol_edges": VOL_EDGES, "vol_labels": VOL_LABELS,
         "horizons": HORIZONS,
         "split_date": str(split.date()),
