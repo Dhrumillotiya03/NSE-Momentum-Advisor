@@ -74,11 +74,11 @@ WATCHLIST = [
 ]
 
 COLUMNS = [
-    "Symbol", "Date", "CMP", "CMP_basis", "High", "Low",
-    "S1", "S1_prob", "S1_n",
-    "R1", "R1_prob", "R1_n",
-    "S2", "S2_prob", "S2_n",
-    "R2", "R2_prob", "R2_n",
+    "Symbol", "Date", "CMP", "High", "Low",
+    "S1", "S1_prob",
+    "R1", "R1_prob",
+    "S2", "S2_prob",
+    "R2", "R2_prob",
     # Horizon the probabilities refer to: the month's rebalance date (last
     # Tuesday) and the trading days remaining to it. Logged so accuracy can
     # later be scored against the horizon actually quoted, instead of assuming
