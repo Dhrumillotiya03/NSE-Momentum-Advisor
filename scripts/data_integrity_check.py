@@ -137,6 +137,23 @@ def check_file(path, today):
                      f"(truncated write or duplicate header row)")
 
     close = pd.to_numeric(df["Close"], errors="coerce")
+
+    # NaN-OHLC rows with real Volume — yfinance's signature failure, and the
+    # 4th corruption class this check knows about (added 2026-08-05 after 41
+    # files carried one silently). It is invisible to every other test here
+    # because the very next line filters NaN closes out, and invisible to
+    # consumers because they all dropna: a file looks "up to date" by max(Date)
+    # while its newest bar has no price. That is worse than being stale, since
+    # nothing reports it. update_prices_kite's agreement() also compared
+    # AGAINST such a row and returned NaN, and `NaN > AGREE_TOL` is False, so
+    # the splice guard silently approved everything — fixed there too.
+    nan_close = dates.notna() & close.isna()
+    if nan_close.any():
+        bad_days = [d.date() for d in dates[nan_close].tail(5)]
+        warns.append(f"{name}: {int(nan_close.sum())} row(s) with a Date but "
+                     f"NaN Close at {bad_days} — repair with "
+                     f"`python update_prices_kite.py {name[:-4]}`")
+
     valid = dates.notna() & close.notna()
     dates, close = dates[valid], close[valid]
     if len(close) < 30:

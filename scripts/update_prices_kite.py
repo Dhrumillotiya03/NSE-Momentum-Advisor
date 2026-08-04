@@ -48,6 +48,7 @@ import sys
 import time
 import datetime as dt
 
+import numpy as np
 import pandas as pd
 
 PRICE_DIR = "../data/price_data/"
@@ -160,18 +161,35 @@ def agreement(df, k):
     guards against a one-off bad print while staying on the correct side of
     any ex-date.
     """
-    idx = pd.DatetimeIndex(df["Date"]).normalize().intersection(k.index)
+    dates = pd.DatetimeIndex(df["Date"]).normalize()
+    # Compare at the newest common bar that has a USABLE close.
+    #
+    # NaN-OHLC rows must be skipped here (2026-08-05 fix). yfinance's signature
+    # failure writes a row with real Volume but NaN OHLC; that row is a real
+    # date, so it landed on the splice point and made this function return NaN.
+    # `NaN > AGREE_TOL` is False, so the disagreement guard silently PASSED —
+    # the safety check that exists to stop a bad splice was comparing against
+    # nothing and approving everything. `c <= 0` is also False for NaN, so
+    # neither guard caught it. WIPRO/PFC/ANGELONE/SHRIRAMFIN sat with NaN
+    # closes while the updater reported them "current".
+    good = df[df["Close"].notna()]
+    if good.empty:
+        return None, 0
+    gdates = pd.DatetimeIndex(good["Date"]).normalize()
+    idx = gdates.intersection(k.index)
     if len(idx) == 0:
         return None, 0
-    dates = pd.DatetimeIndex(df["Date"]).normalize()
     t = idx[-1]                       # the splice point itself
-    c = df.loc[dates == t, "Close"]
+    c = good.loc[gdates == t, "Close"]
     if not len(c):
         return None, 0
     c = float(c.iloc[-1])
-    if c <= 0:
+    if not np.isfinite(c) or c <= 0:
         return None, 0
-    return abs(float(k.loc[t, "close"]) / c - 1.0), 1
+    kc = float(k.loc[t, "close"])
+    if not np.isfinite(kc):
+        return None, 0
+    return abs(kc / c - 1.0), 1
 
 
 def append_new(path, k, cutoff, symbol=None, dry=False):
@@ -184,6 +202,10 @@ def append_new(path, k, cutoff, symbol=None, dry=False):
 
     worst, _n = agreement(df, k)
     if worst is None:
+        return "no-overlap", 0
+    # Explicit NaN check: `NaN > AGREE_TOL` is False, so a NaN would sail past
+    # the comparison below and approve a splice nothing had actually validated.
+    if not np.isfinite(worst):
         return "no-overlap", 0
     if worst > AGREE_TOL:
         return f"disagree {worst*100:.2f}%", 0
