@@ -45,6 +45,7 @@ Usage:
 """
 import os
 import sys
+import time
 import datetime as dt
 
 import pandas as pd
@@ -61,6 +62,17 @@ OHLC = ["Open", "High", "Low", "Close"]
 AGREE_TOL = 0.005      # max |kite/csv - 1| on overlapping bars
 OVERLAP_BARS = 5
 LOOKBACK_DAYS = 40     # enough to cover a long weekend + a missed week
+
+# Kite's documented historical_data rate limit is 3 requests/second. This
+# script makes one call per symbol (up to ~500), back to back, with no pacing
+# — that WILL throttle partway through a run (seen live: "Too many requests"
+# on ~2 calls, plus a cluster of "disagree" verdicts on symbols that likely got
+# a partial/retried response rather than a real corporate-action mismatch).
+# REQUEST_DELAY paces normal calls; RETRY_DELAY backs off once on a throttle
+# instead of giving up and silently skipping the symbol.
+REQUEST_DELAY = 0.34   # ~3/sec, matching the documented cap
+RETRY_DELAY = 2.0
+MAX_RETRIES = 2
 
 
 def cutoff_date():
@@ -90,16 +102,39 @@ def last_usable(df, cutoff):
     return g["Date"].max() if len(g) else None
 
 
+def _fetch_with_retry(kite, token, start, end):
+    """One historical_data call, retrying through a rate-limit response.
+
+    A throttled call must NOT be treated the same as a real API failure — the
+    caller used to break the chunk loop and (for the most recent, first-tried
+    chunk) return no data at all, silently dropping the symbol for the whole
+    run. AFFLE and APLAPOLLO did exactly this. Retrying with backoff turns a
+    throttle into a brief pause instead of a missed update.
+    """
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            return kite.historical_data(token, start, end, "day"), None
+        except Exception as e:
+            msg = str(e)
+            throttled = "Too many requests" in msg or "429" in msg
+            if throttled and attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY * (attempt + 1))
+                continue
+            return None, msg[:70]
+
+
 def kite_daily(kite, token, start, end):
-    """Daily bars, chunked under Kite's 2000-day per-request cap."""
+    """Daily bars, chunked under Kite's 2000-day per-request cap, paced and
+    retried to stay under the ~3 req/sec rate limit across a 500-symbol run."""
     rows, cur_end = [], end
     while cur_end > start:
         cur_start = max(start, cur_end - dt.timedelta(days=1900))
-        try:
-            rows += kite.historical_data(token, cur_start, cur_end, "day")
-        except Exception as e:
-            print(f"      kite error: {str(e)[:70]}")
+        time.sleep(REQUEST_DELAY)
+        chunk, err = _fetch_with_retry(kite, token, cur_start, cur_end)
+        if err is not None:
+            print(f"      kite error: {err}")
             break
+        rows += chunk
         if cur_start <= start:
             break
         cur_end = cur_start - dt.timedelta(days=1)
