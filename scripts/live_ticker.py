@@ -63,7 +63,15 @@ def resolve_watchlist(explicit_symbols):
 
     Defaults to the S/R panel (sr_daily_logger.WATCHLIST) so the ticker shows
     the same names being logged and measured — one list to maintain instead of
-    two that drift apart.
+    two that drift apart. INDICES (e.g. "NIFTY50") are excluded from that
+    panel here: they're a different instrument type (own file path via
+    support_resistance.INDEX_FILES, no .NS suffix, no Kite equity quote),
+    so every column for one came back blank rather than erroring — core.
+    load_stock() doesn't know about INDEX_FILES and silently returns None,
+    and _to_kite_symbol("NIFTY50") produces "NSE:NIFTY50", not Kite's real
+    "NSE:NIFTY 50" index symbol. The banner already shows the Nifty level
+    (analytics.index_last/index_chg via core.load_index()), so this isn't
+    lost information — it's just not duplicated as a broken row.
 
     Falls back to today's top momentum names only if the panel can't be
     imported, so the ticker still works standalone.
@@ -74,7 +82,8 @@ def resolve_watchlist(explicit_symbols):
     else:
         try:
             from sr_daily_logger import WATCHLIST
-            symbols = [sym.upper() for sym in WATCHLIST]
+            from support_resistance import INDEX_FILES
+            symbols = [sym.upper() for sym in WATCHLIST if sym.upper() not in INDEX_FILES]
         except Exception:
             # Panel unavailable — fall back to today's top momentum names.
             try:
