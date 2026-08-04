@@ -521,6 +521,48 @@ stock_ai/
   horizon-scaled probability must scale its THRESHOLD by the same horizon —
   a raw base-rate gate against scaled probs empties S2/R2 exactly when the
   window is tightest.
+- MONTHLY CONTAINMENT BAND (2026-08-04, containment_band.py) — S1/R1 answer
+  P(TOUCH) ("will price reach this"), which is the WRONG QUANTITY for the
+  user's actual question ("a level it won't dip below this month"). Verified on
+  the 2026-08-04 panel: median S1 −2.1%, median R1 +1.9%, corr(|distance|,prob)
+  −0.879/−0.907 — the probability column had become a restatement of distance,
+  and a "94% support" is a level with a ~6% chance of HOLDING. Structural, not a
+  calibration defect: level selection picks the NEAREST pivot, optimal for
+  "will it get there" and worst-possible for "will it hold". The band is a
+  quantile of forward CLOSING excursion per (vol bucket, horizon) — no pivot, no
+  touch table in the path. FLOOR AND CEILING ARE FITTED SEPARATELY and must
+  never be mirrored: the asymmetry SIGN FLIPS with the fitting window (2023-26
+  intraday had downside 1.07-1.36x upside; the shipped 2016-21 daily fit has the
+  UPSIDE wider at high vol, +25.8% vs −14.3% at 45%+). Fitted from the DAILY
+  archive via build_containment_table_daily.py, NOT Kite intraday — containment
+  needs only closes so 11y beats 3y, and the Kite fit had an inverted split
+  (3,784 train vs 13,988 holdout, Kite starts 2023-08) producing bands too wide
+  (86-93% hold vs 85% claimed). Daily fit: 0/16 cells outside ±10pp, floor held
+  79.5-88.3%. WIDTH IS REGIME-DEPENDENT — quarterly 15th-pct floor ranged
+  6.0%-14.8% on 2024-26 data; a typical-month expectation, NOT a guarantee.
+  Printed by analyse_table below the S1/R1 table so both are visible together.
+  TRADING THE BAND WAS TESTED AND REJECTED (PREREG_tradeable_levels.md,
+  research_tradeable_levels.py, 199 symbols / 39,987 obs): holdout win 43.9%
+  (UP) / 49.0% (DOWN) against a pre-registered 55% bar. Mechanism is ADVERSE
+  SELECTION — at a 5% band, FILLED observations were contained 9.5% of the time
+  vs 100% for unfilled; the fill itself is the bad news, and trend conditioning
+  did not rescue it. So the band ships as a RISK tool with that negative result
+  printed alongside it. DESCRIPTIVE ONLY — never wire into exit_engine/
+  paper_trader/agent_sim/the scorer. See memory sr-containment-band-2026-08.
+- KITE INTRADAY (2026-08-04, fetch_intraday_kite.py → data/intraday_data/,
+  RESEARCH ONLY): 15-min bars reach back to Aug 2015, NOT weeks as assumed —
+  200d/request, 200 symbols x 3y in 18.2 min, 0 failures. Order-book depth is
+  SNAPSHOT-ONLY (no historical endpoint), so flow features remain a
+  collect-now-evaluate-later project while bars are testable today. TWO TRAPS:
+  (1) Kite is UNADJUSTED vs price_data's yfinance-ADJUSTED (NATIONALUM ratio
+  1.744 in 2016 → 1.000 today) so levels/price/path must come from ONE source
+  per observation, and this directory must never be written into price_data/
+  (globbed as the tradable universe); (2) Muhurat and Saturday special sessions
+  (~4 and ~7 bars) are present — filter bars/session >= 20, or any "N
+  consecutive bars" test is trivially satisfied. First real use showed
+  intraday's value is FILL REALISM: daily-Low touch tests overstate win rate by
+  ~2pp vs a 30-min persistence rule and ~9pp vs close-only. See memory
+  kite-intraday-capability-2026-08.
 - Backtested via `sr_backtest.py` (fast, uses `fast=True` flag — REQUIRED or it hangs,
   wick_rejection_score becomes iterrows-based without it) and `sr_backtest_filtered.py`
   (only tests on trend+momentum+regime-filtered conditions)

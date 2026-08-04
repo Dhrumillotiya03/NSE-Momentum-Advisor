@@ -926,7 +926,49 @@ def analyse_table(symbols, as_of=None, live_prices=None, live_sources=None):
         print(f"  ⓘ Extrapolated by sqrt-of-time from the nearest empirical "
               f"table — approximate; direction and rough size are right, the "
               f"exact value is not calibrated at this horizon.")
-    print(f"  ⚠ = level >15% from CMP   📦Hi/Lo = delivery volume signal\n")
+    print(f"  ⚠ = level >15% from CMP   📦Hi/Lo = delivery volume signal")
+
+    # ── MONTHLY CONTAINMENT BAND ──────────────────────────────────────────
+    # S1/R1 above answer "will price REACH this level" (P(touch)). That is the
+    # wrong quantity for "give me a level it won't dip below this month" — a
+    # 94% P(touch) support has a ~6% chance of HOLDING. The band below answers
+    # the containment question directly. Both are printed so the distinction is
+    # visible at the point of use rather than left to memory.
+    try:
+        from containment_band import containment_band
+        bands = []
+        for sym in symbols:
+            s = sym if sym.endswith(".NS") else sym + ".NS"
+            df_b = load_stock(s)
+            if df_b is None:
+                continue
+            cur_b = (live_prices or {}).get(sym)
+            b = containment_band(df_b, horizon=horizon_days, cur=cur_b)
+            if b:
+                bands.append((sym.replace(".NS", ""), b))
+        if bands:
+            print(f"\n  {'─'*66}")
+            print(f"  MONTHLY CONTAINMENT BAND — {int((1-bands[0][1]['alpha'])*100)}%"
+                  f" confidence, {horizon_days}d horizon")
+            print(f"  {'─'*66}")
+            print(f"  {'Symbol':<12}{'FLOOR':>11}{'CMP':>11}{'CEILING':>11}"
+                  f"{'floor%':>9}{'ceil%':>8}")
+            for s, b in bands:
+                print(f"  {s:<12}{b['floor']:>11.2f}{b['price']:>11.2f}"
+                      f"{b['ceiling']:>11.2f}"
+                      f"{-b['floor_width']*100:>8.1f}%{b['ceiling_width']*100:>7.1f}%")
+            src = bands[0][1]["source"]
+            print(f"\n  Price stays inside this band in ~{int((1-bands[0][1]['alpha'])*100)}%"
+                  f" of months. Breach expected ~{int(bands[0][1]['alpha']*100)}%.")
+            print(f"  source: {src}")
+            print("  ⚠ This is a RISK/EXPECTATION band, NOT an entry signal.")
+            print("    Buying the floor when it fills tested NEGATIVE-expectancy")
+            print("    on holdout — fills cluster in downtrends (adverse selection).")
+            print("  ⚠ Width is REGIME-DEPENDENT (quarterly 15th-pct floor ranged")
+            print("    6.0%-14.8% on 2024-26 data). A typical month, not a floor.")
+    except Exception as e:
+        print(f"\n  (containment band unavailable: {str(e)[:60]})")
+    print()
 
 
 # ──────────────────────────────────────────────
