@@ -52,24 +52,45 @@ import strategy_config as sc
 
 
 def resolve_watchlist(explicit_symbols):
+    """Symbols to display, in priority order.
+
+    Defaults to the S/R panel (sr_daily_logger.WATCHLIST) so the ticker shows
+    the same names being logged and measured — one list to maintain instead of
+    two that drift apart. Held positions are prepended, since a position you
+    own matters more on screen than a name you are merely watching.
+
+    Falls back to the old holdings + top-momentum derivation only if the panel
+    can't be imported, so the ticker still works standalone.
+    """
     if explicit_symbols:
         return [s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
                 for s in explicit_symbols]
+
     symbols = []
     try:
         state = core.load_portfolio_state()
         symbols.extend(state.get("positions", {}).keys())
     except Exception:
         pass
+
     try:
-        results = core.scan_universe()
-        top = sorted(results.items(), key=lambda kv: -kv[1]["score"])[:10]
-        for sym, _ in top:
-            if sym not in symbols:
-                symbols.append(sym)
+        from sr_daily_logger import WATCHLIST
+        for sym in WATCHLIST:
+            s = sym.upper()
+            if s not in symbols:
+                symbols.append(s)
     except Exception:
-        pass
-    return symbols[:25] or ["RELIANCE.NS"]  # hard cap — a terminal screen only fits so many rows
+        # Panel unavailable — fall back to today's top momentum names.
+        try:
+            results = core.scan_universe()
+            top = sorted(results.items(), key=lambda kv: -kv[1]["score"])[:10]
+            for sym, _ in top:
+                if sym not in symbols:
+                    symbols.append(sym)
+        except Exception:
+            pass
+
+    return symbols or ["RELIANCE.NS"]
 
 
 def entry_prices():
@@ -200,6 +221,7 @@ class TickerState:
         self.last_tick_time = {s: None for s in symbols}
         self.connected = False
         self.last_error = None
+        self.scroll = 0        # first visible row; the panel exceeds a screen
 
 
 def make_ticker(kite, access_token, api_key, state: TickerState):
@@ -436,14 +458,95 @@ def draw(stdscr, state: TickerState, analytics: StaticAnalytics, entries):
     draw_banner(stdscr, w, analytics, state)
     draw_header(stdscr, 8, w)
 
-    row = 10
-    for sym in state.symbols:
-        if row >= h - 1:
-            break
+    # The panel is larger than most terminals (60+ names), so the list scrolls
+    # rather than silently truncating — with a 61-symbol watchlist the old
+    # `break` at screen bottom hid roughly a third of it with no indication
+    # anything was missing.
+    first_row, last_row = 10, h - 2
+    capacity = max(1, (last_row - first_row + 1) // CARD_HEIGHT)
+    total = len(state.symbols)
+    max_off = max(0, total - capacity)
+    off = min(max(0, getattr(state, "scroll", 0)), max_off)
+    state.scroll = off
+
+    row = first_row
+    for sym in state.symbols[off:off + capacity]:
         draw_card(stdscr, row, w, sym, state, analytics, entries)
         row += CARD_HEIGHT
 
+    if total > capacity:
+        shown_hi = min(off + capacity, total)
+        safe_addstr(stdscr, h - 1, 0,
+                    f"  {off+1}-{shown_hi} of {total}   "
+                    f"↑/↓ PgUp/PgDn Home/End to scroll, q to quit",
+                    color("cyan"))
     stdscr.refresh()
+
+
+def ensure_kite_client(stdscr):
+    """Returns a validated KiteConnect client, refreshing the token
+    interactively if it's missing or expired — so you don't have to
+    separately remember to run `kite_auth.py refresh` before launching the
+    ticker. kite_auth.cmd_refresh() needs a real terminal (it opens a
+    browser, prints a TOTP, and calls input() to collect the pasted-back
+    request_token) — none of that works with curses holding the screen, so
+    this drops out of curses (endwin), runs the refresh in plain terminal
+    mode, then re-enters curses. Returns None (caller should exit) only if
+    the user declines to refresh or the refresh itself fails.
+
+    This can ONLY ever be a per-launch, human-in-the-loop prompt — Zerodha
+    provides no programmatic password login, so full automation was
+    considered and rejected (see kite_auth.py's module docstring and memory
+    kite-connect-live-feed-2026-08). This does not change that; it just
+    surfaces the same manual step at the moment you'd actually want it,
+    instead of requiring you to remember it beforehand."""
+    kite = kite_auth.get_kite_client()
+    if kite is not None:
+        try:
+            kite.profile()   # cheap authenticated call — confirms the cached token still works
+            return kite
+        except Exception:
+            kite = None   # cached token exists but Kite rejected it (expired/invalid)
+
+    # Everything from here down is plain-terminal I/O (print/input, and
+    # cmd_refresh's own browser-open + TOTP print + paste-back prompt) — all
+    # of it must happen and finish BEFORE curses resumes, or bare print()
+    # calls after re-entering curses mode will corrupt the display.
+    curses.endwin()
+    result = None
+    try:
+        if kite_auth.get_access_token() is None:
+            print("No cached Kite access token.\n")
+        else:
+            print("Cached Kite access token has expired or is invalid.\n")
+        answer = input("Refresh it now? [Y/n] ").strip().lower()
+        if answer not in ("", "y", "yes"):
+            print("Skipping — live_ticker.py is Kite-only (no delayed-feed fallback). Exiting.")
+            time.sleep(2)
+        else:
+            kite_auth.cmd_refresh()
+            kite = kite_auth.get_kite_client()
+            if kite is None:
+                print("Refresh did not produce a usable token.")
+                time.sleep(3)
+            else:
+                try:
+                    kite.profile()
+                    result = kite
+                except Exception as e:
+                    print(f"New token still failing validation: {e}")
+                    time.sleep(3)
+    except Exception as e:
+        print(f"Refresh failed: {e}")
+        time.sleep(3)
+    finally:
+        # curses.wrapper only sets up/tears down once around main() as a
+        # whole — resuming mid-function after endwin() is on us. refresh()
+        # is the standard idiom (same one pagers/editors use after shelling
+        # out): it forces curses to redraw and re-take the terminal.
+        stdscr.refresh()
+
+    return result
 
 
 def main(stdscr, symbols):
@@ -456,11 +559,8 @@ def main(stdscr, symbols):
     curses.init_pair(4, curses.COLOR_CYAN, -1)
     curses.init_pair(5, curses.COLOR_WHITE, -1)   # dim substitute (color_pair 5 used sparingly, A_DIM varies by terminal)
 
-    kite = kite_auth.get_kite_client()
+    kite = ensure_kite_client(stdscr)
     if kite is None:
-        stdscr.addstr(0, 0, "No cached Kite access token — run: python kite_auth.py login")
-        stdscr.refresh()
-        time.sleep(3)
         return
 
     stdscr.addstr(0, 0, "Loading momentum score / regime / S-R levels (one-time, ~5-10s)...")
@@ -492,10 +592,32 @@ def main(stdscr, symbols):
     kws = make_ticker(kite, access_token, secrets["api_key"], state)
     kws.connect(threaded=True)
 
+    # Non-blocking input so scroll keys are handled without stalling the
+    # redraw. halfdelay() paces the loop the way the old sleep(0.5) did, while
+    # still waking immediately on a keypress.
+    curses.halfdelay(5)   # tenths of a second
     try:
         while True:
             draw(stdscr, state, analytics, entries)
-            time.sleep(0.5)   # redraw rate — ticks arrive faster, this just paces the screen
+            try:
+                ch = stdscr.getch()
+            except Exception:
+                ch = -1
+            if ch in (ord("q"), ord("Q")):
+                break
+            elif ch == curses.KEY_DOWN:
+                state.scroll += 1
+            elif ch == curses.KEY_UP:
+                state.scroll -= 1
+            elif ch == curses.KEY_NPAGE:
+                state.scroll += 10
+            elif ch == curses.KEY_PPAGE:
+                state.scroll -= 10
+            elif ch == curses.KEY_HOME:
+                state.scroll = 0
+            elif ch == curses.KEY_END:
+                state.scroll = len(state.symbols)   # draw() clamps to the max
+            # draw() clamps scroll into range, so no bounds logic is needed here.
     except KeyboardInterrupt:
         pass
     finally:

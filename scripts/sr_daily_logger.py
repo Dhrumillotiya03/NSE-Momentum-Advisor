@@ -21,7 +21,8 @@ import os, sys
 from datetime import datetime
 import pandas as pd
 
-from support_resistance import load_stock, get_all_levels, reach_probability_v2, _load_reach_table
+from support_resistance import (load_stock, get_all_levels, reach_probability_v2,
+                                _load_reach_table, INDEX_FILES)
 import sr_horizon as H
 
 LOG_PATH = "../data/sr_daily_log.csv"
@@ -45,10 +46,31 @@ AVG_COLUMNS = ["CMP", "S1", "R1"]
 # sorts last and is trivial to filter out when reading the file back.
 AVG_ROW_LABEL = "AVG"
 
+# PANEL CHANGED 2026-08-04 (user): 15 -> 61 names. 13 of the original 15 are
+# retained, so their history stays continuous; AARTIIND and GOLDBEES were
+# dropped by explicit instruction and their existing rows remain in the log as
+# history that simply stops advancing.
+#
+# This is still a FIXED panel — the point is that it changes only when the user
+# says so, never automatically from holdings or momentum rank (see memory
+# sr-daily-log-fixed-panel). Any accuracy figure that spans 2026-08-04 pools
+# two different panel compositions, so read it with that in mind; the enlarged
+# panel stands on its own after ~3 weeks of its own data.
 WATCHLIST = [
-    "AARTIIND.NS", "BEL.NS", "GOLDBEES.NS", "KALYANKJIL.NS",
+    "BEL.NS", "KALYANKJIL.NS",
     "KFINTECH.NS", "RELIANCE.NS", "VOLTAS.NS", "WIPRO.NS",
-    "CONCOR.NS", "COCHINSHIP.NS", "KAYNES.NS", "NATIONALUM.NS", "RECLTD.NS", "SAIL.NS", "TMPV.NS",
+    "CONCOR.NS", "COCHINSHIP.NS", "KAYNES.NS", "NATIONALUM.NS", "RECLTD.NS",
+    "SAIL.NS", "TMPV.NS",
+    "ETERNAL.NS", "DELHIVERY.NS", "KPITTECH.NS", "BDL.NS", "PNB.NS",
+    "SUZLON.NS", "ADANIPOWER.NS", "IREDA.NS", "CDSL.NS", "BSE.NS", "RVNL.NS",
+    "NIFTY50", "SHRIRAMFIN.NS", "MCX.NS", "ABCAPITAL.NS", "AXISBANK.NS",
+    "JIOFIN.NS", "ADANIENT.NS", "ADANIPORTS.NS", "MAZDOCK.NS", "ASHOKLEY.NS",
+    "PAYTM.NS", "RBLBANK.NS", "SBIN.NS", "BHEL.NS", "HAL.NS", "PFC.NS",
+    "NAUKRI.NS", "TITAN.NS", "BHARTIARTL.NS", "DIXON.NS", "AMBER.NS",
+    "MARUTI.NS", "MOTHERSON.NS", "INFY.NS", "TCS.NS", "COFORGE.NS",
+    "MPHASIS.NS", "ANGELONE.NS", "SONACOMS.NS", "LT.NS", "NTPC.NS",
+    "ADANIGREEN.NS", "SWIGGY.NS", "HAVELLS.NS", "GAIL.NS", "ITC.NS",
+    "CROMPTON.NS",
 ]
 
 COLUMNS = [
@@ -67,6 +89,21 @@ COLUMNS = [
     # decision so it stays reconstructible.
     "S2_shown", "R2_shown",
 ]
+
+
+def normalize_symbol(sym):
+    """Uppercase, and append .NS only for actual stocks.
+
+    INDICES ARE NOT .NS TICKERS. support_resistance.INDEX_FILES maps names like
+    NIFTY50 to their own CSV, so blindly appending the suffix turned "NIFTY50"
+    into "NIFTY50.NS", which resolves to nothing — the panel silently logged
+    60 of 61 names with no error. Same trap as the documented .NS.NS
+    double-suffix bug: the symbol looks plausible and just fails to load.
+    """
+    s = sym.strip().upper()
+    if s in INDEX_FILES:
+        return s
+    return s if s.endswith(".NS") else s + ".NS"
 
 
 def drop_partial_candle(df):
@@ -305,8 +342,10 @@ def main():
     # Live quotes drive CMP (and therefore level selection) so a mid-session
     # run reflects where price actually is. After the close the live quote is
     # that day's close, so the evening pipeline row is unchanged.
-    syms = [s.strip().upper() if s.strip().upper().endswith(".NS")
-            else s.strip().upper() + ".NS" for s in symbols]
+    # Indices have no tradable quote — exclude them from the live fetch rather
+    # than asking the broker for a ticker that doesn't exist.
+    syms = [s for s in (normalize_symbol(x) for x in symbols)
+            if s not in INDEX_FILES]
     live = {}
     try:
         from support_resistance import fetch_live_prices
@@ -317,9 +356,7 @@ def main():
 
     rows = []
     for sym in symbols:
-        sym = sym.strip().upper()
-        if not sym.endswith(".NS"):
-            sym += ".NS"
+        sym = normalize_symbol(sym)
         row = log_stock(sym, live_price=live.get(sym.replace(".NS", "")))
         if row:
             rows.append(row)
