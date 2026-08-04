@@ -1,6 +1,6 @@
 # NSE-momentum-advisor
 
-A local-first, self-contained quantitative trading **advisory** for NSE (India) equities — combining momentum-based stock selection, market regime detection, support/resistance analytics, chart/pattern analysis, and an AI assistant layer. Runs on free tooling by default; live real-time quotes are an **optional paid add-on** (Zerodha Kite Connect, ~₹500/mo) — the strategy, backtesting, and advisory logic all work with zero external cost using the built-in 15-min-delayed feed.
+A local-first, self-contained quantitative trading **advisory** for NSE (India) equities — combining momentum-based stock selection, market regime detection, support/resistance analytics, chart/pattern analysis, and an AI assistant layer. The strategy, backtesting, and advisory logic all run against a local price archive at zero external cost. Keeping that archive current now uses Zerodha Kite Connect (~₹500/mo), after yfinance proved unreliable for daily updates — see [Data quality](#data-quality); real-time quotes and the tick dashboard are further optional uses of the same connection.
 
 Conceptually similar to what you'd get from Wright Research (momentum model portfolios), StockEdge (S/R + delivery volume + chart analytics), and Univest (actionable trade calls) — but running entirely on your own machine against your own rules. This is a **signal/advice engine** — which stocks to buy, at what price, when to exit a position (including stocks it doesn't track), and what to do over a stated horizon — not a portfolio manager; it does not place orders and does not require or track your brokerage cash balance.
 
@@ -46,8 +46,9 @@ scripts/
 ├── paper_trader.py          # paper trading loop
 ├── agent_sim.py             # simulation harness
 ├── call_report.py           # scores logged advisory calls against actual price action
-├── download_*.py            # NSE bhavcopy, F&O, announcements, index, delisted data fetchers
-├── repair_price_gaps.py     # backfills missing/corrupt price bars from Kite (see Data quality)
+├── update_prices_kite.py    # nightly price update from Kite (append-only; see Data quality)
+├── download_*.py            # NSE bhavcopy, F&O, announcements, delisted archives (historical)
+├── repair_price_gaps.py     # backstop: backfills interior/corrupt price bars from Kite
 ├── data_integrity_check.py  # nightly scan for bad dates, price glitches, stale series
 ├── research_*.py            # standalone strategy validation / robustness studies
 ├── test_*.py                # regression tests for invariants that have broken before
@@ -59,7 +60,8 @@ data/                        # local price data, logs, portfolio state (gitignor
 
 - Python 3.10+
 - [Ollama](https://ollama.com) running locally, with a tool-calling-capable model pulled (e.g. `qwen2.5`, `llama3.1`, `mistral-nemo` — **not** plain `llama3`, which doesn't support tool calling) — only needed for `ai_assistant.py`
-- No paid API keys required for the core strategy, backtesting, or advisory logic. `live_quotes.py` tries Kite Connect first when it is configured, and otherwise falls back to yfinance's free, ~15-minute-delayed feed — callers can tell the two apart, so a delayed quote is never presented as real-time.
+- No paid API keys required for backtesting or research against an existing price archive. `live_quotes.py` tries Kite Connect first when configured, and otherwise falls back to yfinance's free, ~15-minute-delayed feed — callers can tell the two apart, so a delayed quote is never presented as real-time.
+- **Kite Connect is now used for the nightly price update** (`update_prices_kite.py`), because yfinance's intermittent NaN-OHLC bars kept reappearing when the whole history was re-pulled each night (see [Data quality](#data-quality)). Without it the pipeline still runs — it simply keeps whatever price data is already on disk and says so, rather than silently reverting to the source it replaced. Note the access token expires roughly daily and refreshing it needs a browser login (`python kite_auth.py refresh`), so this is a real operational dependency, not a fire-and-forget one.
 - **Optional:** a Zerodha Kite Connect subscription (~₹500/mo) for true real-time NSE quotes and the terminal dashboard (`live_ticker.py`) — live price/change/day-range per tick alongside momentum score/rank, regime, and support/resistance (levels are anchored to the live price *at launch*, then held for the session — restart to re-anchor; see the module docstring for the CPU-cost tradeoff behind that choice). Watchlist-only: it displays names you're watching (defaults to the S/R panel), with no connection to your actual holdings or `portfolio_state.json`. Without Kite Connect, everything falls back transparently to the free feed — nothing breaks or degrades in functionality, only in quote latency. See `kite_auth.py` for the setup flow if you want this.
 
 ## Setup
@@ -123,14 +125,19 @@ python live_ticker.py
 
 ## Data quality
 
-Price history comes from yfinance, which intermittently writes a bar with a real `Volume` but `NaN` OHLC. The file's last date looks current, so nothing obvious flags it — but every consumer drops that row, leaving the series stale in practice while appearing fresh. On one recent check, **42 of 500 files** were affected this way; only 5 were detectable by date alone.
+**Daily price updates come from Kite Connect** (`update_prices_kite.py`); yfinance's archive is retained as the *historical* record but is no longer used for current data.
 
-`repair_price_gaps.py` backfills those bars from Kite Connect (if configured) and runs nightly before anything reads the CSVs. Two details make it safe rather than merely convenient:
+The reason is a failure mode worth knowing about: yfinance intermittently writes a bar with a real `Volume` but `NaN` OHLC. The file's last date looks current, so nothing obvious flags it — but every consumer drops that row, leaving the series stale in practice while appearing fresh. On one check, **42 of 500 files** were affected; only 5 were detectable by date alone. Because the old downloaders re-pulled the whole history nightly, every repair was undone the next evening and the same symbols kept going stale.
 
-- It measures the last **usable** bar (one with real OHLC), not the last bar present. A `max(date)` check misses exactly the failure it is meant to catch.
-- It refuses to splice unless Kite **agrees with the existing series** on the overlapping bars. This matters because Kite's history is *unadjusted* while the yfinance CSVs are split/dividend-*adjusted*: on NATIONALUM the ratio between them drifts 1.80 (2016) → 1.41 (2019) → 1.15 (2023) → 1.00 (today). That is cumulative dividend adjustment, not a glitch in either source. Recent bars agree exactly, so the tail splices cleanly; older gaps do not and are skipped.
+Both the nightly updater and `repair_price_gaps.py` (a backstop for interior gaps predating the switch) share the same safeguards:
 
-This is deliberately **not** a wholesale migration to Kite history. Swapping every historical price would move every S/R pivot, change the momentum scorer's returns, and invalidate the probability tables and every backtest figure — a much larger change than fixing a few missing bars. Symbols with no Kite instrument token (delisted or renamed) are reported and left alone; their series ending is correct.
+- They measure the last **usable** bar (one with real OHLC), not the last bar present. A `max(date)` check misses exactly the failure it is meant to catch — and a mid-session partial bar can otherwise mask an older missing session behind it.
+- They **append only**, never rewriting history, and refuse to splice unless Kite agrees with the existing series **at the splice point** — the newest bar the two share. This matters because Kite's history is *unadjusted* while the yfinance CSVs are split/dividend-*adjusted*: on NATIONALUM the ratio between them drifts 1.80 (2016) → 1.41 (2019) → 1.15 (2023) → 1.00 (today). Comparing a *window* rather than the splice point is subtly wrong: when a dividend goes ex, yfinance back-adjusts every prior bar, so the window straddles a step and a perfectly safe splice gets rejected. Only bars before the ex-date shift; everything from the splice point forward already agrees.
+- Neither ever writes a partial candle. Kite returns the in-progress daily bar during market hours, and writing it would put a half-formed High/Low/Close into the history.
+
+This is deliberately **not** a wholesale migration of the *history*. Swapping every past price would move every S/R pivot, change the momentum scorer's returns, and invalidate the probability tables and every backtest figure. Kite supplies everything from the switch forward; the adjusted archive behind it is left intact. Symbols with no Kite instrument token (delisted or renamed) are reported and left alone; their series ending is correct.
+
+If the Kite token has expired, the nightly update aborts with a message and the pipeline continues on existing data rather than silently falling back to the source it replaced.
 
 ## Data & privacy
 
