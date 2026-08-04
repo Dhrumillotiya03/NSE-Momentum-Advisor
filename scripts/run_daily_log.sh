@@ -25,15 +25,29 @@ fi
 {
     echo "===== $(date) ====="
 
-    "$PYTHON" download_index.py
-    "$PYTHON" download_data.py
-    "$PYTHON" download_etf.py
+    # PRICE DATA COMES FROM KITE (2026-08-04). The old download_*.py scripts
+    # re-pulled the ENTIRE history from yfinance every night (2015-onward),
+    # which is why its glitches kept returning: a bar with real Volume but NaN
+    # OHLC, or a session dropped outright, was rewritten nightly however many
+    # times it had been repaired. update_prices_kite.py appends only bars newer
+    # than each file already holds, from the broker's own feed, and never
+    # rewrites history — yfinance's adjusted archive stays the historical
+    # record (Kite's history is UNADJUSTED, so rewriting it would move every
+    # S/R pivot and invalidate the P(touch) tables and backtests).
+    #
+    # If the Kite token has expired the update aborts and the pipeline
+    # continues on existing data rather than silently falling back to the
+    # source this replaced. Refresh with: python kite_auth.py refresh
+    "$PYTHON" update_prices_kite.py || echo "[pipeline] Kite update failed — continuing on existing data (refresh the token)"
     "$PYTHON" trim_partial.py
     # Repair yfinance gaps from Kite before anything reads the CSVs. yfinance
     # intermittently writes a row with real Volume but NaN OHLC — the file
     # looks current while every consumer silently drops that bar. 42 of 500
     # files were affected on 2026-08-04. Only the recent tail is touched, and
     # only when Kite agrees with the existing series on the overlap.
+    # Kept as a backstop: update_prices_kite handles the normal daily append,
+    # but this also repairs INTERIOR gaps (a NaN-OHLC row or a session missing
+    # behind a newer bar) that predate the switch to Kite.
     "$PYTHON" repair_price_gaps.py --apply
     "$PYTHON" data_integrity_check.py || notify-send "stock_ai" "DATA INTEGRITY WARNINGS — check cron_daily_log.log" 2>/dev/null
     "$PYTHON" market_scanner.py eod
