@@ -60,7 +60,7 @@ data/                        # local price data, logs, portfolio state (gitignor
 - Python 3.10+
 - [Ollama](https://ollama.com) running locally, with a tool-calling-capable model pulled (e.g. `qwen2.5`, `llama3.1`, `mistral-nemo` — **not** plain `llama3`, which doesn't support tool calling) — only needed for `ai_assistant.py`
 - No paid API keys required for the core strategy, backtesting, or advisory logic. `live_quotes.py` tries Kite Connect first when it is configured, and otherwise falls back to yfinance's free, ~15-minute-delayed feed — callers can tell the two apart, so a delayed quote is never presented as real-time.
-- **Optional:** a Zerodha Kite Connect subscription (~₹500/mo) for true real-time NSE quotes and the terminal dashboard (`live_ticker.py`) — live price/change/gain-vs-entry per tick alongside momentum score/rank, regime, and support/resistance (levels are anchored to the live price *at launch*, then held for the session — restart to re-anchor; see the module docstring for the CPU-cost tradeoff behind that choice). Without Kite Connect, everything falls back transparently to the free feed — nothing breaks or degrades in functionality, only in quote latency. See `kite_auth.py` for the setup flow if you want this.
+- **Optional:** a Zerodha Kite Connect subscription (~₹500/mo) for true real-time NSE quotes and the terminal dashboard (`live_ticker.py`) — live price/change/day-range per tick alongside momentum score/rank, regime, and support/resistance (levels are anchored to the live price *at launch*, then held for the session — restart to re-anchor; see the module docstring for the CPU-cost tradeoff behind that choice). Watchlist-only: it displays names you're watching (defaults to the S/R panel), with no connection to your actual holdings or `portfolio_state.json`. Without Kite Connect, everything falls back transparently to the free feed — nothing breaks or degrades in functionality, only in quote latency. See `kite_auth.py` for the setup flow if you want this.
 
 ## Setup
 
@@ -111,9 +111,13 @@ python support_resistance.py RELIANCE --as-of 2026-08-12   # past/future horizon
 ./sr_monthly_review.sh
 
 # Optional: refresh the live Kite Connect quote token for the day
+# (live_ticker.py also detects an expired/missing token and offers to
+# refresh it interactively at launch, so this is a convenience, not a
+# prerequisite)
 python kite_auth.py refresh
 
-# Optional: live tick-by-tick price display (needs Kite Connect configured)
+# Optional: live terminal dashboard — price/change/S-R/verdict for a
+# watchlist (needs Kite Connect configured)
 python live_ticker.py
 ```
 
@@ -140,7 +144,7 @@ If you configure the optional Kite Connect integration, credentials (API key/sec
 
 ## Status
 
-Actively developed. Recent work: fixed a backtest universe-coverage bug that had silently excluded every stock listed after ~2020 from validation; rebuilt the advisor to match the backtested strategy's own picks (it had drifted onto a structurally anti-momentum entry model); added chart/pattern analysis, relative strength, anchored VWAP, and a composite horizon-advice tool; corrected month-end to the last Tuesday across all live consumers; and wired an optional real-time Kite Connect quote feed alongside the existing free/delayed default. Rebuilt `live_ticker.py` from a bare price flasher into a single-line-per-stock dashboard (live price/change/gain alongside momentum score/rank, regime, and support/resistance with live-anchored level selection); several column-width and terminal-overlap bugs were found and fixed by rendering against a mock screen with overlap detection before touching a real terminal. Several candidate strategy improvements (correlation-aware sizing, volatility targeting, regime-detection hysteresis, staged entry) were tested via walk-forward and deliberately not adopted — each looked favorable on a single backtest run but lost on out-of-sample evidence.
+Actively developed. Recent work: fixed a backtest universe-coverage bug that had silently excluded every stock listed after ~2020 from validation; rebuilt the advisor to match the backtested strategy's own picks (it had drifted onto a structurally anti-momentum entry model); added chart/pattern analysis, relative strength, anchored VWAP, and a composite horizon-advice tool; corrected month-end to the last Tuesday across all live consumers; and wired an optional real-time Kite Connect quote feed alongside the existing free/delayed default. Rebuilt `live_ticker.py` from a bare price flasher into a single-line-per-stock dashboard (live price/change/day-range alongside momentum score/rank, regime, and support/resistance with live-anchored level selection); several column-width and terminal-overlap bugs were found and fixed by rendering against a mock screen with overlap detection before touching a real terminal. It also auto-detects an expired Kite token at launch and walks through the refresh interactively rather than requiring a separate manual step beforehand, and was decoupled entirely from `portfolio_state.json` — it's a watchlist tool, not a book viewer, and never reflects real holdings. Several candidate strategy improvements (correlation-aware sizing, volatility targeting, regime-detection hysteresis, staged entry) were tested via walk-forward and deliberately not adopted — each looked favorable on a single backtest run but lost on out-of-sample evidence.
 
 **Support/resistance overhaul.** The reach-probability table was found to measure the wrong quantity: because its builder discarded levels that were never touched, it estimated *P(bounce | touched)* while every consumer read it as *P(touch)*. That made it nearly flat across distance — a level 12%+ away scored about the same as one 1% away — and explained its weak out-of-sample correlation. Rebuilt as a true touch table (`sr_build_touchtable.py`): out-of-sample correlation roughly tripled, and probabilities now decay properly with distance. Separately, the forward-accuracy analysis was reporting a 100% hit rate on every panel; the cause was a resolution asymmetry (a touch resolved immediately while a miss had to wait out the full window, so unresolved misses were dropped and only hits survived), not a well-calibrated model. Both are documented in the source.
 

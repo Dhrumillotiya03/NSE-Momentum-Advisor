@@ -21,7 +21,7 @@ close, and using live/last-price instead of a settled close would silently
 test an unvalidated definition of the signal (this project already tried "be
 more intraday-reactive" — see memory staged-entry-rejected-2026-08 — and it
 lost in walk-forward). What genuinely IS live and updates every tick: price,
-day change %, gain vs entry, and distance from price to the S/R levels below.
+day change %, day high/low, and distance from price to the S/R levels below.
 
 S/R LEVELS are a different case: the underlying pivots come from completed
 daily/weekly/monthly bars (unchanged either way), but WHICH pivot counts as
@@ -33,11 +33,15 @@ anchored to a stale close). Fetched once, not per-tick, on purpose — see
 StaticAnalytics' docstring for the cost tradeoff. Restart the ticker to
 re-anchor levels to a fresher price during the session.
 
+WATCHLIST ONLY — no connection to portfolio_state.json / the real book. This
+displays names you're watching, not your holdings; it does not know or care
+what you actually own. Defaults to the S/R panel (sr_daily_logger.WATCHLIST).
+
 Run from scripts/:
-  python live_ticker.py                    # watchlist = held positions + today's top buy candidates
+  python live_ticker.py                    # watchlist = sr_daily_logger.WATCHLIST
   python live_ticker.py RELIANCE TCS DIXON  # explicit symbols
 
-Ctrl-C to exit.
+Ctrl-C to exit, or 'q'. Scroll with arrow keys / PgUp/PgDn / Home/End.
 """
 import curses
 import sys
@@ -52,54 +56,32 @@ import strategy_config as sc
 
 
 def resolve_watchlist(explicit_symbols):
-    """Symbols to display, in priority order.
+    """Symbols to display, in priority order. WATCHLIST ONLY — no connection
+    to portfolio_state.json / the real book (deliberate: this is a display
+    tool for names you're watching, not a book viewer; see module docstring).
 
     Defaults to the S/R panel (sr_daily_logger.WATCHLIST) so the ticker shows
     the same names being logged and measured — one list to maintain instead of
-    two that drift apart. Held positions are prepended, since a position you
-    own matters more on screen than a name you are merely watching.
+    two that drift apart.
 
-    Falls back to the old holdings + top-momentum derivation only if the panel
-    can't be imported, so the ticker still works standalone.
+    Falls back to today's top momentum names only if the panel can't be
+    imported, so the ticker still works standalone.
     """
     if explicit_symbols:
         return [s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
                 for s in explicit_symbols]
 
-    symbols = []
-    try:
-        state = core.load_portfolio_state()
-        symbols.extend(state.get("positions", {}).keys())
-    except Exception:
-        pass
-
     try:
         from sr_daily_logger import WATCHLIST
-        for sym in WATCHLIST:
-            s = sym.upper()
-            if s not in symbols:
-                symbols.append(s)
+        return [sym.upper() for sym in WATCHLIST]
     except Exception:
         # Panel unavailable — fall back to today's top momentum names.
         try:
             results = core.scan_universe()
             top = sorted(results.items(), key=lambda kv: -kv[1]["score"])[:10]
-            for sym, _ in top:
-                if sym not in symbols:
-                    symbols.append(sym)
+            return [sym for sym, _ in top] or ["RELIANCE.NS"]
         except Exception:
-            pass
-
-    return symbols or ["RELIANCE.NS"]
-
-
-def entry_prices():
-    """symbol -> entry_price for held names, so the ticker can show gain/loss."""
-    try:
-        state = core.load_portfolio_state()
-        return {s: p.get("entry_price", 0) for s, p in state.get("positions", {}).items()}
-    except Exception:
-        return {}
+            return ["RELIANCE.NS"]
 
 
 # ---------- Static (once-per-launch) analytics ----------
@@ -174,20 +156,17 @@ class StaticAnalytics:
             return None, None
 
 
-def verdict_for(sym, price, analytics: StaticAnalytics, entry):
+def verdict_for(sym, price, analytics: StaticAnalytics):
     """Synthesizes a short actionable read from already-validated signals —
     composition only, computes nothing new. Mirrors the same thresholds the
-    advisor/exit paths already use (RSI_OVERBOUGHT, CATASTROPHIC_STOP).
-    Tags are ordered most-urgent-first since the row's color follows tags[0]:
-    a live stop breach or level proximity matters more to see at a glance
-    than "not eligible for entry" bookkeeping."""
+    advisor uses (RSI_OVERBOUGHT). No book/position dependency — this is a
+    watchlist tool, not a book viewer (see module docstring).
+    Tags are ordered most-urgent-first since the row's color follows tags[0]."""
     score_row = analytics.scores.get(sym)
     rank = analytics.rank.get(sym)
     support, resistance, _, _ = analytics.levels.get(sym, (None, None, None, None))
 
     tags = []
-    if entry and price and price <= entry * sc.CATASTROPHIC_STOP:
-        tags.append(("STOP BREACH", "red"))
     if price and resistance and price >= resistance * 0.98:
         tags.append(("NEAR RESISTANCE", "yellow"))
     if price and support and price <= support * 1.02:
@@ -198,7 +177,11 @@ def verdict_for(sym, price, analytics: StaticAnalytics, entry):
         if score_row.get("rsi") is not None and score_row["rsi"] >= sc.RSI_OVERBOUGHT:
             tags.append(("OVERBOUGHT", "yellow"))
     elif score_row is None:
-        tags.append(("not eligible", "dim"))
+        # Fails the momentum strategy's own entry gate right now (needs
+        # positive 6m AND 3m momentum + price above the 50DMA — see
+        # core.momentum_score). Not a display limitation: this name simply
+        # wouldn't be bought by the strategy as of last close.
+        tags.append(("not in strategy universe", "dim"))
 
     return tags
 
@@ -358,10 +341,9 @@ X_PRICE    = 15   # "12,345.60"
 X_CHG      = 26   # "+12.34%"
 X_HIGH     = 35
 X_LOW      = 43
-X_GAIN     = 51   # "+123.45% (E 1,234)"
-X_SUPPORT  = 72   # "1,234 (+12.3%)"
-X_RESIST   = 88
-X_VERDICT  = 104
+X_SUPPORT  = 51   # "1,234 (+12.3%)"
+X_RESIST   = 68
+X_VERDICT  = 85
 
 
 def draw_header(stdscr, row, w):
@@ -370,7 +352,6 @@ def draw_header(stdscr, row, w):
     safe_addstr(stdscr, row, X_CHG, "CHG/OPEN", curses.A_UNDERLINE | curses.A_BOLD)
     safe_addstr(stdscr, row, X_HIGH, "HIGH", curses.A_UNDERLINE | curses.A_BOLD)
     safe_addstr(stdscr, row, X_LOW, "LOW", curses.A_UNDERLINE | curses.A_BOLD)
-    safe_addstr(stdscr, row, X_GAIN, "GAIN/ENTRY", curses.A_UNDERLINE | curses.A_BOLD)
     safe_addstr(stdscr, row, X_SUPPORT, "SUPPORT", curses.A_UNDERLINE | color("dim"))
     safe_addstr(stdscr, row, X_RESIST, "RESISTANCE", curses.A_UNDERLINE | color("dim"))
     safe_addstr(stdscr, row, X_VERDICT, "VERDICT", curses.A_UNDERLINE | color("dim"))
@@ -380,24 +361,21 @@ def fmt_num(x, decimals=2):
     return f"{x:,.{decimals}f}" if x is not None and x == x else "-"
 
 
-def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytics, entries):
+def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytics):
     """Renders one stock as a SINGLE row — every field at a fixed x-position
-    matching the header, tight to its actual content (no wasted padding)."""
+    matching the header, tight to its actual content (no wasted padding).
+    Watchlist-only: no book/position dependency (see module docstring)."""
     price = state.prices.get(sym)
     open_px = state.day_open.get(sym)
     high_px = state.day_high.get(sym)
     low_px = state.day_low.get(sym)
-    entry = entries.get(sym)
-    score_row = analytics.scores.get(sym)
     support, resistance, _, _ = analytics.levels.get(sym, (None, None, None, None))
-    held = sym in entries
 
     if price is None:
         price = analytics.prev_close.get(sym)  # show yesterday's close until first tick
 
     name = sym.replace(".NS", "")
-    marker = "●" if held else " "   # filled dot marks a held position
-    safe_addstr(stdscr, row, X_SYMBOL, f"{marker}{name:<11}", curses.A_BOLD | (color("cyan") if held else 0))
+    safe_addstr(stdscr, row, X_SYMBOL, f"{name:<11}", curses.A_BOLD)
 
     safe_addstr(stdscr, row, X_PRICE, fmt_num(price), curses.A_BOLD)
 
@@ -410,14 +388,6 @@ def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytic
 
     safe_addstr(stdscr, row, X_HIGH, f"{high_px:,.0f}" if high_px else "-", color("green"))
     safe_addstr(stdscr, row, X_LOW, f"{low_px:,.0f}" if low_px else "-", color("red"))
-
-    if price and entry:
-        gain = (price / entry - 1) * 100
-        gain_s = f"{gain:+.2f}% (E {entry:,.0f})"
-        gain_attr = color("green") if gain >= 0 else color("red")
-        safe_addstr(stdscr, row, X_GAIN, gain_s, gain_attr | curses.A_BOLD)
-    else:
-        safe_addstr(stdscr, row, X_GAIN, "-", 0)
 
     if support and price:
         dist = (price / support - 1) * 100
@@ -433,20 +403,20 @@ def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytic
         r_s = "-"
     safe_addstr(stdscr, row, X_RESIST, r_s, color("yellow"))
 
-    tags = verdict_for(sym, price, analytics, entry)
+    tags = verdict_for(sym, price, analytics)
     if tags:
         verdict_s = " | ".join(t for t, _ in tags)
         verdict_attr = color(tags[0][1]) | curses.A_BOLD
     else:
-        verdict_s = "not in universe" if score_row is None else "-"
+        verdict_s = "-"
         verdict_attr = color("dim")
     avail = max(0, w - X_VERDICT - 1)
-    if len(verdict_s) > avail:   # rare 3+-tag combo — truncate cleanly, not mid-word
+    if len(verdict_s) > avail:   # rare multi-tag combo — truncate cleanly, not mid-word
         verdict_s = verdict_s[:max(0, avail - 3)] + "..."
     safe_addstr(stdscr, row, X_VERDICT, verdict_s, verdict_attr)
 
 
-def draw(stdscr, state: TickerState, analytics: StaticAnalytics, entries):
+def draw(stdscr, state: TickerState, analytics: StaticAnalytics):
     stdscr.erase()
     h, w = stdscr.getmaxyx()
 
@@ -471,7 +441,7 @@ def draw(stdscr, state: TickerState, analytics: StaticAnalytics, entries):
 
     row = first_row
     for sym in state.symbols[off:off + capacity]:
-        draw_card(stdscr, row, w, sym, state, analytics, entries)
+        draw_card(stdscr, row, w, sym, state, analytics)
         row += CARD_HEIGHT
 
     if total > capacity:
@@ -587,7 +557,6 @@ def main(stdscr, symbols):
     secrets = kite_auth.load_secrets()
     access_token = kite_auth.get_access_token()
     state = TickerState(symbols, token_to_symbol)
-    entries = entry_prices()
 
     kws = make_ticker(kite, access_token, secrets["api_key"], state)
     kws.connect(threaded=True)
@@ -598,7 +567,7 @@ def main(stdscr, symbols):
     curses.halfdelay(5)   # tenths of a second
     try:
         while True:
-            draw(stdscr, state, analytics, entries)
+            draw(stdscr, state, analytics)
             try:
                 ch = stdscr.getch()
             except Exception:
