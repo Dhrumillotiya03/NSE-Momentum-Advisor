@@ -56,9 +56,10 @@ import strategy_config as sc
 
 
 def resolve_watchlist(explicit_symbols):
-    """Symbols to display, in priority order. WATCHLIST ONLY — no connection
-    to portfolio_state.json / the real book (deliberate: this is a display
-    tool for names you're watching, not a book viewer; see module docstring).
+    """Symbols to display, ALPHABETICAL regardless of source. WATCHLIST
+    ONLY — no connection to portfolio_state.json / the real book (deliberate:
+    this is a display tool for names you're watching, not a book viewer; see
+    module docstring).
 
     Defaults to the S/R panel (sr_daily_logger.WATCHLIST) so the ticker shows
     the same names being logged and measured — one list to maintain instead of
@@ -68,20 +69,22 @@ def resolve_watchlist(explicit_symbols):
     imported, so the ticker still works standalone.
     """
     if explicit_symbols:
-        return [s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
-                for s in explicit_symbols]
-
-    try:
-        from sr_daily_logger import WATCHLIST
-        return [sym.upper() for sym in WATCHLIST]
-    except Exception:
-        # Panel unavailable — fall back to today's top momentum names.
+        symbols = [s.upper() + ".NS" if not s.upper().endswith(".NS") else s.upper()
+                   for s in explicit_symbols]
+    else:
         try:
-            results = core.scan_universe()
-            top = sorted(results.items(), key=lambda kv: -kv[1]["score"])[:10]
-            return [sym for sym, _ in top] or ["RELIANCE.NS"]
+            from sr_daily_logger import WATCHLIST
+            symbols = [sym.upper() for sym in WATCHLIST]
         except Exception:
-            return ["RELIANCE.NS"]
+            # Panel unavailable — fall back to today's top momentum names.
+            try:
+                results = core.scan_universe()
+                top = sorted(results.items(), key=lambda kv: -kv[1]["score"])[:10]
+                symbols = [sym for sym, _ in top] or ["RELIANCE.NS"]
+            except Exception:
+                symbols = ["RELIANCE.NS"]
+
+    return sorted(symbols)
 
 
 # ---------- Static (once-per-launch) analytics ----------
