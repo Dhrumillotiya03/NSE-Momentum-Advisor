@@ -53,6 +53,22 @@ DEFAULT_MAX_GAP = 45
 OHLC = ["Open", "High", "Low", "Close"]
 
 
+def cutoff_date():
+    """Newest date safe to WRITE: yesterday while today's session is still
+    open, else today.
+
+    Mirrors drop_partial_candle's 16:00 cutoff (NSE closes 15:30; the extra
+    half hour clears the closing auction). Without this the repair happily
+    wrote today's in-progress candle into 432 files — a partial bar looks like
+    a real one in the CSV and nothing downstream can tell the difference.
+    """
+    now = dt.datetime.now()
+    today = now.date()
+    if now.weekday() <= 4 and now.hour < 16:
+        return today - dt.timedelta(days=1)
+    return today
+
+
 def load_csv(path):
     df = pd.read_csv(path)
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
@@ -69,11 +85,16 @@ def last_usable_date(df):
     max(Date) and still be stale in practice. This is the failure this repo
     already hit once, patched by hand for 2026-07-30; measuring usability
     rather than presence is what makes the repair detect it automatically.
+
+    Capped at the write cutoff on purpose. A mid-session partial bar — written
+    by market_scanner's intraday re-download, which trim_partial cannot
+    prevent — would otherwise make a file look current while an EARLIER
+    session is still missing, hiding the gap behind it. WIPRO on 2026-08-04
+    was exactly this: a partial 08-04 row present, 08-03 absent entirely.
     """
     cols = [c for c in OHLC if c in df.columns]
-    if not cols:
-        return df["Date"].max() if len(df) else None
-    good = df.dropna(subset=cols)
+    good = df.dropna(subset=cols) if cols else df
+    good = good[good["Date"] <= pd.Timestamp(cutoff_date())]
     return good["Date"].max() if len(good) else None
 
 
@@ -153,6 +174,9 @@ def main():
         except Exception:
             continue
     universe_latest = max(universe_dates) if universe_dates else max(latest.values())
+    # Don't treat today's partial bar as the target either, or every file
+    # without one looks "behind" mid-session and gets a partial written into it.
+    universe_latest = min(universe_latest, pd.Timestamp(cutoff_date()))
     behind = {f: d for f, d in latest.items() if d < universe_latest}
 
     print(f"Universe latest bar: {universe_latest.date()}")
@@ -211,6 +235,12 @@ def main():
             skipped += 1; continue
 
         new = k[k.index > pd.Timestamp(last).normalize()]
+        # NEVER write today's bar while the session is open. Kite returns the
+        # in-progress daily candle, whose High/Low/Close are only whatever has
+        # printed so far — writing it would put a partial bar into price_data,
+        # which is the exact pollution trim_partial.py exists to remove and
+        # which invents swing points that vanish at the close.
+        new = new[new.index <= pd.Timestamp(cutoff_date())]
         if new.empty:
             print("      nothing new from kite"); skipped += 1; continue
 
