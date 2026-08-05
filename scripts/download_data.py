@@ -1,8 +1,53 @@
+"""
+download_data.py — RETIRED. Superseded by update_prices_kite.py (2026-08-03).
+
+DO NOT RUN THIS TO UPDATE PRICES. It is kept only for bootstrapping a price
+archive from scratch, and is guarded so it cannot be run by accident.
+
+WHY IT IS RETIRED
+-----------------
+This script re-downloads the ENTIRE history (2015-onward) for every symbol and
+OVERWRITES each file. yfinance intermittently serves a bar with real Volume but
+NaN OHLC, so every run reintroduces that corruption — and, because it rewrites
+rather than appends, it silently UNDOES every repair made since the last run.
+That is precisely why the same symbols kept going stale no matter how often
+they were fixed.
+
+Observed 2026-08-05: WIPRO, PFC, ANGELONE, PAYTM and SHRIRAMFIN came back with
+NaN closes hours after being repaired. The nightly pipeline was not the cause —
+it has not called this script since the Kite switch. A manual run was.
+
+There is a second, quieter hazard: yfinance data is split/dividend-ADJUSTED
+while Kite's is UNADJUSTED. The two are spliced only at points where they
+agree; a wholesale yfinance rewrite moves every historical price, which would
+shift every S/R pivot and invalidate the P(touch) tables and every backtest
+figure on file.
+
+TO UPDATE PRICES:      python update_prices_kite.py
+TO REPAIR A GAP:       python repair_price_gaps.py --apply
+TO BOOTSTRAP FROM
+SCRATCH (rare):        python download_data.py --i-understand-this-overwrites
+"""
 import os
+import sys
 import yfinance as yf
 import pandas as pd
 from tqdm import tqdm
 from datetime import datetime
+
+# Guard: refuse to run without an explicit acknowledgement. A retired script
+# that still works exactly as before is not retired — it is a loaded footgun
+# sitting next to the scripts you DO run, one tab-completion away.
+#
+# Gated on __main__ so _import_check.py (which imports every module to catch
+# syntax/dependency breakage) still passes: this script is retired, not broken.
+if __name__ == "__main__" and "--i-understand-this-overwrites" not in sys.argv:
+    sys.stderr.write(__doc__.strip() + "\n\n")
+    sys.stderr.write(
+        "REFUSING TO RUN: this overwrites price_data/ with re-downloaded\n"
+        "yfinance history and will reintroduce NaN-OHLC bars.\n"
+        "Use `python update_prices_kite.py` for daily updates.\n")
+    sys.exit(1)
 
 DATA_DIR = "../data/"
 SYMBOL_FILE_200 = DATA_DIR + "nifty200.csv"

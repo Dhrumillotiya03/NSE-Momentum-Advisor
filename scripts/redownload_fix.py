@@ -1,41 +1,39 @@
-import yfinance as yf
-import pandas as pd
-import os
+"""
+redownload_fix.py — RETIRED 2026-08-05. Superseded by repair_price_gaps.py.
 
-OUTPUT_DIR = "../data/price_data/"
+The download logic has been REMOVED, not just disabled. This file is kept only
+so the name does not get re-created, and to record why.
 
-stocks = [
-    "AEGISVOPAK.NS", "AFCONS.NS", "AFFLE.NS", "AGARWALEYE.NS", "AIAENG.NS",
-    "AKUMS.NS", "ANANTRAJ.NS", "ANGELONE.NS", "APARINDS.NS", "APLAPOLLO.NS",
-    "APLLTD.NS", "GODREJPROP.NS", "GPIL.NS", "GRANULES.NS", "GRAPHITE.NS",
-    "GRASIM.NS", "IDEA.NS", "IDFCFIRSTB.NS", "IEX.NS", "IFCI.NS", "IGIL.NS",
-    "INDIACEM.NS", "INDIGO.NS", "MANKIND.NS", "PAYTM.NS", "PCBL.NS",
-    "PERSISTENT.NS", "PETRONET.NS", "PFC.NS", "POWERGRID.NS", "SHREECEM.NS",
-    "SHRIRAMFIN.NS", "TIMKEN.NS", "TITAGARH.NS", "TORNTPHARM.NS", "TORNTPOWER.NS",
-    "TRENT.NS", "TRIDENT.NS", "TRITURBINE.NS", "WAAREEENER.NS", "WELCORP.NS",
-    "WELSPUNLIV.NS", "WHIRLPOOL.NS", "WIPRO.NS", "ZFCVINDIA.NS", "ZYDUSLIFE.NS"
-]
+WHAT IT USED TO DO. Re-download ~46 hardcoded symbols' full history from
+yfinance and overwrite each CSV. It was a one-off repair script from before the
+Kite switch.
 
-for sym in stocks:
-    print(f"Downloading {sym}...")
-    try:
-        df = yf.download(sym, period="3y", interval="1d",
-                         auto_adjust=True, progress=False)
+WHY IT HAD TO GO. Its hardcoded list was exactly the set of symbols that kept
+coming back with NaN-OHLC bars — WIPRO, PFC, ANGELONE, PAYTM, SHRIRAMFIN, PCBL,
+GRAPHITE and the rest. yfinance intermittently serves a bar with real Volume but
+NaN OHLC, so a single run of this script REINTRODUCED the corruption it was
+written to fix, and wiped out any repair made since.
 
-        if df.empty:
-            print(f"  ❌ No data")
-            continue
+Two things made it especially dangerous:
+  1. It executed at MODULE level — no `if __name__ == "__main__"` — so merely
+     importing it downloaded and overwrote 46 files.
+  2. yfinance data is split/dividend-ADJUSTED while Kite's is UNADJUSTED. A
+     wholesale yfinance rewrite moves every historical price, shifting every
+     S/R pivot and invalidating the P(touch) tables and every backtest figure.
 
-        # Fix multi-level columns from newer yfinance
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
+Traced 2026-08-05: the nightly pipeline had not called this since the Kite
+switch, yet five symbols were repaired and went bad again within hours, and
+exactly 46 files carried a newer timestamp than the other 447.
 
-        df = df.reset_index()
-        df = df[["Date", "Close", "High", "Low", "Open", "Volume"]]
-        df.to_csv(f"{OUTPUT_DIR}{sym}.csv", index=False)
-        print(f"  ✅ {len(df)} rows saved")
+USE INSTEAD:
+    python repair_price_gaps.py --apply     # repair NaN bars / interior gaps
+    python update_prices_kite.py            # daily append
+Both pull from Kite, append only, verify agreement at the splice point, and
+never rewrite history.
+"""
+import sys
 
-    except Exception as e:
-        print(f"  ❌ Error: {e}")
-
-print("\nDone.")
+if __name__ == "__main__":
+    sys.stderr.write(__doc__.strip() + "\n\n")
+    sys.stderr.write("This script has been retired and its logic removed.\n")
+    sys.exit(1)
