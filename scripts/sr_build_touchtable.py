@@ -124,15 +124,32 @@ def collect(symbols, forward_days):
             if vol is None:
                 continue
             try:
-                sup, res_lvl, _, _ = get_levels(past, fast=True)
+                # reachable_only=False: build from RAW pivots, not the
+                # display band. Measured 2026-08-05 — capping the training
+                # data hollows out the far cells (12%+|<25% went to ZERO
+                # observations, thin cells 2/24 -> 6/24) and costs ~0.14 OOS
+                # correlation. Worse, the table then never sees an unreachable
+                # level, so it loses the ability to say a level is
+                # unreachable: the 12%+ bucket read 19.5% vs 0.0% uncapped.
+                sup, res_lvl, s_str, r_str = get_levels(past, fast=True,
+                                                        reachable_only=False)
             except Exception:
                 continue
             cur = float(past["Close"].iloc[-1])
             if not cur:
                 continue
 
-            for level, direction in [(sup, "down"), (res_lvl, "up")]:
+            # Belt-and-braces: with reachable_only=False no projected level can
+            # reach here (projection only happens inside the band path), but
+            # strength 0 is checked anyway so this loop stays correct if the
+            # call above is ever changed back. A projected level must never
+            # enter the table — it sits at the band edge by construction, so it
+            # is touched far more often than a real pivot at the same distance.
+            for level, direction, strength in [(sup, "down", s_str),
+                                               (res_lvl, "up", r_str)]:
                 if level is None or not np.isfinite(level) or level <= 0:
+                    continue
+                if not strength:
                     continue
                 # Skip levels already on the wrong side of price: a "support"
                 # above spot is not a support, and its touch is trivially true.

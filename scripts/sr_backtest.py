@@ -76,7 +76,10 @@ def backtest_stock(df):
             # fast=True: skips volume profile & delivery IO — ~20x faster
             # accuracy impact is minimal because backtest uses touch/bounce
             # not composite scores
-            sup, res_lvl, _, _ = get_levels(past, fast=True)
+            # reachable_only=False: measurement path — raw pivots, not the
+            # display band. See get_all_levels docstring (2026-08-05).
+            sup, res_lvl, _, _ = get_levels(past, fast=True,
+                                            reachable_only=False)
         except Exception:
             continue
 

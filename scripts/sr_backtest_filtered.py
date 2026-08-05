@@ -164,7 +164,9 @@ def backtest_stock(df, regimes):
         res["tested"] += 1
 
         try:
-            sup, res_lvl, _, _ = get_levels(past, fast=True)
+            # reachable_only=False: measurement path — see sr_backtest.py.
+            sup, res_lvl, _, _ = get_levels(past, fast=True,
+                                            reachable_only=False)
         except Exception:
             continue
 

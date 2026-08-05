@@ -84,7 +84,11 @@ def collect(symbols):
             if vol is None:
                 continue
             try:
-                sup, res_lvl, _, _ = get_levels(past, fast=True)
+                # reachable_only=False: measurement path. This legacy
+                # builder is superseded by sr_build_touchtable but is kept
+                # as a safety net, so it must stay on the same basis.
+                sup, res_lvl, _, _ = get_levels(past, fast=True,
+                                                reachable_only=False)
             except Exception:
                 continue
             cur = float(past["Close"].iloc[-1])

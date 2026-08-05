@@ -277,7 +277,8 @@ def score_level(df, level, side, symbol=None, mtf_bonus=0.0, fast=False):
 # GET ALL LEVELS
 # ──────────────────────────────────────────────
 
-def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
+def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None,
+                   reachable_only=True):
     """Supports/resistances around the reference price.
 
     cur: reference price. Defaults to the last CLOSE in df. Pass the LIVE quote
@@ -289,6 +290,25 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
     The PIVOTS themselves are unaffected by this: they are swing points and
     volume nodes derived from completed bars, and they do not move because the
     clock advanced. Only the above/below split and the proximity window shift.
+
+    reachable_only: apply the min-separation / max-reach band and project a
+    level when nothing survives (True, the default — what every DISPLAY caller
+    wants). Pass False from the P(TOUCH) TABLE BUILDERS.
+
+    Why the builders must opt out (measured 2026-08-05, not theoretical): the
+    band compresses support distances into roughly 1.6-14.6%, leaving only
+    ~3.9% of observations beyond 12%. The tables are keyed on exactly that
+    distance, so their outer cells hollow out — `12%+|<25%` went to ZERO
+    observations and `8-12%|<25%` to 3, thin cells went 2/24 -> 6/24, and OOS
+    correlation fell 0.46 -> 0.317 at 10d and 0.48 -> 0.304 at 15d. Building on
+    capped levels also destroys the table's ability to say "this level is
+    unreachable", because it never sees an unreachable one: the 12%+ bucket
+    read 19.5% against 0.0% on uncapped data — the flat-in-distance signature
+    of the original bounce-table bug (memory sr-touch-vs-bounce-metric-bug).
+
+    So: the cap is a DISPLAY concern and the table is a MEASUREMENT concern.
+    Filtering the measurement layer to what the display shows makes the model
+    unable to express its own limits.
     """
     cur = float(cur) if cur else float(df["Close"].iloc[-1])
 
@@ -432,6 +452,13 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
             out.append(lv)
         return out
 
+    if not reachable_only:
+        # Measurement path: raw proximity-ordered pivots, no band, no
+        # projection. This is the pre-2026-08-05 behaviour, preserved exactly
+        # so the P(touch) tables stay comparable to those already built.
+        return (sorted(supports, key=lambda x: -x[0])[:3],
+                sorted(resistances, key=lambda x: x[0])[:3])
+
     sup_f, res_f = _spread(supports, 1), _spread(resistances, -1)
 
     # PROJECTED LEVELS when no historical pivot survives the band.
@@ -486,7 +513,8 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
 # get_levels  (drop-in replacement, backtest-safe)
 # ──────────────────────────────────────────────
 
-def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None):
+def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None,
+               reachable_only=True):
     """
     Returns (support, resistance, s_strength, r_strength).
     Pass fast=True from sr_backtest for vectorised-only path (no vol profile,
@@ -497,8 +525,15 @@ def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None):
     inside the reachable band, get_all_levels projects one from the containment
     band and marks it with strength 0 (pivot-derived levels have strength >= 1),
     so a caller can tell the two apart without either being absent.
+
+    reachable_only=False disables the band and the projection — for the
+    P(touch) table builders ONLY. See get_all_levels' docstring for the
+    measured reason (capped training data hollows out the far cells and costs
+    ~0.14 OOS correlation).
     """
-    supports, resistances = get_all_levels(df, symbol=symbol, fast=fast, cur=cur)
+    supports, resistances = get_all_levels(df, symbol=symbol, fast=fast,
+                                           cur=cur,
+                                           reachable_only=reachable_only)
 
     def pick(candidates, side):
         confirmed = [(p, t, s) for p, t, s in candidates if t >= 2]
