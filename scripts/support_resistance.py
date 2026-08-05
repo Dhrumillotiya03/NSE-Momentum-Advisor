@@ -434,19 +434,51 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
 
     sup_f, res_f = _spread(supports, 1), _spread(resistances, -1)
 
-    # NO FALLBACK, deliberately. An earlier version relaxed the minimum when
-    # the band came up empty, which put ADANIPOWER's S1 back at -0.9% and
-    # ADANIENT's at -1.9% — inside their own min_sep, i.e. exactly the
-    # "levels hugging CMP" problem the filter exists to remove. Relaxing the
-    # maximum instead is equally wrong: it resurfaces the unreachable pivot
-    # for precisely the names that triggered the cap.
+    # PROJECTED LEVELS when no historical pivot survives the band.
     #
-    # So an empty result STANDS. "No level in the reachable band" is a real,
-    # informative answer — a stock at 93% of its 52w range genuinely has no
-    # support price can plausibly test this month, and inventing one to fill
-    # the column would be the least honest option available. Callers render it
-    # as "—", and the containment band answers the question that a missing
-    # support actually raises ("how far could this fall").
+    # "No nearby pivot" is NOT "no support exists" — those were conflated in an
+    # earlier version that returned nothing, which is a non-answer. Any real
+    # research desk quotes a level for any stock, including one at 52-week
+    # highs with no overhead structure; it just derives that level from where
+    # price can realistically travel rather than from a prior swing point.
+    #
+    # A stock at 93% of its 52w range has no PIVOT below it in reach — but it
+    # still has a price it is unlikely to trade under this month, and that is
+    # the number the question is asking for. Neither of the wrong answers is
+    # acceptable: the 52-week low 45% away (unreachable, so meaningless) or
+    # nothing at all (a refusal to answer).
+    #
+    # So the level is PROJECTED from the containment band — an empirical
+    # quantile of forward closing excursion per (vol bucket, horizon), fitted
+    # on 11 years of daily history and holdout-calibrated to within +-10pp.
+    # It is the same machinery already printed under the S/R table, reused
+    # here rather than inventing a second definition of "how far can this move".
+    #
+    # Marked with strength 0 so callers can distinguish a projected level from
+    # a pivot-derived one (touches >= 1). This is a real distinction — a
+    # structural level has memory behind it, a projected one is a statistical
+    # expectation — and it must stay visible rather than being silently mixed
+    # into the same column.
+    if not sup_f or not res_f:
+        try:
+            from containment_band import containment_band
+            b = containment_band(df, horizon=21, alpha=0.25, cur=cur)
+        except Exception:
+            b = None
+        if b:
+            if not sup_f:
+                sup_f = [(round(b["floor"], 2), 0, 0.0)]
+            if not res_f:
+                res_f = [(round(b["ceiling"], 2), 0, 0.0)]
+
+    # Last resort if the containment table is unavailable: a volatility-scaled
+    # projection at the same reach the cap allows. Keeps the contract that a
+    # level is always returned, without reaching for the 52-week extreme.
+    if not sup_f:
+        sup_f = [(round(cur * (1 - max_reach), 2), 0, 0.0)]
+    if not res_f:
+        res_f = [(round(cur * (1 + max_reach), 2), 0, 0.0)]
+
     return sup_f[:3], res_f[:3]
 
 
@@ -454,33 +486,17 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
 # get_levels  (drop-in replacement, backtest-safe)
 # ──────────────────────────────────────────────
 
-def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None,
-               fallback_52w=True):
+def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None):
     """
     Returns (support, resistance, s_strength, r_strength).
     Pass fast=True from sr_backtest for vectorised-only path (no vol profile,
     no delivery IO) — runs ~20x faster, negligible accuracy loss in backtest.
     cur: reference price; defaults to the last close. See get_all_levels.
 
-    fallback_52w: when get_all_levels returns nothing inside the reachable
-    band, fall back to the 52-week extreme (True, the default) or return None
-    (False). The two callers want OPPOSITE behaviour and the difference is not
-    cosmetic:
-
-      MEASUREMENT (sr_backtest, sr_build_touchtable, sr_build_reachtable,
-      research_*) needs True. The P(touch) tables are built by measuring
-      outcomes at whatever distance a level sits; filtering their training
-      data to near levels would hollow out the very far cells the model needs
-      in order to say "unreachable", and would change row counts so the
-      tables stop being comparable to the ones already built.
-
-      DISPLAY (live_ticker, intraday_watch, ai_assistant, full_advisor, core)
-      wants False. Surfacing a 52-week low as "support" when it sits 49% below
-      spot is the exact defect the reachability cap exists to remove — it is
-      real structure, but not reachable in the horizon being asked about.
-
-    Defaulting to True keeps every existing measurement caller byte-identical;
-    display callers opt out explicitly.
+    A level is ALWAYS returned for both sides. When no historical pivot sits
+    inside the reachable band, get_all_levels projects one from the containment
+    band and marks it with strength 0 (pivot-derived levels have strength >= 1),
+    so a caller can tell the two apart without either being absent.
     """
     supports, resistances = get_all_levels(df, symbol=symbol, fast=fast, cur=cur)
 
@@ -517,15 +533,19 @@ def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None,
     # source, and a <252-bar rolling window returned NaN — which would have
     # silently changed the touch tables' row counts. Verified against the
     # pre-filter behaviour at n=200/400/600.
-    if fallback_52w:
-        if support is None:
-            support = round(float(df["Low"].rolling(252, min_periods=1)
-                                  .min().iloc[-1]), 2)
-            s_str   = 1
-        if resistance is None:
-            resistance = round(float(df["High"].rolling(252, min_periods=1)
-                                     .max().iloc[-1]), 2)
-            r_str      = 1
+    # 52-week extreme, kept only as a true last resort. get_all_levels now
+    # always returns a level (projecting one from the containment band when no
+    # pivot is in reach), so this is normally unreachable — it fires only if
+    # that path itself fails, e.g. a df too short to compute volatility.
+    # min_periods=1 so a short window still yields a number rather than NaN.
+    if support is None:
+        support = round(float(df["Low"].rolling(252, min_periods=1)
+                              .min().iloc[-1]), 2)
+        s_str   = 1
+    if resistance is None:
+        resistance = round(float(df["High"].rolling(252, min_periods=1)
+                                 .max().iloc[-1]), 2)
+        r_str      = 1
 
     return support, resistance, s_str, r_str
 
