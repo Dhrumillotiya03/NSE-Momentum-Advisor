@@ -586,7 +586,7 @@ def buy_candidates():
 
 def position_sizes(capital=None):
     """Exact quantities the strategy would buy right now — the same
-    inverse-vol / MAX_WEIGHT / regime-exposure / sleeve math as
+    conviction-weighted / MAX_WEIGHT / regime-exposure / sleeve math as
     backtest_portfolio and paper_trader, so 'how much quantity' can never
     be improvised by the LLM. capital: total account value in rupees; if
     omitted, uses the recorded portfolio's total value."""
@@ -606,15 +606,19 @@ def position_sizes(capital=None):
 
     results = core.scan_universe()
     sector_map = core.load_sector_map()
-    from backtest_portfolio import select_top_n_capped
+    from backtest_portfolio import select_top_n_capped, conviction_weights
     scores_only = {s: r["score"] for s, r in results.items()}
     top = select_top_n_capped(scores_only, n, sector_map, sc.MAX_PER_SECTOR)
     if len(results) < n or not top:
         return {"error": f"only {len(results)} eligible names for regime {regime} (need {n})"}
 
-    inv = {s: 1.0 / results[s]["vol_63"] for s in top}
-    tot = sum(inv.values())
-    w = {s: min(v / tot, sc.MAX_WEIGHT) * tot for s, v in inv.items()}
+    # Same conviction-weighted sizing as backtest_portfolio's production
+    # default (strategy_config.CONVICTION_TILT) — do not re-inline plain
+    # inverse-vol here, the two copies already drifted once before (see
+    # core.momentum_score's 2026-07-17 unification note).
+    vols = {s: results[s]["vol_63"] for s in top}
+    raw_w = conviction_weights(scores_only, vols, top, sc.CONVICTION_TILT)
+    w = {s: min(v, sc.MAX_WEIGHT) for s, v in raw_w.items()}
     tot2 = sum(w.values())
     w = {s: v / tot2 for s, v in w.items()}
 
@@ -920,7 +924,7 @@ TOOL_SCHEMAS = [
     {"type": "function", "function": {
         "name": "position_sizes",
         "description": "Exact rupee amounts and share QUANTITIES the strategy would buy "
-                        "right now, per candidate (inverse-vol weights, sleeve split, "
+                        "right now, per candidate (conviction-weighted sizing, sleeve split, "
                         "regime exposure). ALWAYS use this when the user asks how much / "
                         "how many shares / what quantity to buy.",
         "parameters": {"type": "object", "properties": {

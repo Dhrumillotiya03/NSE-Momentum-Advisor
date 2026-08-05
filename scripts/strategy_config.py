@@ -136,6 +136,25 @@ REGIME_NAMES = {
 }
 MAX_WEIGHT = 0.20               # single-name cap (diversification vs concentration)
 
+# CONVICTION-WEIGHTED SIZING — ADOPTED 2026-08-05 (research_conviction_sizing.py,
+# PREREG_conviction_sizing.md). Production sizing was plain inverse-vol, blind
+# to the momentum score's MAGNITUDE — a name scoring 55 and one scoring 21 got
+# sized the same way if their vol matched. conviction_weights() blends
+# inverse-vol with score-proportional sizing: raw_weight = (1/vol)^(1-tilt) *
+# score^tilt. Walk-forward (36 windows): 3/3 tilt levels tested (0.25/0.50/0.75)
+# cleared the bar, monotonically increasing effect (+1.89% / +2.89% / +4.78%
+# mean CAGR delta, all 95% CIs fully excluding zero, wins in 31-33/36 windows).
+# Worst-case drawdown IMPROVED at every tilt (38.9%->34.8-37.0%), ruling out a
+# hidden tail-risk trade — this is the first genuinely adoptable result in this
+# repo's sizing/exposure research line (risk-parity and vol-targeting both
+# failed the same bar). CONVICTION_TILT=0.50 chosen as the robust interior
+# point of a monotonic all-significant range, not the most extreme value that
+# backtested best (0.75 has diminishing MAX_WEIGHT headroom and no evidence
+# outside this history) — same logic already used for REGIME_EXPOSURE/
+# MAX_PER_SECTOR. See the prereg doc for the full adversarial-check writeup
+# (per-window breakdown, turnover-artifact check, early/late window split).
+CONVICTION_TILT = 0.50
+
 # CORRELATION-AWARE (RISK-PARITY) SIZING tested and REJECTED 2026-08-01.
 # Production sizing is plain inverse-vol, which provably ignores correlation
 # between held names — measured diversification ratio only 1.62 on the

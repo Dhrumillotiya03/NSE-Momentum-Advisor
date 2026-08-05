@@ -170,6 +170,40 @@ def momentum_score(close, skip_days=0):
             "vol_63": vol}
 
 
+def trend_quality(close):
+    """RESEARCH — signed R^2 of log(price) vs trading-day-index over the
+    LOOKBACK window (see PREREG_trend_quality_factor.md). Answers "was this
+    return earned via a smooth grind or a lumpy/jumpy path" — two names can
+    share the same momentum_score (same ret/vol) while differing here. Not
+    wired into momentum_score or any selection path; a `score_fn` hook in
+    backtest_portfolio.run_backtest_laggards_only is the only consumer,
+    default None = production behavior unaffected.
+
+    Same window convention as momentum_score's ret_6m leg: close.iloc[-1] is
+    "now", the fitted window ends YESTERDAY (excludes the evaluation bar) —
+    close.iloc[-1-LOOKBACK : -1]. Returns None if there isn't enough history
+    or the window contains a non-positive price (log undefined).
+
+    +1.0 = perfect smooth uptrend, -1.0 = perfect smooth downtrend,
+    ~0 = noisy/flat/no linear trend.
+    """
+    if len(close) < LOOKBACK + 1:
+        return None
+    window = close.iloc[-1 - LOOKBACK: -1]
+    if window.isna().any() or (window <= 0).any():
+        return None
+    y = np.log(window.to_numpy())
+    x = np.arange(len(y), dtype=float)
+    slope, intercept = np.polyfit(x, y, 1)
+    pred = slope * x + intercept
+    ss_res = np.sum((y - pred) ** 2)
+    ss_tot = np.sum((y - y.mean()) ** 2)
+    if ss_tot == 0:
+        return None
+    r2 = 1 - ss_res / ss_tot
+    return float(r2 * np.sign(slope))
+
+
 def compute_score(df):
     """Live wrapper around momentum_score: adds advisory RSI + last price.
     Returns dict(score, ret_6m, ret_3m, vol_63, rsi, price) or None."""

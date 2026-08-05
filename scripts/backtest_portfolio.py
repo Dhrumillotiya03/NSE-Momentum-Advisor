@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 
 import strategy_config as sc
-from core import momentum_score
+from core import momentum_score, trend_quality
 
 DATA_DIR    = "../data/price_data/"
 INDEX_PATH  = "../data/index_data/nifty50.csv"
@@ -431,6 +431,22 @@ def _shrunk_corr(returns, shrink=0.3):
     return pd.DataFrame(shrunk, index=corr.index, columns=corr.columns)
 
 
+def conviction_weights(scores, vols, names, tilt):
+    """Blends inverse-vol sizing with score-proportional sizing:
+        raw_weight[s] = (1/vol[s])^(1-tilt) * score[s]^tilt
+    tilt=0 -> pure inverse-vol (production). tilt=1 -> pure score-proportional
+    (vol ignored entirely) — NOT swept in the pre-registered study, see
+    PREREG_conviction_sizing.md for why. Requires score[s] > 0 for all names
+    (guaranteed by momentum_score's eligibility gate: score = ret_6m/vol_63
+    and ret_6m > 0 is required to be eligible at all).
+
+    Caller renormalizes and applies MAX_WEIGHT after this — same contract as
+    risk_parity_weights and the production inverse-vol path."""
+    raw = {s: (1.0 / vols[s]) ** (1 - tilt) * scores[s] ** tilt for s in names}
+    tot = sum(raw.values())
+    return {s: v / tot for s, v in raw.items()}
+
+
 def risk_parity_weights(returns, vols, names, shrink=0.3, max_iter=200):
     """Equal-risk-contribution weights over `names`, using shrunk correlation
     (see _shrunk_corr) and the SAME vol_63 estimates the rest of the engine
@@ -488,7 +504,7 @@ def risk_parity_weights(returns, vols, names, shrink=0.3, max_iter=200):
 
 def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=None,
                                skip_days=0, trail_stop=None, sizing_fn=None,
-                               regime_fn=None, stage_days=1):
+                               regime_fn=None, stage_days=1, score_fn=None):
     """Same selection/sizing/regime logic as run_backtest, but positions
     still in the new top-N carry over (rebalanced to target weight, cost on
     the delta only) instead of being sold and rebought every 21 days.
@@ -520,7 +536,22 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     whole position at the single close on day i. Models reduced single-print
     risk from spreading a buy over a few sessions. 1 = production behavior
     (single-close fill). RESEARCH-ONLY — see the rejection note in
-    strategy_config.py before re-testing."""
+    strategy_config.py before re-testing.
+
+    score_fn: optional callable({sym: (close_window, momentum_score_result)})
+    -> {sym: float}, replacing the ranking score used by select_top_n_capped.
+    Called ONCE per rebalance date with the WHOLE date's already-eligible
+    pool (momentum_score's gate has already run — score_fn only RE-RANKS,
+    it must never return a score for a symbol not in its input dict, which
+    would silently readmit a name momentum_score rejected). Receiving the
+    full pool rather than one symbol at a time lets score_fn compute
+    cross-sectional stats (e.g. a proper per-date z-score across today's
+    eligible names) instead of only per-name quantities — see
+    PREREG_trend_quality_factor.md, which this exists for.
+    momentum_score_result is the dict momentum_score returned (score,
+    ret_6m, ret_3m, vol_63), so score_fn can blend in any of those plus a
+    second signal derived from close_window (e.g. core.trend_quality).
+    None = production behavior (plain momentum score, unchanged)."""
     dates = matrix.index
     n_dates = len(dates)
     breadth = compute_breadth_series(matrix)
@@ -541,14 +572,27 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
         regime = regime_of(index, date, breadth)
         gated_symbols = liquid_symbols_at(turnover_matrix, i) & set(matrix.columns)
 
-        scores, vols = {}, {}
+        vols = {}
+        eligible = {}   # sym -> (close_window, momentum_score_result)
         for sym in gated_symbols:
             # Canonical shared scorer — see the comment in run_backtest.
-            r = momentum_score(matrix[sym].iloc[:i + 1], skip_days=skip_days)
+            close_window = matrix[sym].iloc[:i + 1]
+            r = momentum_score(close_window, skip_days=skip_days)
             if r is None:
                 continue
-            scores[sym] = r["score"]
+            eligible[sym] = (close_window, r)
             vols[sym] = r["vol_63"]
+
+        # score_fn re-RANKS the already-eligible pool (momentum_score's gate
+        # already ran above); it receives the WHOLE date's pool at once (not
+        # per-symbol) so it can compute cross-sectional stats (e.g. a
+        # z-score across today's eligible names) rather than only per-name
+        # quantities. It must never be able to admit a name momentum_score
+        # rejected — return only scores for symbols already in `eligible`.
+        if score_fn is not None:
+            scores = score_fn(eligible)
+        else:
+            scores = {sym: r["score"] for sym, (_, r) in eligible.items()}
 
         n = sc.REGIME_NAMES[regime]
         exp = sc.REGIME_EXPOSURE[regime]
@@ -584,9 +628,11 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
         if sizing_fn is not None:
             raw_w = sizing_fn(matrix, i, top, vols)
         else:
-            inv = {s: 1.0 / vols[s] for s in top}
-            tot = sum(inv.values())
-            raw_w = {s: v / tot for s, v in inv.items()}
+            # PRODUCTION SIZING since 2026-08-05 (was plain inverse-vol) —
+            # see strategy_config.CONVICTION_TILT and
+            # PREREG_conviction_sizing.md for the walk-forward evidence.
+            # conviction_weights already normalizes (sums to 1).
+            raw_w = conviction_weights(scores, vols, list(top), sc.CONVICTION_TILT)
         # MAX_WEIGHT cap + renormalize applies regardless of sizing method —
         # it's a separate single-name concentration control, not part of the
         # sizing rule itself.

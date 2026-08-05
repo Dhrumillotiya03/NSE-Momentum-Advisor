@@ -14,8 +14,9 @@ every month-end):
     bought at the NEXT session's close.
   - daily: -18% catastrophic stop vs today's close (fires on ANY held name,
     carried or freshly bought).
-  - sizing: inverse-vol weights capped at MAX_WEIGHT, regime exposure —
-    identical to backtest_portfolio.run_backtest_laggards_only.
+  - sizing: conviction-weighted (strategy_config.CONVICTION_TILT, adopted
+    2026-08-05) capped at MAX_WEIGHT, regime exposure — identical to
+    backtest_portfolio.run_backtest_laggards_only.
   - costs: COST per side, charged only on the actual delta traded.
   - GOLD SLEEVE (adopted 2026-07-13): GOLD_ALLOC of TOTAL equity held in
     GOLD_SYMBOL (GOLDBEES), rebalanced to target each month-end (1% drift
@@ -44,7 +45,7 @@ import pandas as pd
 
 import strategy_config as sc
 from core import scan_universe, market_regime, load_stock, load_index
-from backtest_portfolio import select_top_n_capped, load_sector_map
+from backtest_portfolio import select_top_n_capped, load_sector_map, conviction_weights
 from exit_engine import is_last_trading_day_of_month
 
 STATE_PATH = "../data/paper_state.json"
@@ -204,9 +205,13 @@ def step():
         if len(eligible) >= n:
             scores = {s: r["score"] for s, r in eligible.items()}
             top = set(select_top_n_capped(scores, n, load_sector_map(), sc.MAX_PER_SECTOR))
-            inv = {s: 1.0 / eligible[s]["vol_63"] for s in top}
-            tot = sum(inv.values())
-            w = {s: min(v / tot, sc.MAX_WEIGHT) * tot for s, v in inv.items()}
+            # Same conviction-weighted sizing as backtest_portfolio's
+            # production default (strategy_config.CONVICTION_TILT) — do not
+            # re-inline plain inverse-vol, the two copies already drifted
+            # once before (see core.momentum_score's 2026-07-17 unification).
+            vols = {s: eligible[s]["vol_63"] for s in top}
+            raw_w = conviction_weights(scores, vols, list(top), sc.CONVICTION_TILT)
+            w = {s: min(v, sc.MAX_WEIGHT) for s, v in raw_w.items()}
             tot2 = sum(w.values())
             w = {s: v / tot2 for s, v in w.items()}
 

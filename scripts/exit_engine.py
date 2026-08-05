@@ -222,8 +222,9 @@ def main():
                 print(f"    python record_fill.py buy {sym.replace('.NS', '')} <QTY> <FILL_PRICE>")
 
         print(f"\n  All held names still in the new top-N are UNCHANGED (laggards-only —")
-        print(f"  no sell+rebuy). If a held name's weight has drifted from its inverse-vol")
-        print(f"  target, a manual top-up/trim is optional, not required by the mandate.")
+        print(f"  no sell+rebuy). If a held name's weight has drifted from its conviction-")
+        print(f"  weighted target (strategy_config.CONVICTION_TILT), a manual top-up/trim")
+        print(f"  is optional, not required by the mandate.")
 
         # ---- ETF sleeve rebalance (gold + intl, % of TOTAL equity, adopted 2026-07-13) ----
         from portfolio_state import portfolio_value

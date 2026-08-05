@@ -330,6 +330,94 @@ stock_ai/
   filters (double momentum + 50MA) never select a name in its death spiral
   (worst dead pick: -22%, stop-truncated). The edge is NOT a survivorship
   artifact; survivor-panel numbers are, if anything, slightly conservative.
+- CONVICTION-WEIGHTED SIZING ADOPTED 2026-08-05 (research_conviction_sizing.py,
+  PREREG_conviction_sizing.md — part of a broader "state of the art" research
+  program the user opened up: alpha/parameters/portfolio construction all in
+  scope, only monthly cadence + signals-only + cash-equity + F&O-universe
+  held fixed). Production sizing was plain inverse-vol (1/vol_63,
+  MAX_WEIGHT-capped) — blind to how strong the momentum SCORE itself was, a
+  name scoring 55 sized the same as one scoring 21 if vol matched.
+  `backtest_portfolio.conviction_weights(scores, vols, names, tilt)` blends
+  inverse-vol with score-proportional sizing: raw_weight = (1/vol)^(1-tilt) *
+  score^tilt. Walk-forward (36 windows, 3y/3mo-step): tilt in {0.25,0.50,0.75}
+  ALL cleared the pre-registered bar (bootstrap 95% CI excludes zero AND
+  wins >=12/N windows AND DD doesn't worsen >2pp mean) — +1.89%/+2.89%/+4.78%
+  mean CAGR delta, monotonic, wins in 31-33/36 windows, and WORST-CASE
+  drawdown IMPROVED at every tilt (38.9%→34.8-37.0%), not worsened — the
+  first genuinely adoptable result in this repo's whole sizing/exposure
+  research line (risk-parity and vol-targeting both failed the same bar,
+  see below). Adopted tilt=0.50 (`strategy_config.CONVICTION_TILT`) — the
+  robust interior point of a monotonic all-significant range, not the most
+  extreme value, matching how REGIME_EXPOSURE/MAX_PER_SECTOR were chosen.
+  ADVERSARIAL CHECKS run before trusting a result this clean (a lesson from
+  this repo's own history of near-miss false positives): worst-case DD
+  checked separately from mean DD (both improved); per-window breakdown
+  checked for concentration (33 positive/3 negative, no single outlier
+  window driving the mean — ruled out the "one cell doing all the work"
+  trap that caught H5 in the S/R improvement batch); confirmed NOT a
+  turnover/transaction-cost artifact (sizing_fn only reallocates capital
+  among the SAME already-selected top-N, cannot change trade count); an
+  early/late window split was found (2015-2016-start windows averaged
+  +6.96pp delta vs +1.73pp for 2017+ windows) and investigated — ruled out
+  universe-size and "just amplifies an already-strong bull run" explanations
+  (early windows had LOWER baseline return AND lower vol, the opposite of
+  that story), re-ran the bootstrap on ONLY the later windows as a
+  conservative check and it still clears the bar (+1.73%, CI
+  [+0.94%,+2.32%]) — the adoption does not depend on the early era.
+  WIRED CONSISTENTLY: backtest_portfolio.run_backtest_laggards_only's
+  default sizing (was inverse-vol, sizing_fn=None path), paper_trader.py,
+  and ai_assistant.position_sizes() — the latter two had each independently
+  hand-inlined their OWN copy of plain inverse-vol (found while wiring this
+  in; same drift-risk class as the pre-2026-07-17 momentum_score copies).
+  Legacy run_backtest (hard-close engine, kept for historical comparison
+  only) intentionally left on plain inverse-vol — not production.
+  New production baseline (python walk_forward.py --engine laggards_only,
+  standard 19-window/6mo-step config): mean CAGR 33.4%, median 36.0%, mean
+  Sharpe 1.25, mean max DD 21.5%, worst DD 30.2%, 1/19 negative windows.
+  (Prior baseline before this change: 27.18% single-run CAGR/Sharpe
+  1.09/DD 27.65%, wf mean 31.47%/1.24 — see the 2026-08-01 universe-coverage
+  entry above. Re-run before quoting either number; they drift with every
+  data pull.) `core.position_size` (rupee allocation given an already-known
+  weight) is UNCHANGED — it never computed the weight itself, so no
+  behavior to fix there. `full_advisor.py`'s ATR-based per-trade risk
+  sizing is a DIFFERENT, separate mechanism (risk-per-trade off stop
+  distance, not portfolio-weight allocation) — NOT touched, was never part
+  of this study's evidence, would need its own separate validation.
+- CORRELATION-AWARE (RISK-PARITY) SIZING and VOLATILITY-TARGETED EXPOSURE
+  both tested and REJECTED 2026-08-01 — kept here as the reason conviction
+  sizing (above) was framed as a DIFFERENT question, not a re-test of a
+  closed one. Risk-parity (shrunk-covariance equal-risk-contribution
+  weights, `backtest_portfolio.risk_parity_weights`, still in the codebase
+  as a research handle): a wash vs inverse-vol across every shrink/window
+  variant (within ±0.3pp CAGR, 8-12/19 windows) — MAX_PER_SECTOR=2 already
+  does the diversification work a correlation-aware scheme would try to
+  add, so there's no residual structure left to exploit. Vol-targeted
+  exposure: lost to BOTH baseline and a matched unconditional-scaling
+  control, and made worst-case DD WORSE at every calibration tested — de-
+  risking off trailing realized vol mistimes both the drawdown and the
+  recovery. See memory risk-parity-sizing-rejected-2026-08 and
+  vol-target-exposure-rejected-2026-08.
+- TREND-QUALITY SECOND SCORING FACTOR tested and REJECTED 2026-08-05
+  (research_trend_quality_factor.py, PREREG_trend_quality_factor.md) — same
+  research program as conviction sizing above. Hypothesis: a price-only
+  "was this return earned via a smooth grind or a lumpy path" factor
+  (signed R² of log-price vs time over the LOOKBACK window) could add
+  cross-sectional information beyond ret_6m/vol_63. Correlates 0.77 with
+  the existing score (expected, given the eligibility gate already requires
+  positive momentum) but leaves real independent variation. 5 configs
+  tested (3 blend weights + 2 tiebreak-only thresholds), 0/5 cleared the
+  bar — all CIs included zero, best candidate (10%-tiebreak) came closest
+  (+1.14%, CI [-0.23%,+2.31%]) but still failed. Pattern: tiebreak-only
+  reranking consistently beat full blending, and lighter blend weights beat
+  heavier ones — consistent with the high correlation meaning most of what
+  the factor would add is already implicit in the existing score. VALUE
+  and QUALITY factors (P/E, P/B, ROE) were considered and ruled OUT before
+  any code was written: yfinance (already a dependency) only exposes a LIVE
+  snapshot, not point-in-time history (quarterly_financials covers 5
+  quarters, nowhere near the ~10y backtest window) — building them now
+  would mean either a new paid fundamentals vendor or applying TODAY's P/E
+  to 2015-2026 prices, textbook look-ahead bias. Flagged as blocked on a
+  data source, not tested. See memory trend-quality-factor-rejected-2026-08.
 
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
