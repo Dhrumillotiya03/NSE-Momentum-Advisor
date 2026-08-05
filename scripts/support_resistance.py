@@ -454,12 +454,33 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
 # get_levels  (drop-in replacement, backtest-safe)
 # ──────────────────────────────────────────────
 
-def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None):
+def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None,
+               fallback_52w=True):
     """
     Returns (support, resistance, s_strength, r_strength).
     Pass fast=True from sr_backtest for vectorised-only path (no vol profile,
     no delivery IO) — runs ~20x faster, negligible accuracy loss in backtest.
     cur: reference price; defaults to the last close. See get_all_levels.
+
+    fallback_52w: when get_all_levels returns nothing inside the reachable
+    band, fall back to the 52-week extreme (True, the default) or return None
+    (False). The two callers want OPPOSITE behaviour and the difference is not
+    cosmetic:
+
+      MEASUREMENT (sr_backtest, sr_build_touchtable, sr_build_reachtable,
+      research_*) needs True. The P(touch) tables are built by measuring
+      outcomes at whatever distance a level sits; filtering their training
+      data to near levels would hollow out the very far cells the model needs
+      in order to say "unreachable", and would change row counts so the
+      tables stop being comparable to the ones already built.
+
+      DISPLAY (live_ticker, intraday_watch, ai_assistant, full_advisor, core)
+      wants False. Surfacing a 52-week low as "support" when it sits 49% below
+      spot is the exact defect the reachability cap exists to remove — it is
+      real structure, but not reachable in the horizon being asked about.
+
+    Defaulting to True keeps every existing measurement caller byte-identical;
+    display callers opt out explicitly.
     """
     supports, resistances = get_all_levels(df, symbol=symbol, fast=fast, cur=cur)
 
@@ -496,14 +517,15 @@ def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None):
     # source, and a <252-bar rolling window returned NaN — which would have
     # silently changed the touch tables' row counts. Verified against the
     # pre-filter behaviour at n=200/400/600.
-    if support is None:
-        support = round(float(df["Low"].rolling(252, min_periods=1)
-                              .min().iloc[-1]), 2)
-        s_str   = 1
-    if resistance is None:
-        resistance = round(float(df["High"].rolling(252, min_periods=1)
-                                 .max().iloc[-1]), 2)
-        r_str      = 1
+    if fallback_52w:
+        if support is None:
+            support = round(float(df["Low"].rolling(252, min_periods=1)
+                                  .min().iloc[-1]), 2)
+            s_str   = 1
+        if resistance is None:
+            resistance = round(float(df["High"].rolling(252, min_periods=1)
+                                     .max().iloc[-1]), 2)
+            r_str      = 1
 
     return support, resistance, s_str, r_str
 

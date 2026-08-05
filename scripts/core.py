@@ -270,14 +270,23 @@ def confidence_for(score, regime):
 
 # ---------- S/R access ----------
 
-def sr_levels(df, symbol=None, fast=False, cur=None):
+def sr_levels(df, symbol=None, fast=False, cur=None, fallback_52w=False):
     """Wraps support_resistance.get_levels -> (support, resistance, s_strength, r_strength).
     Pass fast=True in any backtest loop over many stocks/dates — see CLAUDE.md gotchas,
     wick_rejection_score's iterrows path hangs without it. cur overrides the reference
     price (default: last close) — pass a live quote so level selection (not just
     distance) reflects where price actually is; leave None for backtests/loggers,
-    which must score against the last completed close only."""
-    return get_levels(df, symbol=symbol, fast=fast, cur=cur)
+    which must score against the last completed close only.
+
+    fallback_52w defaults to FALSE here, unlike get_levels itself. This wrapper
+    is the DISPLAY entry point (live_ticker, ai_assistant, intraday_watch), and
+    a 52-week extreme presented as "support" while sitting 40-50% below spot is
+    the defect the reachability cap exists to remove — live_ticker was showing
+    supports 70-80% away because this path bypassed the cap. Measurement callers
+    import get_levels directly and keep the fallback. Returns None for a side
+    with no reachable level; callers must render that, not assume a number."""
+    return get_levels(df, symbol=symbol, fast=fast, cur=cur,
+                      fallback_52w=fallback_52w)
 
 
 def sr_reach_probability(df, level, direction, forward_days=21):
