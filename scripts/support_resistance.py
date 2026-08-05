@@ -381,15 +381,51 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
     horizon_sigma = day_sigma * (21 ** 0.5)
     min_sep = min(max(horizon_sigma * 0.25, 0.01), 0.06)
 
+    # MAX_REACH (2026-08-05, second half of the same fix). Adding a minimum
+    # separation without a maximum left the opposite failure: a name with no
+    # nearby structure fell through to whatever pivot existed, however distant.
+    # On the 2026-08-05 panel that produced SONACOMS S1 at -29.6% and BSE R1 at
+    # +23.3%, both carrying 4-8% touch probability — levels that will not be
+    # tested this month, so quoting them as support/resistance is close to
+    # meaningless for the question this subsystem answers.
+    #
+    # The cap is read off the model's OWN reachability rather than guessed: the
+    # P(touch) table decays hard with distance, and the decay is
+    # VOLATILITY-DEPENDENT. At a 15d horizon it reads 13.2% at 8-12% distance
+    # for a <25%-vol name but 33.5% for a 45%+ one, so a single fixed
+    # percentage would be too tight for volatile names and too loose for calm
+    # ones — the same reason min_sep is scaled rather than fixed.
+    #
+    # The multiplier is MEASURED off the table, not guessed. Locating the
+    # distance at which P(touch) @15d falls below ~20% gives, per vol bucket:
+    #     <25% vol -> 1.21x the 21d sigma      35-45% -> 0.87x
+    #     25-35%   -> 1.15x                    45%+   -> 0.67x
+    # so ~1.2x is the boundary for calm names and the ratio TIGHTENS for
+    # volatile ones (their sigma grows faster than their reach does). A first
+    # attempt used 2.5x, which was 2-3x too generous and still admitted BSE at
+    # -22.9% — the exact case this cap exists to remove.
+    #
+    # 1.2x, floored at 6% so a very low-vol name keeps a usable window and
+    # capped at 15% (past which the table reads single-digit probability for
+    # every vol bucket, so nothing beyond it is answerable in this horizon).
+    #
+    # This is a DISPLAY/RELEVANCE filter, not a claim the distant pivot is
+    # wrong — it is real structure, just not reachable in the window being
+    # asked about, and the containment band is the right tool for that
+    # question.
+    max_reach = min(max(horizon_sigma * 1.2, 0.06), 0.15)
+
     def _spread(levels, sign):
-        """Keep levels at least `min_sep` from price AND from each other.
+        """Keep levels within a reachable band: at least `min_sep` from price
+        and from each other, and no further than `max_reach`.
 
         Without the pairwise check, S1/S2/S3 can be three points inside one
         cluster — nominally three levels, one piece of information.
         """
         out = []
         for lv in sorted(levels, key=lambda x: -sign * x[0]):
-            if abs(lv[0] - cur) / cur < min_sep:
+            d = abs(lv[0] - cur) / cur
+            if d < min_sep or d > max_reach:
                 continue
             if any(abs(lv[0] - k[0]) / cur < min_sep for k in out):
                 continue
@@ -398,14 +434,19 @@ def get_all_levels(df, lookback_months=24, symbol=None, fast=False, cur=None):
 
     sup_f, res_f = _spread(supports, 1), _spread(resistances, -1)
 
-    # Never return NOTHING because the filter was strict: a far-but-real level
-    # beats no level, and a caller that gets None cannot tell "no structure
-    # here" from "filtered out". Fall back to the unfiltered nearest.
-    if not sup_f and supports:
-        sup_f = sorted(supports, key=lambda x: -x[0])
-    if not res_f and resistances:
-        res_f = sorted(resistances, key=lambda x: x[0])
-
+    # NO FALLBACK, deliberately. An earlier version relaxed the minimum when
+    # the band came up empty, which put ADANIPOWER's S1 back at -0.9% and
+    # ADANIENT's at -1.9% — inside their own min_sep, i.e. exactly the
+    # "levels hugging CMP" problem the filter exists to remove. Relaxing the
+    # maximum instead is equally wrong: it resurfaces the unreachable pivot
+    # for precisely the names that triggered the cap.
+    #
+    # So an empty result STANDS. "No level in the reachable band" is a real,
+    # informative answer — a stock at 93% of its 52w range genuinely has no
+    # support price can plausibly test this month, and inventing one to fill
+    # the column would be the least honest option available. Callers render it
+    # as "—", and the containment band answers the question that a missing
+    # support actually raises ("how far could this fall").
     return sup_f[:3], res_f[:3]
 
 
@@ -435,11 +476,33 @@ def get_levels(df, lookback_days=504, symbol=None, fast=False, cur=None):
     support,    s_str = pick(supports,    "support")
     resistance, r_str = pick(resistances, "resistance")
 
+    # 52-week extreme fallback. This function must ALWAYS return a number:
+    # sr_backtest, sr_build_touchtable and the containment builders call it in
+    # tight loops and a None would change their row counts, so the touch
+    # tables would no longer be comparable to the ones already built.
+    #
+    # Note this deliberately bypasses get_all_levels' reachability band, and
+    # that is correct HERE: the P(touch) tables are keyed on (distance x vol)
+    # and are built by measuring outcomes at whatever distance a level sits,
+    # including far ones. Filtering the training data to near levels would
+    # hollow out exactly the far cells the tables need in order to say "this
+    # is unreachable" — the filter is a DISPLAY concern, and applying it to
+    # the measurement layer would make the model unable to express its own
+    # limits. get_all_levels (the display path) returns an empty list instead;
+    # the two behaviours are intentionally different.
+    # min_periods=1 so a short window (early backtest bars, a recent listing)
+    # still yields a number instead of NaN. Without it, get_all_levels'
+    # reachability band filtering everything out left this fallback as the only
+    # source, and a <252-bar rolling window returned NaN — which would have
+    # silently changed the touch tables' row counts. Verified against the
+    # pre-filter behaviour at n=200/400/600.
     if support is None:
-        support = round(float(df["Low"].rolling(252).min().iloc[-1]), 2)
+        support = round(float(df["Low"].rolling(252, min_periods=1)
+                              .min().iloc[-1]), 2)
         s_str   = 1
     if resistance is None:
-        resistance = round(float(df["High"].rolling(252).max().iloc[-1]), 2)
+        resistance = round(float(df["High"].rolling(252, min_periods=1)
+                                 .max().iloc[-1]), 2)
         r_str      = 1
 
     return support, resistance, s_str, r_str
