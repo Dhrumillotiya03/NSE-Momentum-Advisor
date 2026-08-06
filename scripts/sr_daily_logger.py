@@ -404,14 +404,48 @@ def main():
     # its panel-mates, with no error — that's how the 2026-07-22 gap happened
     # (13/15 stocks stayed on 07-21 for a day, unnoticed until a manual check).
     # Flag it immediately instead: warn on any row dated behind today's max.
+    #
+    # SPLIT INTO TWO CATEGORIES (2026-08-05). A lagging symbol used to get one
+    # generic "hasn't updated yet, re-run later" message regardless of cause —
+    # which is actively wrong advice for a symbol mid dividend/split
+    # adjustment (re-running does nothing; it clears on its own over a few
+    # sessions) and made a real, fixable glitch indistinguishable from that
+    # normal, harmless case. update_prices_kite.py now writes its diagnosis
+    # to corporate_action_watch.json; read it here rather than re-deriving the
+    # same answer with a second set of Kite calls.
     latest = new_df["Date"].max()
     lagging = new_df[new_df["Date"] != latest]
     if not lagging.empty:
-        print(f"\n⚠️  {len(lagging)} symbol(s) logged BEHIND today's latest ({latest}) "
-              f"— their price data hasn't updated yet:")
-        for _, r in lagging.iterrows():
-            print(f"      {r['Symbol']:<14} stuck at {r['Date']}")
-        print("   Re-run later, or check that symbol's price_data/etf_data CSV.")
+        corp_watch = set()
+        try:
+            import json
+            with open("../data/corporate_action_watch.json") as f:
+                watch = json.load(f)
+            if watch.get("updated") == str(datetime.now().date()):
+                corp_watch = set(watch.get("symbols", []))
+        except Exception:
+            pass
+
+        corp = lagging[lagging["Symbol"].isin(corp_watch)]
+        other = lagging[~lagging["Symbol"].isin(corp_watch)]
+
+        if len(other):
+            print(f"\n⚠️  {len(other)} symbol(s) logged BEHIND today's latest "
+                  f"({latest}) — investigate, this is NOT expected:")
+            for _, r in other.iterrows():
+                print(f"      {r['Symbol']:<14} stuck at {r['Date']}")
+            print("   Re-run `python update_prices_kite.py`, or check that "
+                  "symbol's price_data/etf_data CSV.")
+
+        if len(corp):
+            print(f"\nℹ️  {len(corp)} symbol(s) temporarily behind — NOT an "
+                  f"error, nothing to fix: "
+                  + ", ".join(corp["Symbol"].tolist()))
+            print("   These recently had a dividend/split. Kite's raw price "
+                  "and the adjusted archive")
+            print("   briefly disagree until the archive catches up — "
+                  "self-resolves in a few sessions.")
+            print("   Re-running will not speed this up.")
 
 
 if __name__ == "__main__":

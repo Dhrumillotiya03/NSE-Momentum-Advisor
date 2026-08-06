@@ -878,10 +878,61 @@ stock_ai/
   and a high-turnover ETF there would enter the tradable top-200 and could get bought
   by the strategy. support_resistance.load_stock and sr_monthend_analysis fall back
   to etf_data/ automatically
+- PRICE DOWNLOAD SPLIT OUT TO ITS OWN 00:30 IST TIMER (2026-08-06). Kite's
+  historical_data() for a session is NOT final at 18:15 IST — official
+  settlement (Bhavcopy) typically processes after 19:00-20:00 IST, sometimes
+  later. run_daily_log.sh used to call update_prices_kite.py at 18:15 as its
+  first step, which raced that settlement: the overlap-agreement check
+  (AGREE_TOL=0.005) passed because the in-flux value was still close enough
+  to the prior close, but Kite's OWN historical_data() for that same date
+  returned a materially different (now-final) print the next morning — caught
+  live 2026-08-06 as a mass ~350/500-symbol version of the narrower
+  stale-write bug fix_stale_bar.py (below) was built for. FIX: price download
+  moved to `run_price_update.sh` (update_prices_kite.py + trim_partial.py +
+  repair_price_gaps.py), on its own systemd timer `stockai-price-update`
+  (Tue-Sat 00:30 IST — the day-shift because a 00:30 run for Monday's session
+  lands in early Tuesday), logging to cron_price_update_log.log. run_daily_log.sh
+  (still weekdays 18:15 IST) no longer downloads prices — everything in it
+  (data_integrity_check, market_scanner, both S/R loggers, exit_engine,
+  paper_trader, full_advisor, news_watchdog, agent_sim) now reads whatever
+  close run_price_update.sh most recently wrote: one calendar day behind the
+  session that just closed, CONSTANTLY, not a growing lag. Nothing downstream
+  needed same-day prices — the S/R loggers already only ever read the last
+  COMPLETED close, never live (see the S/R section). See memory
+  kite-settlement-lag-2026-08.
+- STALE-BAR AUTO-FIX + CORPORATE-ACTION DIAGNOSIS (2026-08-06,
+  fix_stale_bar.py). Kept as a safety net alongside the 00:30 timer above
+  (a genuinely stale write is still possible — e.g. a symbol whose repair
+  script ran mid-settlement, the original 2026-08-05 ~100-symbol incident
+  this was built for), but should trigger far less often now that price
+  download itself runs after Bhavcopy settles. `update_prices_kite.py`
+  calls `fix_stale_bar.auto_fix()` before its normal append step: for each
+  symbol, if the newest CSV bar disagrees with Kite's current value but
+  EVERY older bar still agrees closely, that's a stale write — silently
+  corrected. If instead several consecutive PRIOR days sit at the same
+  offset (a plateau, allowing up to 2 intervening near-zero-diff "clean"
+  days — a real adjustment settles over a few sessions, not instantly) and
+  that plateau is adjacent to today, that's a genuine dividend/split
+  re-adjustment in progress — left untouched, reported separately. Never
+  conflate the two: a first version checked "does any prior bar disagree at
+  all" and misclassified 292/500 symbols; scanning the whole lookback window
+  for a plateau anywhere (not just adjacent to today) misclassified ANGELONE
+  (an old, already-settled 3-week-old plateau blocking an unrelated fresh
+  glitch). The diagnosis is written to `data/corporate_action_watch.json`
+  (`{"updated": date, "symbols": [...]}`) rather than making `sr_daily_logger`
+  re-derive it with its own Kite calls (risk of the two disagreeing). A
+  SCOPED run (explicit symbols on argv) MERGES into that file rather than
+  overwriting it — a full run replaces the whole list, but a one-symbol
+  manual re-check must not drop every other symbol from today's diagnosis.
+  `sr_daily_logger.py` reads the watch file and splits its "symbol logged
+  behind today" warning into two: real problems ("investigate, NOT
+  expected") vs corporate-action ("informational only, self-resolves,
+  re-running will not speed this up") — before this split, both looked
+  identical to a non-technical operator.
 - OPS CADENCE: NOTHING new needs running daily. run_daily_log.sh (systemd
-  timer stockai-daily, weekdays 18:15 IST, Persistent=true) already runs the
-  downloads + both S/R loggers; it now also rotates cron_daily_log.log at 5MB
-  (it was append-only and unbounded). `./sr_monthly_review.sh` is the ONCE-A-
+  timer stockai-daily, weekdays 18:15 IST, Persistent=true) already runs
+  both S/R loggers plus the rest of the evening pipeline; it now also rotates
+  cron_daily_log.log at 5MB (it was append-only and unbounded). `./sr_monthly_review.sh` is the ONCE-A-
   MONTH read-only review (run after the month's last Tuesday): fixed panel at
   the production horizon, at 21d, at 10d, plus the dynamic panel, with the
   reading notes inline. It writes nothing and is safe to re-run.

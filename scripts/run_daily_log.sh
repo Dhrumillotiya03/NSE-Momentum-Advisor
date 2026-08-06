@@ -25,30 +25,17 @@ fi
 {
     echo "===== $(date) ====="
 
-    # PRICE DATA COMES FROM KITE (2026-08-04). The old download_*.py scripts
-    # re-pulled the ENTIRE history from yfinance every night (2015-onward),
-    # which is why its glitches kept returning: a bar with real Volume but NaN
-    # OHLC, or a session dropped outright, was rewritten nightly however many
-    # times it had been repaired. update_prices_kite.py appends only bars newer
-    # than each file already holds, from the broker's own feed, and never
-    # rewrites history — yfinance's adjusted archive stays the historical
-    # record (Kite's history is UNADJUSTED, so rewriting it would move every
-    # S/R pivot and invalidate the P(touch) tables and backtests).
-    #
-    # If the Kite token has expired the update aborts and the pipeline
-    # continues on existing data rather than silently falling back to the
-    # source this replaced. Refresh with: python kite_auth.py refresh
-    "$PYTHON" update_prices_kite.py || echo "[pipeline] Kite update failed — continuing on existing data (refresh the token)"
-    "$PYTHON" trim_partial.py
-    # Repair yfinance gaps from Kite before anything reads the CSVs. yfinance
-    # intermittently writes a row with real Volume but NaN OHLC — the file
-    # looks current while every consumer silently drops that bar. 42 of 500
-    # files were affected on 2026-08-04. Only the recent tail is touched, and
-    # only when Kite agrees with the existing series on the overlap.
-    # Kept as a backstop: update_prices_kite handles the normal daily append,
-    # but this also repairs INTERIOR gaps (a NaN-OHLC row or a session missing
-    # behind a newer bar) that predate the switch to Kite.
-    "$PYTHON" repair_price_gaps.py --apply
+    # PRICE DOWNLOAD MOVED OUT (2026-08-06) — now run_price_update.sh at
+    # ~00:30 IST via the stockai-price-update timer, AFTER Kite's Bhavcopy
+    # settlement (typically 19:00-20:00+ IST). Running the Kite pull here at
+    # 18:15 raced that settlement: historical_data() for the just-closed
+    # session wasn't final yet, so ~350/500 symbols got written with a
+    # not-yet-settled value that disagreed with Kite's own data the next
+    # morning. This step (and everything below) now reads whatever close
+    # run_price_update.sh most recently wrote — one calendar day behind the
+    # session that just closed, constantly, which nothing downstream needed
+    # (the S/R loggers already only ever read the last COMPLETED close, never
+    # live — see CLAUDE.md). See memory kite-settlement-lag-2026-08.
     "$PYTHON" data_integrity_check.py || notify-send "stock_ai" "DATA INTEGRITY WARNINGS — check cron_daily_log.log" 2>/dev/null
     "$PYTHON" market_scanner.py eod
     "$PYTHON" sr_daily_logger.py

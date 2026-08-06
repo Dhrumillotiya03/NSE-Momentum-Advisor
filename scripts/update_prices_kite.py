@@ -256,6 +256,31 @@ def main():
 
     print("Loading instrument maps...")
     nse = {i["tradingsymbol"]: i["instrument_token"] for i in kite.instruments("NSE")}
+
+    # AUTO-FIX stale-write glitches before appending today's bar (2026-08-05).
+    # A symbol whose newest stored bar was captured before Kite's own price
+    # for that date had settled will fail the splice check below and get
+    # stuck, looking identical to a genuine data outage to anyone reading the
+    # daily log — the operator has no way to tell "will resolve itself" from
+    # "needs a fix" apart. fix_stale_bar only touches a bar when every OLDER
+    # bar still agrees exactly; a symbol mid-dividend-adjustment (where the
+    # whole history shifts) is left untouched and reported separately, never
+    # silently conflated with a real glitch.
+    if not dry:
+        try:
+            import fix_stale_bar
+            glitches, corp_actions = fix_stale_bar.auto_fix(
+                kite, nse, symbols=only or None, apply=True)
+            if glitches:
+                print(f"Auto-fixed {len(glitches)} stale-write glitch(es): "
+                      + ", ".join(glitches[:15])
+                      + (" ..." if len(glitches) > 15 else ""))
+        except Exception as e:
+            print(f"  (auto-fix skipped: {str(e)[:60]})")
+            corp_actions = []
+    else:
+        corp_actions = []
+
     try:
         idx_map = {i["tradingsymbol"]: i["instrument_token"]
                    for i in kite.instruments("NSE") if i.get("segment") == "INDICES"}
@@ -322,6 +347,48 @@ def main():
         print(f"No Kite token for {len(missing)} symbol(s) — delisted/renamed, "
               f"left untouched: {', '.join(sorted(missing)[:10])}"
               + (" ..." if len(missing) > 10 else ""))
+    # Write the diagnosis for sr_daily_logger to read, rather than having it
+    # make its own Kite calls to re-derive the same answer (which would risk
+    # the two disagreeing about which symbols are corporate-action cases).
+    #
+    # A SCOPED run (explicit symbols on argv, e.g. a manual re-check of one
+    # name) must not blow away the rest of today's diagnosis: overwriting
+    # unconditionally means the last run of the day wins, so a one-symbol
+    # re-run after the nightly full pass would drop every other symbol from
+    # the watch list and sr_daily_logger would misreport them as "investigate,
+    # not expected" instead of "corporate action, ignore". Merge into
+    # today's existing entries instead; only a full (unscoped) run may shrink
+    # the list, since only a full run has re-checked every symbol.
+    import json
+    watch_path = "../data/corporate_action_watch.json"
+    today = str(dt.date.today())
+    if only:
+        try:
+            with open(watch_path) as f:
+                prev = json.load(f)
+            existing = set(prev.get("symbols", [])) if prev.get("updated") == today else set()
+        except Exception:
+            existing = set()
+        merged = sorted((existing - only) | set(corp_actions))
+    else:
+        merged = sorted(corp_actions)
+    with open(watch_path, "w") as f:
+        json.dump({"updated": today, "symbols": merged}, f)
+
+    if corp_actions:
+        # This is the message a non-technical operator actually needs: NOT a
+        # data problem, self-resolves, no action to take. "disagree" alone
+        # gives no way to distinguish this from a real outage — that gap is
+        # what made the 2026-08-05 incident opaque.
+        print(f"\n{len(corp_actions)} symbol(s) among today's 'disagree' rows "
+              f"are mid dividend/split adjustment, NOT stale or broken: "
+              f"{', '.join(corp_actions[:10])}"
+              + (" ..." if len(corp_actions) > 10 else ""))
+        print("  Their whole price history recently shifted by a fixed ratio "
+              "(the archive re-adjusting for a")
+        print("  dividend). This clears on its own in a few sessions as the "
+              "adjustment settles. Nothing to fix,")
+        print("  and re-running will not speed it up.")
 
 
 if __name__ == "__main__":
