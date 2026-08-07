@@ -878,28 +878,40 @@ stock_ai/
   and a high-turnover ETF there would enter the tradable top-200 and could get bought
   by the strategy. support_resistance.load_stock and sr_monthend_analysis fall back
   to etf_data/ automatically
-- PRICE DOWNLOAD SPLIT OUT TO ITS OWN 00:30 IST TIMER (2026-08-06). Kite's
-  historical_data() for a session is NOT final at 18:15 IST — official
-  settlement (Bhavcopy) typically processes after 19:00-20:00 IST, sometimes
-  later. run_daily_log.sh used to call update_prices_kite.py at 18:15 as its
-  first step, which raced that settlement: the overlap-agreement check
-  (AGREE_TOL=0.005) passed because the in-flux value was still close enough
-  to the prior close, but Kite's OWN historical_data() for that same date
-  returned a materially different (now-final) print the next morning — caught
-  live 2026-08-06 as a mass ~350/500-symbol version of the narrower
-  stale-write bug fix_stale_bar.py (below) was built for. FIX: price download
-  moved to `run_price_update.sh` (update_prices_kite.py + trim_partial.py +
-  repair_price_gaps.py), on its own systemd timer `stockai-price-update`
-  (Tue-Sat 00:30 IST — the day-shift because a 00:30 run for Monday's session
-  lands in early Tuesday), logging to cron_price_update_log.log. run_daily_log.sh
-  (still weekdays 18:15 IST) no longer downloads prices — everything in it
-  (data_integrity_check, market_scanner, both S/R loggers, exit_engine,
-  paper_trader, full_advisor, news_watchdog, agent_sim) now reads whatever
-  close run_price_update.sh most recently wrote: one calendar day behind the
-  session that just closed, CONSTANTLY, not a growing lag. Nothing downstream
-  needed same-day prices — the S/R loggers already only ever read the last
-  COMPLETED close, never live (see the S/R section). See memory
-  kite-settlement-lag-2026-08.
+- PRICE DOWNLOAD SPLIT OUT, THEN THE WHOLE PIPELINE MERGED BACK INTO ONE
+  (2026-08-06, then 2026-08-07). Kite's historical_data() for a session is
+  NOT final at 18:15 IST — official settlement (Bhavcopy) typically processes
+  after 19:00-20:00 IST, sometimes later. run_daily_log.sh used to call
+  update_prices_kite.py at 18:15 as its first step, which raced that
+  settlement: the overlap-agreement check (AGREE_TOL=0.005) passed because
+  the in-flux value was still close enough to the prior close, but Kite's OWN
+  historical_data() for that same date returned a materially different
+  (now-final) print the next morning — caught live 2026-08-06 as a mass
+  ~350/500-symbol version of the narrower stale-write bug fix_stale_bar.py
+  (below) was built for. First fix (2026-08-06): price download alone moved
+  to a new `run_price_update.sh` on its own ~00:30 IST timer, run_daily_log.sh
+  kept the rest at 18:15. SECOND CHANGE (2026-08-07, user request): merged
+  BACK into ONE pipeline — run_price_update.sh now runs update_prices_kite.py
+  + trim_partial.py + repair_price_gaps.py AND everything run_daily_log.sh
+  used to run at 18:15 (data_integrity_check, market_scanner, both S/R
+  loggers, exit_engine, paper_trader, full_advisor, news_watchdog, agent_sim,
+  exit_shadow, sim_charts), all on the single `stockai-price-update` systemd
+  timer (Tue-Sat 00:30 IST — the day-shift because a 00:30 run for Monday's
+  session lands in early Tuesday; TimeoutStartSec raised 1800->3600 for the
+  longer combined run), logging to the original cron_daily_log.log. The old
+  `stockai-daily` 18:15 timer is DISABLED (`systemctl --user disable --now`)
+  but run_daily_log.sh is kept as a manual/standalone script — it still works
+  if run by hand (e.g. the Desktop launcher), it just no longer fires on its
+  own schedule. Rationale for merging back: with price download already
+  moved post-settlement, nothing downstream needed a separate evening slot —
+  the S/R loggers, exit engine, etc. always only read the last COMPLETED
+  close, never live — so keeping two pipelines just meant two schedules and
+  an ordering to track for no remaining benefit. Net effect: EVERYTHING,
+  including paper trading and advisor calls (previously evening, human-review
+  timing), now lands just after midnight instead — a real behavior change
+  the user explicitly chose over keeping trading/advisory logic on a separate
+  evening timer. See memory kite-settlement-lag-2026-08 and
+  pipeline-merge-2026-08.
 - STALE-BAR AUTO-FIX + CORPORATE-ACTION DIAGNOSIS (2026-08-06,
   fix_stale_bar.py). Kept as a safety net alongside the 00:30 timer above
   (a genuinely stale write is still possible — e.g. a symbol whose repair
@@ -929,9 +941,10 @@ stock_ai/
   expected") vs corporate-action ("informational only, self-resolves,
   re-running will not speed this up") — before this split, both looked
   identical to a non-technical operator.
-- OPS CADENCE: NOTHING new needs running daily. run_daily_log.sh (systemd
-  timer stockai-daily, weekdays 18:15 IST, Persistent=true) already runs
-  both S/R loggers plus the rest of the evening pipeline; it now also rotates
+- OPS CADENCE: NOTHING new needs running daily. run_price_update.sh (systemd
+  timer stockai-price-update, Tue-Sat 00:30 IST, Persistent=true) already
+  runs the full pipeline — price update, both S/R loggers, exit/paper/advisor/
+  agent-sim, everything (see the merge entry above) — and rotates
   cron_daily_log.log at 5MB (it was append-only and unbounded). `./sr_monthly_review.sh` is the ONCE-A-
   MONTH read-only review (run after the month's last Tuesday): fixed panel at
   the production horizon, at 21d, at 10d, plus the dynamic panel, with the

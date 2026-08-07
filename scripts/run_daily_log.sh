@@ -1,4 +1,12 @@
 #!/bin/bash
+# RETIRED FROM THE SCHEDULE (2026-08-07) — merged into run_price_update.sh,
+# which now runs the full pipeline (price update + everything below) on the
+# stockai-price-update timer (~00:30 IST). The stockai-daily 18:15 timer that
+# used to run this file has been disabled. Kept here only as a manual-run
+# script (e.g. the Desktop launcher, or an ad hoc re-run of just this half of
+# the pipeline against whatever prices are already on disk) — it still works
+# standalone, it just no longer fires on its own schedule.
+#
 # Daily download + S/R logging pipeline. Double-click the "Daily SR Log"
 # launcher on the Desktop (or run this directly from scripts/).
 # Output shows live in the terminal AND appends to ../data/cron_daily_log.log.
