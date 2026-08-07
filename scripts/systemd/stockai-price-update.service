@@ -1,0 +1,8 @@
+[Unit]
+Description=stock_ai full nightly pipeline (price update after Bhavcopy settlement + S/R/exit/advisor/paper/sim)
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /home/dhrumil/stock_ai/scripts/run_price_update.sh
+Environment=DISPLAY=:0
+TimeoutStartSec=3600

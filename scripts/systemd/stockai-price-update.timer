@@ -1,0 +1,9 @@
+[Unit]
+Description=Run stock_ai full nightly pipeline at 00:30 IST Tue-Sat (after Bhavcopy settles for the prior session); catch up at next boot if missed
+
+[Timer]
+OnCalendar=Tue..Sat 00:30
+Persistent=true
+
+[Install]
+WantedBy=timers.target
