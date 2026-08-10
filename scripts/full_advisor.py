@@ -322,8 +322,16 @@ def log_calls(regime, buy_list, top_n=8):
         try:
             prev = pd.read_csv(CALLS_LOG, usecols=["date", "symbol"])
             existing = set(zip(prev["date"].astype(str), prev["symbol"]))
-        except Exception:
-            pass
+        except Exception as e:
+            # Do NOT swallow this silently. A read failure here disables the
+            # duplicate guard, so the ledger — a MEASUREMENT record scored by
+            # call_report.py — would start double-counting calls without any
+            # visible symptom. (Happened 2026-08-01..08-10: CALL_COLUMNS grew
+            # by 2 fields while the on-disk header kept 13, so every read
+            # raised ParserError and dedupe was off for 10 days.)
+            print(f"[advisor] WARNING: cannot read {CALLS_LOG} for dedupe "
+                  f"({type(e).__name__}: {e}) — duplicate guard is OFF. "
+                  f"Fix the ledger before trusting call_report.py.")
     rows = []
     for rank, c in enumerate(calls, 1):
         if (c["date"], c["symbol"]) in existing:
@@ -337,8 +345,33 @@ def log_calls(regime, buy_list, top_n=8):
                      "in_strategy_top_n": bool(c.get("in_strategy_top_n")),
                      "rsi": c.get("rsi")})
     if rows:
-        pd.DataFrame(rows, columns=CALL_COLUMNS).to_csv(
-            CALLS_LOG, mode="a", header=not os.path.exists(CALLS_LOG), index=False)
+        new = pd.DataFrame(rows, columns=CALL_COLUMNS)
+        # Appending blind is what broke this ledger once already: when
+        # CALL_COLUMNS gained a field, existing rows kept the OLD header and
+        # every subsequent read raised ParserError. If the on-disk header no
+        # longer matches, REWRITE the file with the union of columns (old rows
+        # get NaN in the new fields, which is the truthful value) instead of
+        # appending a differently-shaped row.
+        header_ok = False
+        if os.path.exists(CALLS_LOG):
+            try:
+                on_disk = list(pd.read_csv(CALLS_LOG, nrows=0).columns)
+                header_ok = on_disk == CALL_COLUMNS
+            except Exception:
+                header_ok = False
+            if not header_ok:
+                try:
+                    old = pd.read_csv(CALLS_LOG, header=0, names=CALL_COLUMNS)
+                except Exception:
+                    old = pd.read_csv(CALLS_LOG)
+                new = pd.concat([old, new], ignore_index=True)
+                new = new.reindex(columns=CALL_COLUMNS)
+                new.to_csv(CALLS_LOG, index=False)
+                print(f"[advisor] ledger header was stale — rewrote "
+                      f"{CALLS_LOG} with {len(new)} rows on current schema")
+                return len(rows)
+        new.to_csv(CALLS_LOG, mode="a",
+                   header=not os.path.exists(CALLS_LOG), index=False)
     return len(rows)
 
 
