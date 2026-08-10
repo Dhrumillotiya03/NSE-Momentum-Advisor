@@ -146,6 +146,21 @@ stock_ai/
   walk-forward evidence (raw daily jumpers mean-revert; the fusion label
   exists precisely because BIOCON +6.4% failed the filter while WELCORP
   +2.2% qualified on day one).
+  Same intraday service ALSO runs log_market_depth.py (2026-08-10,
+  PREREG_slippage_depth_calibration.md, RESEARCH DATA ONLY — infrastructure
+  for Study 4 of the state-of-the-art program, see memory
+  state-of-the-art-program-2026-08): snapshots 5-level bid/ask depth for
+  the F&O-liquid universe (kite.quote()'s depth field — verified present
+  in the same MODE_FULL tick shape live_ticker.py already reads, just not
+  stored) to data/market_depth/depth_YYYY-MM-DD.csv. Kite depth has NO
+  historical endpoint (memory kite-intraday-capability-2026-08) — unlike
+  intraday price bars, this cannot be backfilled, so the logger exists to
+  start the clock, not to run a one-off backfill. Goal: calibrate
+  research_slippage.py's uncalibrated square-root impact constant K
+  against real observed spread/depth instead of an assumed value — the
+  actual calibration is deferred until enough sessions accumulate to
+  design its decision rule against real data characteristics, not a
+  guessed schema.
 - Deployment expectation-setting: hard monthly close ⇒ ALL gains are short-term
   capital gains (20%); realistic net CAGR ≈ gross − STCG drag (≈19.6% gross →
   ~15-16% net; run scripts/research_net_returns.py for the current table).

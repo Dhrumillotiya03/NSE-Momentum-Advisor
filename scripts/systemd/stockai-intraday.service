@@ -1,10 +1,11 @@
 [Unit]
-Description=stock_ai intraday: held-book watcher + universe scanner
+Description=stock_ai intraday: held-book watcher + universe scanner + market depth log
 
 [Service]
 Type=oneshot
 WorkingDirectory=/home/dhrumil/stock_ai/scripts
 ExecStart=/home/dhrumil/anaconda3/bin/python intraday_watch.py
 ExecStart=/home/dhrumil/anaconda3/bin/python market_scanner.py
+ExecStart=/home/dhrumil/anaconda3/bin/python log_market_depth.py
 Environment=DISPLAY=:0
 TimeoutStartSec=600
