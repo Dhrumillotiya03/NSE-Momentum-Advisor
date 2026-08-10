@@ -504,7 +504,8 @@ def risk_parity_weights(returns, vols, names, shrink=0.3, max_iter=200):
 
 def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=None,
                                skip_days=0, trail_stop=None, sizing_fn=None,
-                               regime_fn=None, stage_days=1, score_fn=None):
+                               regime_fn=None, stage_days=1, score_fn=None,
+                               exit_signal_fn=None):
     """Same selection/sizing/regime logic as run_backtest, but positions
     still in the new top-N carry over (rebalanced to target weight, cost on
     the delta only) instead of being sold and rebought every 21 days.
@@ -551,7 +552,19 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     momentum_score_result is the dict momentum_score returned (score,
     ret_6m, ret_3m, vol_63), so score_fn can blend in any of those plus a
     second signal derived from close_window (e.g. core.trend_quality).
-    None = production behavior (plain momentum score, unchanged)."""
+    None = production behavior (plain momentum score, unchanged).
+
+    exit_signal_fn: optional callable(symbol, date) -> bool, checked DAILY
+    on already-held positions ONLY (same shape as the trail_stop check
+    just below it), between the catastrophic-stop and trail-stop checks —
+    True means exit today, at today's close, same as those. Can only add
+    an EARLIER exit opportunity; never overrides or bypasses the -18%
+    catastrophic stop, and cannot prevent month-end re-qualification.
+    See PREREG_exit_side_flow_signals.md, which this exists for (delivery%/
+    OI-based early-warning exit signals on existing holdings — a DIFFERENT
+    question from the already-rejected entry-side rank-blend versions of
+    the same data). None = production behavior (only the catastrophic stop
+    and, if set, trail_stop fire intra-hold)."""
     dates = matrix.index
     n_dates = len(dates)
     breadth = compute_breadth_series(matrix)
@@ -692,6 +705,8 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
                     peak = p
                 hit = p < entry_ref * CATASTROPHIC_STOP
                 if trail_stop is not None and p < peak * trail_stop:
+                    hit = True
+                if not hit and exit_signal_fn is not None and exit_signal_fn(s, dates[idx]):
                     hit = True
                 if hit:
                     proceeds = pos["shares"] * p * (1 - COST)

@@ -433,6 +433,66 @@ stock_ai/
   would mean either a new paid fundamentals vendor or applying TODAY's P/E
   to 2015-2026 prices, textbook look-ahead bias. Flagged as blocked on a
   data source, not tested. See memory trend-quality-factor-rejected-2026-08.
+- MARKET-DEPTH LOGGER BUILT 2026-08-10 (log_market_depth.py,
+  PREREG_slippage_depth_calibration.md, Study 4 of the state-of-the-art
+  program) — INFRASTRUCTURE ONLY, calibration deferred. Kite's live
+  5-level bid/ask depth has NO historical endpoint (memory
+  kite-intraday-capability-2026-08), so it can't be backfilled the way
+  data/intraday_data/'s 3 years of price bars were — every session without
+  a logger running is unrecoverable. Snapshots kite.quote()'s depth field
+  (best bid/ask + full 5-level book, JSON-encoded) for
+  core.liquid_universe() every 15 min, piggybacking the existing
+  stockai-intraday timer. Writes to data/market_depth/depth_YYYY-MM-DD.csv
+  (research data only, gitignored, nothing in the trading pipeline reads
+  it). Goal: calibrate research_slippage.py's uncalibrated square-root
+  impact constant K against real spread/depth instead of an assumed value.
+  The actual calibration is deliberately NOT designed yet — its decision
+  rule will be written once enough sessions accumulate to design it
+  against real data characteristics, not a guessed schema.
+- EXIT-SIDE DELIVERY%/OI FLOW SIGNALS tested and REJECTED 2026-08-10
+  (research_exit_flow_signals.py + _pertrigger.py,
+  PREREG_exit_side_flow_signals.md, Study 5 — final study in the
+  state-of-the-art program's original queue). The 2026-08-01 mandate
+  relaxation ("selling any time is permitted") reopened non-price EXIT
+  triggers as fair game — a DIFFERENT mechanism from the already-rejected
+  ENTRY-side rank-blend versions of the same data (delivery% decay /
+  OI unwind on an ALREADY-HELD position, not "is this stock currently
+  elevated" at buy time). Went in with a deliberately LOW prior: 3 prior
+  auxiliary-override mechanisms had already failed on this strategy
+  (entry blend x2, event-veto x1 — see exit-announcements-rejected memory,
+  whose own conclusion states the strategy "doesn't like auxiliary
+  overrides, on ANY mechanism tried so far"). Built a mandatory
+  per-trigger false-positive/true-positive check IN ADVANCE (the
+  announcements study's exact failure mode was passing in aggregate while
+  hiding a bad per-event breakdown). 3/4 configs (delivery-decay 0.70,
+  both OI-unwind variants) rejected cleanly on the aggregate walk-forward
+  bar. Delivery-decay 0.50 PASSED the aggregate bar (+2.52% mean CAGR,
+  95% CI [+0.74%,+4.02%], 29/36 window wins) but the per-trigger check
+  caught it: only 3 raw trigger events fired across the ENTIRE 2015-2026,
+  ~200-name universe (two of them the same stock two weeks apart), all
+  landing in one narrow late-2021/mid-2022 stretch — with 36 OVERLAPPING
+  3-year windows, 2-3 raw events land inside a large overlapping subset of
+  "windows," fully explaining the 29/36 apparent win rate with zero real
+  repeatable signal behind it. NOT a threshold-tuning problem (a 50%+
+  10-day-rolling delivery decay vs entry-time level is measured genuinely
+  rare — 0.0% of days for RELIANCE/TCS/INFY, 1.2-1.6% for more volatile
+  names, over 11 years) — per this study's own pre-registered rule, a
+  mechanism that fails this way CLOSES rather than prompts a search for a
+  better threshold. 4th independent confirmation of the auxiliary-override
+  pattern, now across 3 different data sources (delivery%, OI/PCR,
+  corporate announcements) and 3 different mechanism shapes (entry blend,
+  event-veto, exit flow-decay). Added exit_signal_fn hook to
+  run_backtest_laggards_only (checked daily on held positions, same shape
+  as trail_stop, verified byte-identical to production with it unset) —
+  kept as infrastructure for any future exit-trigger idea, same pattern as
+  trail_stop/sizing_fn/regime_fn/score_fn. See memory
+  exit-flow-signals-rejected-2026-08. This closes the state-of-the-art
+  program's originally-queued 5 studies — see memory
+  state-of-the-art-program-2026-08 for the full program summary: 1
+  adoption (conviction sizing, the one improvement that used information
+  the strategy already computes), the rest rejected (every attempt to
+  bring in an EXTERNAL signal failed), 1 infrastructure build with
+  analysis deferred.
 
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
