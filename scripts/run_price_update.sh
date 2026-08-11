@@ -38,7 +38,8 @@ fi
 
 {
     echo "===== $(date) ====="
-
+    
+    "$PYTHON" kite_auth.py refresh
     "$PYTHON" update_prices_kite.py || echo "[pipeline] Kite update failed — continuing on existing data (refresh the token)"
     "$PYTHON" trim_partial.py
     "$PYTHON" repair_price_gaps.py --apply
@@ -53,6 +54,13 @@ fi
     "$PYTHON" agent_sim.py
     "$PYTHON" exit_shadow.py
     "$PYTHON" sim_charts.py
+    # Live-vs-backtest selection agreement. The gate (gate_report.py) scores
+    # the paper book's RETURN; this checks the paper book is running the
+    # strategy the backtest validated at all. Without it, a bottom-decile
+    # gate month cannot be attributed to market vs code-path drift — and
+    # this repo has shipped that drift three times (sector cap, duplicated
+    # momentum_score, three inlined inverse-vol copies). Read-only.
+    "$PYTHON" divergence_check.py
 
     echo "----- done $(date) -----"
 } 2>&1 | tee -a "$LOG"

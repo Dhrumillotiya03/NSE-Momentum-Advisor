@@ -205,6 +205,32 @@ def step():
         if len(eligible) >= n:
             scores = {s: r["score"] for s, r in eligible.items()}
             top = set(select_top_n_capped(scores, n, load_sector_map(), sc.MAX_PER_SECTOR))
+
+            # Staleness warning (2026-08-11). full_advisor screens candidates
+            # more than MAX_STALE_SESSIONS behind; scan_universe does NOT, so
+            # a name whose CSV stopped updating can still be SELECTED here on
+            # an old close. It cannot be filled at a fake price — close_on()
+            # returns None for a missing bar, so the order just retries and
+            # expires — but it can silently consume one of only n slots.
+            # Warn rather than drop: dropping would change strategy behaviour
+            # on a transient data condition (the 2026-08 cluster was mid
+            # dividend/split adjustment and self-resolving), and this is the
+            # gate's evidence book, so a silent selection change is worse
+            # than a visible warning. See data/corporate_action_watch.json.
+            stale_top = []
+            for s in top:
+                sdf = load_stock(s)
+                if sdf is None or len(sdf) == 0:
+                    continue
+                behind = int(((index_dates > sdf.index[-1])
+                              & (index_dates <= today)).sum())
+                if behind > 3:
+                    stale_top.append((s, sdf.index[-1].date(), behind))
+            if stale_top:
+                print("[paper] WARNING: selected name(s) have stale prices — "
+                      "they may fail to fill and waste a slot:")
+                for s, last, behind in stale_top:
+                    print(f"[paper]   {s} last bar {last} ({behind} sessions behind)")
             # Same conviction-weighted sizing as backtest_portfolio's
             # production default (strategy_config.CONVICTION_TILT) — do not
             # re-inline plain inverse-vol, the two copies already drifted
