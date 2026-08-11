@@ -1079,6 +1079,44 @@ stock_ai/
   expected") vs corporate-action ("informational only, self-resolves,
   re-running will not speed this up") — before this split, both looked
   identical to a non-technical operator.
+- OHLC-UNIFORMITY TEST ADDED 2026-08-11 (fix_stale_bar.py) — the plateau
+  heuristic above is NO LONGER the primary discriminator; it is now a
+  fallback. THE DEADLOCK IT FIXED: `agreement()` splices at the CSV's
+  NEWEST bar, so if that bar is bad the splice is refused, the CSV never
+  advances, and the same bad bar stays the splice point FOREVER —
+  self-perpetuating, never self-heals. Caught live 2026-08-11 with
+  BRITANNIA/CEATLTD/COALINDIA/COFORGE/ICICIBANK stuck 6 sessions at
+  2026-08-04 and PCBL 5 at 08-05, while the operator-facing message still
+  said "self-resolves in a few sessions" — it could not. Each had a REAL
+  late-July dividend whose plateau had ALREADY SETTLED (0.000% days on
+  07-31/08-03), then took an unrelated PARTIAL-CANDLE write on 08-04/05;
+  the plateau walk-back's 2-clean-day tolerance found the settled plateau
+  just beyond the gap and vetoed the repair. Same class as the ANGELONE
+  misclassification, but with the stale plateau ending 1-2 days before the
+  glitch instead of three weeks — i.e. tightening the clean-day tolerance
+  cannot fix this, the two cases are genuinely indistinguishable from
+  close-price history alone. THE FIX measures the bar instead of inferring
+  from history: a corporate action rescales ALL FOUR OHLC fields by an
+  IDENTICAL ratio with volume unchanged (measured CHENNPETRO
+  0.95820/0.95818/0.95822/0.95813 vol 1.007x, INDUSTOWER 0.96377/0.96368/
+  0.96372/0.96373 vol 1.000x); a partial candle CANNOT — the session's Open
+  is final the moment it prints so it sits at EXACTLY parity, while
+  Close/Low/Volume are frozen mid-session (measured: all six stuck names
+  open_ratio 1.00000, close_ratio 1.007-1.012, Kite volume 1.03-3.4x the
+  CSV's). The groups separate by ~100x (genuine actions spread ~9e-5 across
+  fields, partial candles 7.8e-3 to 2.1e-2), so UNIFORM_TOL=0.0005 sits an
+  order of magnitude clear of BOTH sides rather than splitting a close
+  call. A measured non-uniform bar now OVERRIDES the plateau (the plateau
+  only means a corporate action happened recently, NOT that today's bar is
+  part of it); the plateau is consulted only when the bar's own shape is
+  unmeasurable (missing OHLC columns). Full-universe dry-run confirmed
+  narrow scope — exactly 6 fixed, 2 correctly protected, 492 untouched (v1
+  of this logic wrongly flagged 292/500, so a narrow result is the check
+  that matters). After applying, all six advanced 08-04 -> 08-10 on the
+  next update and divergence_check.py reported live/backtest selection
+  IDENTICAL. NOTE 46 of 500 price CSVs have no `Symbol` column at all — a
+  pre-existing schema variation, not damage; append_new builds rows from
+  each file's own columns so it is preserved.
 - OPS CADENCE: NOTHING new needs running daily. run_price_update.sh (systemd
   timer stockai-price-update, Tue-Sat 00:30 IST, Persistent=true) already
   runs the full pipeline — price update, both S/R loggers, exit/paper/advisor/

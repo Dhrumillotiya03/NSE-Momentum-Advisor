@@ -55,6 +55,13 @@ PLATEAU_TOL = 0.001   # consecutive-day differences must match to within this
                        # to count as "the same sustained level" (a plateau)
 PLATEAU_MIN_DAYS = 3  # this many consecutive prior days at the same offset
 
+# Max spread between the four kite/csv OHLC ratios for the bar to count as a
+# uniform rescale (i.e. a real corporate action). Measured on real cases:
+# genuine actions land within ~1e-4 (CHENNPETRO spread 9e-5, INDUSTOWER 9e-5),
+# partial candles are 100x wider (BRITANNIA 7.8e-3, PCBL 2.1e-2). 5e-4 sits an
+# order of magnitude clear of both sides rather than splitting the difference.
+UNIFORM_TOL = 0.0005
+
 
 def check_and_fix(kite, nse, path, sym, apply=False):
     """Returns a dict describing the outcome, or None if there's nothing to do.
@@ -93,6 +100,52 @@ def check_and_fix(kite, nse, path, sym, apply=False):
     new_close = float(k.loc[pd.Timestamp(last_date), "close"])
     delta = abs(new_close / old_close - 1) if old_close else 0.0
 
+    # OHLC-UNIFORMITY TEST — decisive, and deliberately checked BEFORE the
+    # plateau heuristic below, because it MEASURES what the blocking bar is
+    # instead of inferring it from the shape of prior history.
+    #
+    # A corporate action rescales the whole bar: Open, High, Low and Close all
+    # move by the SAME ratio (measured 2026-08-11 — CHENNPETRO 0.95820/0.95818/
+    # 0.95822/0.95813, INDUSTOWER 0.96377/0.96368/0.96372/0.96373; volume
+    # unchanged, ratio 1.00). A PARTIAL/stale candle cannot do that: the
+    # session's Open is already final the moment it prints, so it matches Kite
+    # EXACTLY, while Close/Low/Volume are frozen mid-session (measured same
+    # day — COFORGE/BRITANNIA/ICICIBANK/COALINDIA/CEATLTD/PCBL all had
+    # open_ratio == 1.00000 with close_ratio 1.007-1.012 and Kite volume
+    # 1.03-3.4x the CSV's).
+    #
+    # WHY THIS IS NEEDED: those six symbols each had a REAL dividend in late
+    # July whose plateau had already SETTLED (visible as 0.000% days on 07-31
+    # /08-03), and then took an unrelated partial-candle write on 08-04/08-05.
+    # The plateau walk-back below allows up to 2 clean days, finds the old
+    # settled plateau just beyond them, and calls it "corporate action in
+    # progress" — so the bar is never repaired, the CSV never advances, and
+    # because agreement() splices at the CSV's newest bar, that same bad bar
+    # stays the splice point forever. Self-perpetuating: all six sat stuck for
+    # 5-6 sessions. Same class of bug as the ANGELONE misclassification, but
+    # with the stale plateau ending 1-2 days before the glitch instead of
+    # three weeks.
+    kbar = k.loc[pd.Timestamp(last_date)]
+    csv_row = good.loc[row_mask].iloc[0]
+    ratios = []
+    for col, src in [("Open", "open"), ("High", "high"),
+                     ("Low", "low"), ("Close", "close")]:
+        if col not in good.columns:
+            continue
+        cv, kv = float(csv_row[col]), float(kbar[src])
+        if pd.notna(cv) and cv > 0 and pd.notna(kv) and kv > 0:
+            ratios.append(kv / cv)
+    # Uniform rescale across all four fields => genuine corporate action.
+    # Non-uniform (Open pinned at parity, Close adrift) => partial/stale write.
+    ohlc_uniform = (len(ratios) == 4
+                    and (max(ratios) - min(ratios)) < UNIFORM_TOL
+                    and abs(sum(ratios) / 4 - 1.0) > STALE_TOL)
+
+    if ohlc_uniform:
+        return {"outcome": "corporate_action", "symbol": sym,
+                "prior_diff_pct": round(abs(sum(ratios) / 4 - 1.0) * 100, 2),
+                "basis": "ohlc_uniform_rescale"}
+
     # PLATEAU CHECK: is TODAY's bar the tail end of a run of PLATEAU_MIN_DAYS+
     # consecutive prior days all sitting at roughly the same offset? That
     # shape is the corporate-action signature — an archive adjustment that
@@ -111,6 +164,9 @@ def check_and_fix(kite, nse, path, sym, apply=False):
     # to 2 clean days between the plateau and today before treating it as
     # unrelated — a real adjustment settling shows a short clean run right
     # before trading resumes at parity, not a long gap.
+    # Only consulted when the OHLC test above was INCONCLUSIVE (bar not a
+    # uniform rescale). If OHLC says "partial candle", that measurement wins —
+    # a settled-but-recent plateau must not veto repairing a fresh glitch.
     tail = prior_diff.tail(PLATEAU_MIN_DAYS + 3)
     is_plateau = False
     if len(tail) >= PLATEAU_MIN_DAYS:
@@ -127,13 +183,27 @@ def check_and_fix(kite, nse, path, sym, apply=False):
                 and (run.max() - run.min()) < PLATEAU_TOL:
             is_plateau = True
 
-    if is_plateau:
+    # A plateau in PRIOR history only means a corporate action happened
+    # recently — not that TODAY's bar is part of it. When the bar itself was
+    # measured non-uniform above (Open at parity, Close adrift), it is a
+    # partial candle sitting AFTER a settled adjustment, and repairing it is
+    # both safe and necessary: leaving it makes it the permanent splice point.
+    # Only treat the plateau as decisive when the bar's own shape is
+    # consistent with a rescale, i.e. it moved roughly as much as the plateau.
+    # `ohlc_uniform` is False here by construction (the uniform case returned
+    # above), so a non-uniform bar means Open/High sit at parity while Close
+    # drifted — measured proof of a partial candle. Only let the plateau
+    # decide when the bar's fields are too incomplete to measure (missing
+    # OHLC columns), never in preference to a successful measurement.
+    bar_shape_unmeasurable = len(ratios) < 4
+    if is_plateau and bar_shape_unmeasurable:
         # Sustained plateau ending at (or just before) today -> a real
         # corporate action (dividend/split), not a stale write. NEVER touch
         # this: overwriting today's bar here would create the exact
         # discontinuity adjustment exists to prevent.
         return {"outcome": "corporate_action", "symbol": sym,
-                "prior_diff_pct": round(float(tail.max()) * 100, 2)}
+                "prior_diff_pct": round(float(tail.max()) * 100, 2),
+                "basis": "prior_plateau"}
 
     if delta < STALE_TOL:
         return None   # already correct, nothing to do
