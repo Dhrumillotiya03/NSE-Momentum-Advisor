@@ -796,10 +796,72 @@ stock_ai/
   first-touch target-vs-stop race (42d from fill, same-day both =
   AMBIGUOUS counted as stop), plus a fill-model-free 21d mark from
   call-day close; aggregates by regime. Measurement only — the ledger must
-  never feed back into scoring/selection. `gate_report.py` (manual, monthly) —
-  scores each completed paper month at its percentile of the production
-  backtest's 21d-return distribution; this is the deployment gate made
-  quantitative (2+ months below p10 = live path diverges, investigate).
+  never feed back into scoring/selection.
+  LEDGER HEADER DRIFT FIXED 2026-08-11: CALL_COLUMNS gained
+  in_strategy_top_n/rsi on 2026-08-01 but log_calls appended under the
+  file's OLD 13-column header, so `call_report.py` raised ParserError on
+  EVERY run for 10 days — silently, since a traceback inside the nightly
+  pipeline scrolls past. Worse, log_calls' dedupe read sits in a bare
+  `except: pass`, so the duplicate guard was OFF that whole time (no
+  duplicates landed only because the pipeline is idempotent per date).
+  log_calls now rewrites the file with the union of columns on any schema
+  change instead of appending a differently-shaped row, and a dedupe read
+  failure prints a loud warning. Backup:
+  data/_quarantine/advisor_calls_log_preheaderfix_2026-08-10.csv. See
+  memory advisor-ledger-header-drift-2026-08 — this is the THIRD
+  measurement-instrument failure of the same family (fake 100% S/R hit
+  rate, July's cash-month scored "consistent", now this), so periodically
+  run every measurement script purely to confirm it still EXECUTES.
+  `gate_report.py` (manual, monthly) —
+  scores each completed paper REBALANCE PERIOD at its percentile of the
+  production backtest's 21d-return distribution; this is the deployment gate
+  made quantitative (2+ periods below p10 = live path diverges, investigate).
+  PERIODS, NOT CALENDAR MONTHS (2026-08-11): it used to group by calendar
+  month, which measures a DIFFERENT object than the reference distribution —
+  the book rotates on the last Tuesday, so calendar-August (07-31→08-31)
+  holds the SEPTEMBER rotation's names for its last ~4 sessions, while every
+  reference return is one 21-session holding period of ONE set of names.
+  Periods now run rebalance-day→rebalance-day via exit_engine.rebalance_day,
+  and a period is not scored until its CLOSING rebalance day is logged (a
+  partial mark is not a result). Adds `deployed` (mean share of equity at
+  risk) + `regime`: REGIME_EXPOSURE caps BEAR at 0.375, so a BEAR period is
+  STRUCTURALLY muted vs a pooled all-regime reference and can land
+  bottom-decile while behaving exactly as designed — READ THOSE COLUMNS
+  BEFORE treating a low percentile as divergence. A regime-conditional
+  reference distribution was considered and REJECTED: 128 periods slice too
+  thin by regime, and it becomes a way to explain away every bad month.
+  `--attrib` gives per-position contribution + the equity-vs-cash-yield
+  split (on a simulated August, ~HALF the return was idle-cash yield, which
+  a bare percentile hides). Gate clock: periods end 08-25, 09-29, 10-27 → 3
+  scored ≈late Oct, 6 ≈late Jan. See memory gate-period-definition-2026-08.
+- `divergence_check.py` (2026-08-11, read-only, in run_price_update.sh) —
+  gate_report scores the paper book's RETURN, which cannot separate "strategy
+  fine, market unkind" from "the LIVE path selects differently than the
+  BACKTEST". This repo has shipped exactly that drift three times (exit_engine
+  missing the sector cap, two drifted momentum_score copies, three inlined
+  inverse-vol copies), so a bottom-decile gate month is uninterpretable
+  without this check. Diffs pool / scores / top-N / conviction weights between
+  core.scan_universe (per-symbol CSVs) and the backtest path (merged matrix).
+  Current: pool + selection + weights IDENTICAL. Score diffs are reported
+  under three headings, only the third being a bug: (1) STALE CSV —
+  load_price_matrix ffills(limit=5), live doesn't; the 2026-08 cluster is all
+  corporate_action_watch.json names, self-resolving; (2) NON-SESSION MATRIX
+  ROWS — the matrix index is the UNION of all symbols' dates and holds 12
+  dates ABSENT from nifty50.csv (New Year's Day, special sessions); a symbol
+  lacking one gets ffilled, shifting its lookback a bar. Prices byte-identical;
+  verified second-order (session-only matrix leaves today's top-4 unchanged) so
+  deliberately NOT "fixed" — changing the matrix index moves every historical
+  backtest number for a sub-noise effect; (3) a diff on FRESH ALIGNED data =
+  real divergence, currently zero. Forward-fill is 0.020% of the post-listing
+  panel but RISING (1→11 symbols over three weeks) — re-check if it climbs.
+  See memory live-backtest-divergence-check-2026-08.
+- PAPER SELECTION STALENESS WARNING (2026-08-11, paper_trader.py):
+  full_advisor screens candidates >MAX_STALE_SESSIONS behind; core.scan_universe
+  does NOT, so a stale name can be SELECTED into the paper book — the gate's own
+  evidence. It cannot fill at a fake price (close_on returns None for a missing
+  bar, so the order retries ≤3 sessions and expires), but it can silently
+  consume one of only n slots. WARNS rather than drops: dropping would change
+  strategy behaviour on a transient, self-resolving data condition.
 - STALE-DATA GUARD ON THE ADVISOR (2026-08-01, full_advisor.py): the nightly
   data_integrity_check.py can WARN on a stale CSV, but nothing stopped
   full_advisor.py from issuing a BUY call quoting a days-old close as
@@ -973,7 +1035,8 @@ stock_ai/
   exit_shadow, sim_charts), all on the single `stockai-price-update` systemd
   timer (Tue-Sat 00:30 IST — the day-shift because a 00:30 run for Monday's
   session lands in early Tuesday; TimeoutStartSec raised 1800->3600 for the
-  longer combined run), logging to the original cron_daily_log.log. The old
+  longer combined run), logging to the original cron_daily_log.log (which
+  lives at `data/cron_daily_log.log`, NOT the repo root). The old
   `stockai-daily` 18:15 timer is DISABLED (`systemctl --user disable --now`)
   but run_daily_log.sh is kept as a manual/standalone script — it still works
   if run by hand (e.g. the Desktop launcher), it just no longer fires on its
