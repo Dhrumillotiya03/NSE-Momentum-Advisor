@@ -449,6 +449,32 @@ stock_ai/
   The actual calibration is deliberately NOT designed yet — its decision
   rule will be written once enough sessions accumulate to design it
   against real data characteristics, not a guessed schema.
+  COLLECTION IS MUCH SLOWER THAN THE SCHEDULE IMPLIES (audited 2026-08-14) —
+  `python log_market_depth.py coverage` prints what was ACTUALLY captured.
+  Four days after the build it held 3 snapshots on ONE day (a full session
+  is ~25), for two independent reasons, both previously silent: (1) the
+  Kite access token was expired for all 6 intraday firings on 08-10 —
+  every other Kite consumer degrades to yfinance/last-close, but depth has
+  NO fallback and just stops, and depth has no historical endpoint so the
+  session is lost PERMANENTLY (now fires a notify-send, deduped once per
+  day, naming the one fix: `python kite_auth.py refresh`); (2) the machine
+  was off during market hours 08-11..08-13 — the intraday timer ran on only
+  9 distinct days in the month to 08-14, so on a laptop used irregularly
+  the depth clock ticks far slower than the calendar. Budget Study 4's
+  timeline off `coverage` output, NOT off elapsed days.
+  EMPTY BOOKS WERE BEING WRITTEN AS DATA (fixed 2026-08-14): market_open_now()
+  runs to 15:45 because intraday_watch reads ~15-min-DELAYED yfinance quotes,
+  but depth is REAL-TIME Kite — after the 15:30 close Kite keeps answering
+  quote() and returns an ALL-ZERO book (price/quantity/orders all 0 at every
+  level). Measured: 0% empty at 15:00 and 15:16, 85% at 15:30:33, 100% after.
+  A zero spread with zero size would poison the very constant K this file
+  exists to calibrate. Now filtered on the BOOK, not the clock (also covers
+  halts/pre-open/illiquid names for free — same principle as fix_stale_bar.py
+  preferring a measured OHLC ratio over an inferred plateau). The existing
+  file was cleaned with the same rule (1000 -> 430 rows, backup
+  data/_quarantine/depth_2026-08-14_precleanup.csv), and `coverage` reports
+  symbols-PER-SNAPSHOT so a mostly-empty near-close snapshot cannot read as
+  a full one.
 - EXIT-SIDE DELIVERY%/OI FLOW SIGNALS tested and REJECTED 2026-08-10
   (research_exit_flow_signals.py + _pertrigger.py,
   PREREG_exit_side_flow_signals.md, Study 5 — final study in the
