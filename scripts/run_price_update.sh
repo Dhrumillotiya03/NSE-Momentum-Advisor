@@ -39,8 +39,29 @@ fi
 {
     echo "===== $(date) ====="
     
-    "$PYTHON" kite_auth.py refresh
-    "$PYTHON" update_prices_kite.py || echo "[pipeline] Kite update failed — continuing on existing data (refresh the token)"
+    # ABORT, don't limp on. Run manually (2026-08-14): kite_auth.py refresh is
+    # INTERACTIVE by design — Kite has no programmatic password login, so a
+    # human must paste a request_token. If that step fails (no stdin, bad
+    # paste, Ctrl-C, expired token), every price call below fails too and the
+    # rest of the pipeline would run happily against a FROZEN archive:
+    # S/R rows, advisor calls, paper-trader steps all written from stale bars,
+    # and each is idempotent per date, so the bad run consumes the date slot a
+    # later good run needs. That is exactly what happened on 2026-08-13/14 —
+    # a full, normal-looking log while 201 of 500 symbols sat frozen at 08-12.
+    # A pipeline whose failure mode is "looks fine" is worse than one that stops.
+    if ! "$PYTHON" kite_auth.py refresh; then
+        echo "[pipeline] ABORT: Kite token refresh failed — nothing downstream ran."
+        echo "[pipeline] Fix: python kite_auth.py refresh   (then re-run this script)"
+        notify-send "stock_ai" "Pipeline ABORTED — Kite token refresh failed" 2>/dev/null
+        exit 1
+    fi
+    if ! "$PYTHON" update_prices_kite.py; then
+        echo "[pipeline] ABORT: price update failed — nothing downstream ran."
+        echo "[pipeline] Downstream steps are idempotent per date; running them"
+        echo "[pipeline] on a stale archive would burn today's slot."
+        notify-send "stock_ai" "Pipeline ABORTED — price update failed" 2>/dev/null
+        exit 1
+    fi
     "$PYTHON" trim_partial.py
     "$PYTHON" repair_price_gaps.py --apply
     "$PYTHON" data_integrity_check.py || notify-send "stock_ai" "DATA INTEGRITY WARNINGS — check cron_daily_log.log" 2>/dev/null
@@ -65,7 +86,19 @@ fi
     echo "----- done $(date) -----"
 } 2>&1 | tee -a "$LOG"
 
+# Propagate the pipeline's real status. `exit 1` inside the { ... } | tee block
+# above only leaves the SUBSHELL — without this the script would fall through
+# and exit 0, reporting success for a run that aborted. PIPESTATUS[0] is the
+# brace block's status (tee's own status is not what we care about).
+STATUS=${PIPESTATUS[0]}
+
 # Keep the window open when launched by double-click
 if [ -t 0 ]; then
-    read -rp "Done. Press Enter to close..."
+    if [ "$STATUS" -ne 0 ]; then
+        read -rp "ABORTED (see messages above). Press Enter to close..."
+    else
+        read -rp "Done. Press Enter to close..."
+    fi
 fi
+
+exit "$STATUS"
