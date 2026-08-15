@@ -44,6 +44,7 @@ Run from scripts/:
 Ctrl-C to exit, or 'q'. Scroll with arrow keys / PgUp/PgDn / Home/End.
 """
 import curses
+import subprocess
 import sys
 import time
 
@@ -233,6 +234,10 @@ class TickerState:
         self.view_first_row = 10
         self.view_off = 0
         self.view_capacity = 0
+        # Symbol whose chart is on screen, or None for the normal table. The
+        # chart is a MODE rather than a separate window/loop so ticks keep
+        # arriving and the price marker stays live while you study it.
+        self.chart_symbol = None
 
 
 def make_ticker(kite, access_token, api_key, state: TickerState):
@@ -354,8 +359,8 @@ def draw_banner(stdscr, w, analytics: StaticAnalytics, state: TickerState):
                 "Support/Resistance anchored to price at launch (restart to refresh); price/high/low/gain/distance are live tick-by-tick.",
                 color("dim"))
     safe_addstr(stdscr, 5, 2,
-                "Click a row (or ↑/↓) to highlight it across all columns; "
-                "click again or Esc to clear.  q / Ctrl-C to exit",
+                "Click a row (or ↑/↓) to highlight it · c = chart with S/R · "
+                "g = full chart window · Esc clears · q / Ctrl-C to exit",
                 color("dim"))
     safe_addstr(stdscr, 6, 0, "=" * w, color("dim"))
 
@@ -477,7 +482,273 @@ def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytic
     safe_addstr(stdscr, row, X_VERDICT, verdict_s, verdict_attr)
 
 
+# ---------- Chart view ----------
+#
+# Why an IN-TERMINAL chart rather than only shelling out to a real charting
+# app: the question this answers is "is the support/resistance this system
+# printed actually plausible?", and that needs THIS system's levels drawn on
+# the price action. A generic broker/TradingView chart shows neither — you'd
+# be eyeballing a level from one screen against a chart on another. So the
+# levels are overlaid directly, and `g` still pops out a full matplotlib
+# candlestick window for anything the terminal's resolution can't settle.
+#
+# Daily bars, not intraday: the S/R tables are calibrated on daily data over a
+# ~21-day horizon (see CLAUDE.md), so a daily chart is the timeframe the
+# levels actually refer to. Charting intraday here would invite judging a
+# daily-calibrated level against a timeframe it says nothing about.
+
+CHART_BARS = 90     # ~4.5 months of sessions — enough to see where levels came from
+
+
+def chart_series(sym, bars=CHART_BARS):
+    """Recent daily OHLC for the chart. Read-only; returns None if unusable."""
+    df = core.load_stock(sym)
+    if df is None or len(df) < 10:
+        return None
+    cols = {c.lower(): c for c in df.columns}
+    need = ("open", "high", "low", "close")
+    if not all(k in cols for k in need):
+        return None
+    sub = df.tail(bars)
+    return {
+        "dates": list(sub.index),
+        "open": [float(x) for x in sub[cols["open"]]],
+        "high": [float(x) for x in sub[cols["high"]]],
+        "low": [float(x) for x in sub[cols["low"]]],
+        "close": [float(x) for x in sub[cols["close"]]],
+    }
+
+
+def draw_chart(stdscr, state: TickerState, analytics: StaticAnalytics):
+    """Full-screen candlestick chart for state.chart_symbol, with this
+    system's own support/resistance drawn across it and the live price
+    marked. One terminal column per session; each candle uses '│' for the
+    high-low wick and '█' for the open-close body."""
+    stdscr.erase()
+    h, w = stdscr.getmaxyx()
+    sym = state.chart_symbol
+    name = sym.replace(".NS", "")
+
+    series = chart_series(sym)
+    if series is None:
+        safe_addstr(stdscr, 0, 2, f"No usable price history for {name}.", color("red"))
+        safe_addstr(stdscr, 2, 2, "Esc / c to go back", color("dim"))
+        stdscr.refresh()
+        return
+
+    live = state.prices.get(sym) or analytics.prev_close.get(sym)
+    support, resistance, s_str, r_str = analytics.levels.get(
+        sym, (None, None, None, None))
+
+    # ---- header ----
+    safe_addstr(stdscr, 0, 2, f"{name}", curses.A_BOLD)
+    hdr = f"last {fmt_num(live)}" if live else ""
+    rank = analytics.rank.get(sym)
+    sc_row = analytics.scores.get(sym) or {}
+    if rank:
+        hdr += f"   rank {rank}/{analytics.universe_n}"
+    if sc_row.get("score") is not None:
+        hdr += f"   score {sc_row['score']:.1f}"
+    safe_addstr(stdscr, 0, 2 + len(name) + 3, hdr, color("dim"))
+    safe_addstr(stdscr, 0, w - 34, f"{len(series['close'])} daily bars",
+                color("dim"))
+
+    # ---- plot geometry ----
+    top, bottom = 2, h - 4
+    plot_h = bottom - top + 1
+    left = 11                       # room for the price axis labels
+    plot_w = max(1, w - left - 2)
+    if plot_h < 6 or plot_w < 20:
+        safe_addstr(stdscr, 2, 2, "Terminal too small for the chart.", color("red"))
+        safe_addstr(stdscr, 4, 2, "Esc / c to go back", color("dim"))
+        stdscr.refresh()
+        return
+
+    n = min(len(series["close"]), plot_w)
+    o = series["open"][-n:]
+    hi = series["high"][-n:]
+    lo = series["low"][-n:]
+    cl = series["close"][-n:]
+    dates = series["dates"][-n:]
+
+    # Scale to include the LEVELS too, not just price: a level sitting off the
+    # top of the chart is exactly the case you opened the chart to judge.
+    # Build ONE list rather than min(min(lo), *extras): with no levels and no
+    # live price the unpacked generator is empty, leaving min(scalar), which
+    # raises TypeError. A name can legitimately have neither (levels failed to
+    # compute at launch and no tick has arrived yet).
+    span = list(lo) + list(hi) + [v for v in (support, resistance, live) if v]
+    lo_v, hi_v = min(span), max(span)
+    if hi_v <= lo_v:
+        hi_v = lo_v + 1.0
+    pad = (hi_v - lo_v) * 0.04
+    lo_v, hi_v = lo_v - pad, hi_v + pad
+
+    def row_for(price):
+        frac = (price - lo_v) / (hi_v - lo_v)
+        return int(round(bottom - frac * (bottom - top)))
+
+    # ---- price axis ----
+    for i in range(5):
+        p = lo_v + (hi_v - lo_v) * i / 4
+        safe_addstr(stdscr, row_for(p), 0, f"{p:>9,.1f}", color("dim"))
+
+    # ---- horizontal level lines (drawn BEFORE candles so candles win) ----
+    for lvl, pair, label in ((support, "cyan", "S"), (resistance, "yellow", "R")):
+        if not lvl:
+            continue
+        r = row_for(lvl)
+        if top <= r <= bottom:
+            safe_addstr(stdscr, r, left, "┈" * plot_w, color(pair))
+            dist = (lvl / live - 1) * 100 if live else None
+            tag = f" {label} {lvl:,.0f}" + (f" ({dist:+.1f}%)" if dist is not None else "")
+            safe_addstr(stdscr, r, left + 1, tag, color(pair) | curses.A_BOLD)
+
+    # ---- candles ----
+    for i in range(n):
+        x = left + i
+        if x >= w - 1:
+            break
+        r_hi, r_lo = row_for(hi[i]), row_for(lo[i])
+        r_o, r_c = row_for(o[i]), row_for(cl[i])
+        up = cl[i] >= o[i]
+        attr = color("green") if up else color("red")
+        for r in range(min(r_hi, r_lo), max(r_hi, r_lo) + 1):   # wick
+            safe_addstr(stdscr, r, x, "│", attr)
+        for r in range(min(r_o, r_c), max(r_o, r_c) + 1):       # body
+            safe_addstr(stdscr, r, x, "█", attr)
+
+    # ---- live price marker ----
+    if live:
+        r = row_for(live)
+        if top <= r <= bottom:
+            safe_addstr(stdscr, r, left + plot_w, "◄", curses.A_BOLD)
+
+    # ---- footer: dates + the descriptive read ----
+    if dates:
+        safe_addstr(stdscr, bottom + 1, left, str(dates[0].date()), color("dim"))
+        safe_addstr(stdscr, bottom + 1, left + plot_w - 10,
+                    str(dates[-1].date()), color("dim"))
+
+    strength = []
+    if support:
+        strength.append(f"S {support:,.0f} (strength {s_str})")
+    if resistance:
+        strength.append(f"R {resistance:,.0f} (strength {r_str})")
+    safe_addstr(stdscr, h - 2, 2, "   ".join(strength), color("dim"))
+    safe_addstr(stdscr, h - 1, 2,
+                "Esc / c back · g full chart window · q quit    "
+                "levels are from launch (restart to refresh)",
+                color("cyan"))
+    stdscr.refresh()
+
+
+def render_popout(sym, save_to=None):
+    """The matplotlib candlestick chart itself — run in a CHILD process by
+    popout_chart(), or directly for testing (`save_to` writes a PNG instead
+    of opening a window, which is the only way to exercise this headlessly).
+
+    Beyond price + levels this prints the level's REACH PROBABILITY scaled to
+    the real horizon, because "will this level actually be reached?" is the
+    question the chart is being opened to answer, and eyeballing distance
+    alone systematically overrates far levels — that is precisely what the
+    empirical (distance x volatility) table exists to correct.
+    """
+    import matplotlib
+    if save_to:
+        matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.dates as mdates
+
+    import support_resistance as sr
+    import sr_horizon
+
+    s = chart_series(sym, 180)
+    df = core.load_stock(sym)
+    if s is None or df is None:
+        return
+    support, resistance, s_str, r_str = core.sr_levels(df, symbol=sym, fast=True)
+
+    # Horizon = to month-end (the last Tuesday), the same window the S/R
+    # subsystem forecasts over — NOT a flat 21 days. See sr_horizon.
+    try:
+        end = sr_horizon.horizon_end(df.index[-1])
+        # project_calendar_forward is REQUIRED here, not optional polish:
+        # nifty50.csv ends today, so counting sessions to a FUTURE month-end
+        # against the raw calendar returns 0 — and reach_probability_v2 with
+        # forward_days=0 returns None, silently dropping the probability off
+        # the chart. sr_daily_logger already does exactly this projection.
+        cal = sr_horizon.project_calendar_forward(
+            sr_horizon.load_trading_calendar(), end)
+        fwd = sr_horizon.trading_days_until(df.index[-1], end, cal)
+    except Exception:
+        end, fwd = None, None
+
+    def prob_for(level, direction):
+        if not level:
+            return None
+        try:
+            p, _n = sr.reach_probability_v2(df, level, direction,
+                                            forward_days=fwd)
+            return p
+        except Exception:
+            return None
+
+    fig, ax = plt.subplots(figsize=(13, 7))
+    dates = s["dates"]
+    for i in range(len(s["close"])):
+        up = s["close"][i] >= s["open"][i]
+        c = "green" if up else "red"
+        ax.plot([dates[i], dates[i]], [s["low"][i], s["high"][i]], color=c, linewidth=0.8)
+        ax.plot([dates[i], dates[i]], [s["open"][i], s["close"][i]], color=c, linewidth=3.5)
+
+    for lvl, colr, label, direction in (
+            (support, "c", "Support", "down"),
+            (resistance, "orange", "Resistance", "up")):
+        if not lvl:
+            continue
+        p = prob_for(lvl, direction)
+        txt = f"{label} {lvl:,.0f}"
+        if p is not None:
+            txt += f"  —  P(touch) {p}%"
+        ax.axhline(lvl, color=colr, ls="--", label=txt)
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
+    fig.autofmt_xdate()
+    horizon_s = (f"   horizon: {fwd} sessions to {end.date()}"
+                 if end is not None and fwd else "")
+    ax.set_title(f"{sym.replace('.NS','')} — daily, with this system's S/R{horizon_s}")
+    ax.grid(alpha=0.3)
+    ax.legend()
+    plt.tight_layout()
+    if save_to:
+        plt.savefig(save_to)
+    else:
+        plt.show()
+
+
+def popout_chart(sym):
+    """Open the richer matplotlib candlestick window in a SEPARATE process.
+
+    Separate process, not an inline plt.show(): the ticker's websocket and
+    redraw loop must keep running while you study the chart, and plt.show()
+    blocks. It also keeps matplotlib's GUI backend out of the curses process,
+    where the two would fight over the terminal.
+    """
+    try:
+        subprocess.Popen(
+            [sys.executable, "-c",
+             f"import sys; sys.path.insert(0, '.');"
+             f"import live_ticker; live_ticker.render_popout({sym!r})"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
+
+
 def draw(stdscr, state: TickerState, analytics: StaticAnalytics):
+    if getattr(state, "chart_symbol", None):
+        draw_chart(stdscr, state, analytics)
+        return
     stdscr.erase()
     h, w = stdscr.getmaxyx()
 
@@ -667,6 +938,27 @@ def main(stdscr, symbols):
                 ch = -1
             if ch in (ord("q"), ord("Q")):
                 break
+
+            # Chart mode swallows navigation keys: while a chart is up, ↑/↓
+            # must not silently move a selection you cannot see.
+            if state.chart_symbol:
+                if ch in (27, ord("c"), ord("C")):
+                    state.chart_symbol = None
+                elif ch in (ord("g"), ord("G")):
+                    popout_chart(state.chart_symbol)
+                continue
+
+            if ch in (ord("c"), ord("C")):
+                # Chart the selected row; with nothing selected, chart the
+                # first visible one so the key always does something.
+                idx = state.selected if state.selected is not None else state.view_off
+                if 0 <= idx < len(state.symbols):
+                    state.chart_symbol = state.symbols[idx]
+                    state.selected = idx
+            elif ch in (ord("g"), ord("G")):
+                idx = state.selected if state.selected is not None else state.view_off
+                if 0 <= idx < len(state.symbols):
+                    popout_chart(state.symbols[idx])
             elif ch == curses.KEY_MOUSE:
                 # Click a row to highlight it. getmouse() raises if the queue
                 # emptied between the KEY_MOUSE signal and the read, which
