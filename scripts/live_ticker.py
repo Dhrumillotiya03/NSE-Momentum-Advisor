@@ -498,6 +498,12 @@ def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytic
 # daily-calibrated level against a timeframe it says nothing about.
 
 CHART_BARS = 90     # ~4.5 months of sessions — enough to see where levels came from
+# The popout window has real pixels rather than terminal cells, so it carries a
+# longer history than the in-terminal chart. 250 NSE sessions ~= 1 calendar
+# year (measured on real data: 250 bars spans exactly 365 days; the 180 this
+# started at was only 8.5 months, which reads as "9 months" and is an odd
+# window to reason about).
+POPOUT_BARS = 250
 
 
 def chart_series(sym, bars=CHART_BARS):
@@ -663,7 +669,7 @@ def render_popout(sym, save_to=None):
     import support_resistance as sr
     import sr_horizon
 
-    s = chart_series(sym, 180)
+    s = chart_series(sym, POPOUT_BARS)
     df = core.load_stock(sym)
     if s is None or df is None:
         return
