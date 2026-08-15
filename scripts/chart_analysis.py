@@ -490,6 +490,124 @@ def summarise(a):
     return " ".join(parts)
 
 
+def summarise_plain(a):
+    """Same read as summarise(), in language that assumes no chart training.
+
+    Built from the STRUCTURED fields (structure, stack, pct_of_range, the
+    numeric deltas), NOT by rewording summarise()'s output — string-matching
+    prose would silently stop translating the moment a reading is reworded,
+    and would fail quietly rather than loudly.
+
+    Deliberately still DESCRIPTIVE, exactly like summarise(): it says what the
+    chart shows, never what to do about it. Plain wording makes the read
+    easier to follow, and must not make it sound like a recommendation.
+    """
+    if "error" in a:
+        return a["error"]
+    out = []
+
+    # trend_structure compares only the LAST TWO swing highs and lows, so
+    # "DOWNTREND" means "the most recent couple of swings pulled back", not
+    # "this stock is in a downtrend". Saying the latter in plain English
+    # produces a flat contradiction on a name that is simultaneously near its
+    # 52-week high (measured on HFCL and GLAND) — the jargon label hid that,
+    # so the plain wording states the actual scope of the measurement.
+    ts = a.get("trend_structure", {})
+    struct = ts.get("structure")
+    if struct == "INSUFFICIENT_SWINGS":
+        out.append("Not enough clear peaks and dips yet to call a direction.")
+    elif struct:
+        out.append({
+        "UPTREND": "Its last couple of peaks and dips were each higher than the "
+                   "ones before — still stepping up.",
+        "DOWNTREND": "Its last couple of peaks and dips were each lower than the "
+                     "ones before — pulling back recently.",
+            "RANGE_OR_TRANSITION": "Its recent peaks and dips don't line up in a "
+                                   "clear direction — choppy for now.",
+        }.get(struct, f"Recent swing pattern: {struct}."))
+
+    ma = a.get("moving_averages", {})
+    stack, pct50 = ma.get("stack", ""), ma.get("pct_vs_ema50")
+    if stack.startswith("BULLISH"):
+        s = "Its short-, medium- and long-term average prices are stacked in the healthy order (short above long)"
+    elif stack.startswith("BEARISH"):
+        s = "Its short-, medium- and long-term average prices are stacked in the weak order (short below long)"
+    elif stack:
+        s = "Its average prices are mixed, with no clean order"
+    else:
+        s = ""
+    if s:
+        if pct50 is not None:
+            s += (f", and it is trading {abs(pct50):.0f}% "
+                  f"{'above' if pct50 >= 0 else 'below'} its 50-day average price")
+        out.append(s + ".")
+
+    rng = a.get("position_in_52w_range", {})
+    if rng:
+        pos, below = rng.get("pct_of_range"), rng.get("pct_below_high")
+        if pos is not None:
+            if pos >= 90:
+                where = "very close to its highest price of the past year"
+            elif pos >= 70:
+                where = "in the upper part of its past-year price range"
+            elif pos >= 30:
+                where = "around the middle of its past-year price range"
+            else:
+                where = "near the low end of its past-year price range"
+            extra = f" (about {abs(below):.0f}% below that high)" if below is not None else ""
+            out.append(f"Price is {where}{extra}.")
+
+    avwap = a.get("anchored_vwap", {})
+    pct_vs = avwap.get("pct_vs_avwap")
+    if pct_vs is not None:
+        out.append("On average, people who bought during this recent move are "
+                   + (f"up about {pct_vs:.0f}%." if pct_vs >= 0
+                      else f"down about {abs(pct_vs):.0f}%."))
+
+    # relative_strength buckets returns by window ('21d'/'63d'/'126d'); the
+    # 126d one is the primary window summarise() reports, and the useful
+    # number inside it is relative_strength_pct (stock minus index).
+    rs = a.get("relative_strength", {})
+    primary = rs.get("126d") or rs.get("63d") or {}
+    excess = primary.get("relative_strength_pct")
+    if excess is not None:
+        excess = float(excess)
+        direction = "better than" if excess >= 0 else "worse than"
+        line = (f"Compared with the overall market it has done {direction} "
+                f"the index by about {abs(excess):.0f} percentage points")
+        trend = str(rs.get("rs_line_trend", "")).upper()
+        if trend == "IMPROVING":
+            line += ", and that gap is still widening"
+        elif trend == "WEAKENING":
+            line += ", but that gap is narrowing"
+        out.append(line + ".")
+
+    vol = a.get("volume", {}).get("reading", "")
+    if "surge" in vol or "expanding" in vol:
+        out.append("Unusually heavy trading activity recently — more people than "
+                   "normal are buying or selling it.")
+    elif "near average" in vol:
+        out.append("Trading activity is normal for this stock.")
+
+    vty = a.get("volatility", {}).get("reading", "")
+    if "squeeze" in vty:
+        out.append("Its daily price swings have gone quiet, which often comes "
+                   "before a bigger move (in either direction).")
+    elif "expansion" in vty:
+        out.append("Its daily price swings have got noticeably bigger.")
+
+    tf = a.get("timeframe_agreement", {})
+    ag = tf.get("status")
+    if ag == "ALIGNED":
+        out.append("The short-term and longer-term pictures agree.")
+    elif ag == "CONFLICTING":
+        out.append("Careful: the short-term and longer-term pictures disagree.")
+    elif ag == "MIXED":
+        out.append("The longer-term picture is less clear than the short-term one.")
+
+    return " ".join(out)
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit("usage: python chart_analysis.py SYMBOL")

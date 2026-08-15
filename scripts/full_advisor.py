@@ -21,7 +21,14 @@ CALL_COLUMNS = ["date", "symbol", "sector", "regime", "rank", "alpha",
                 "price", "buy_at", "target", "stop", "rr", "s_str", "r_str",
                 # added 2026-08-01: lets call_report separate the strategy's
                 # own book from merely-passing names, and flag overbought entries
-                "in_strategy_top_n", "rsi"]
+                "in_strategy_top_n", "rsi",
+                # added 2026-08-15: the PREDICTED chance the limit entry fills
+                # within FILL_WINDOW_DAYS. call_report.py already measures the
+                # REALISED fill rate over the same window, so logging the
+                # forecast alongside it makes the estimate falsifiable later —
+                # otherwise a number is shown to the user that nothing ever
+                # checks.
+                "fill_prob"]
 with open("../config.yaml") as f:
     cfg = yaml.safe_load(f)
 CAPITAL = cfg["capital"]
@@ -190,6 +197,34 @@ def get_trade_levels(df, atr_stop=None):
     rr = round(reward / risk, 2) if risk > 0 else 0
     return buy_at, stop, target, support, resistance, rr, s_str, r_str
 
+# Limit orders here are worked for a few sessions, not indefinitely.
+# call_report.py scores a call as FILLED if the low touches buy_at within 10
+# sessions, so the forecast window matches the measurement window — otherwise
+# the printed probability and the scorecard would be answering different
+# questions.
+FILL_WINDOW_DAYS = 10
+
+
+def fill_probability(df, buy_at):
+    """P(price dips to `buy_at` within FILL_WINDOW_DAYS), or None.
+
+    Reuses the S/R subsystem's empirical (distance x volatility) touch table.
+    That table is calibrated on SWING-PIVOT levels while this is an ATR-derived
+    entry, but it is keyed on distance and volatility rather than on what kind
+    of level it is, so it transfers — the same reasoning CLAUDE.md records for
+    the min-separation change. Treat it as an estimate of "is this a routine
+    pullback or an unusual one", not a precise fill rate; call_report.py
+    measures what actually happened.
+    """
+    try:
+        import support_resistance as sr
+        p, _n = sr.reach_probability_v2(df, buy_at, "down",
+                                        forward_days=FILL_WINDOW_DAYS)
+        return p
+    except Exception:
+        return None
+
+
 def position_size(price, atr):
     stop_dist = 2 * atr
     risk_amt = CAPITAL * RISK_PER_TRADE
@@ -287,7 +322,16 @@ def compute_buy_calls():
                 "overbought": bool(rsi_now > sc.RSI_OVERBOUGHT),
                 # descriptive chart context (chart_analysis.py) — shown to the
                 # human, NEVER used to include/exclude a call
-                "chart": ca.summarise(ca.analyse(df, index=nifty_index)),
+                "chart": ca.summarise_plain(ca.analyse(df, index=nifty_index)),
+                # How likely is this limit entry to actually FILL? The entry
+                # sits BELOW the last close, so the trade only happens if
+                # price dips to it — without this the reader has no way to
+                # tell a routine 1% pullback from one that rarely comes. Uses
+                # the same empirical (distance x volatility) P(touch) table
+                # the S/R subsystem is calibrated on, at FILL_WINDOW_DAYS to
+                # match how call_report.py scores fills. ADVISORY ONLY: it is
+                # displayed, never used to include, exclude or rank a call.
+                "fill_prob": fill_probability(df, entry),
                 "date": str(df.index[-1].date()),
             })
 
@@ -343,7 +387,8 @@ def log_calls(regime, buy_list, top_n=8):
                      "stop": round(c["stop"], 2), "rr": c["rr"],
                      "s_str": c["s_str"], "r_str": c["r_str"],
                      "in_strategy_top_n": bool(c.get("in_strategy_top_n")),
-                     "rsi": c.get("rsi")})
+                     "rsi": c.get("rsi"),
+                     "fill_prob": c.get("fill_prob")})
     if rows:
         new = pd.DataFrame(rows, columns=CALL_COLUMNS)
         # Appending blind is what broke this ledger once already: when
@@ -413,7 +458,16 @@ def main():
         print(f"  {c['symbol']}")
         print(f"  Alpha Score:    {c['alpha']:.4f}")
         print(f"  Current Price:  ₹{c['price']:.2f}")
-        print(f"  Shares:         {c['shares']}")
+        # Label the SIZING BASIS explicitly. `shares` is risk-based sizing
+        # (RISK_PER_TRADE of config.yaml's notional CAPITAL, divided by the
+        # 2xATR stop distance) — it answers "how many shares before the stop
+        # costs me 1% of capital". That is a DIFFERENT mechanism from the
+        # strategy's conviction-weighted portfolio weights, and the two give
+        # different numbers; printing a bare "Shares:" invited reading it as
+        # the strategy's own position size.
+        print(f"  Shares:         {c['shares']}   "
+              f"(risk-sized: ₹{CAPITAL*RISK_PER_TRADE:,.0f} at risk "
+              f"if the stop hits, on ₹{CAPITAL:,.0f} notional)")
         print(f"  Position Value: ₹{c['value']:,.0f}")
         print(f"  ─────────────────────────────────────")
         dist = (c["price"] - c["buy_at"]) / c["price"] * 100
@@ -421,6 +475,10 @@ def main():
         tgt_pct = (c["target"] / c["buy_at"] - 1) * 100
         book = "  ⭐ STRATEGY TOP-N" if c.get("in_strategy_top_n") else ""
         print(f"  📥 Buy at:   ₹{c['buy_at']:.2f}  ({dist:.1f}% below last close){book}")
+        if c.get("fill_prob") is not None:
+            print(f"     ↳ chance price actually dips to it within "
+                  f"{FILL_WINDOW_DAYS} sessions: ~{c['fill_prob']}%   "
+                  f"(else no fill, no trade)")
         print(f"  🎯 Target:   ₹{c['target']:.2f}  ({tgt_pct:+.1f}%)  "
               f"[nearest resistance: {strength_label(c['r_str'])} — {c['r_str']} touches]")
         print(f"  🛑 Stop:     ₹{c['stop']:.2f}  ({stop_pct:+.1f}% from entry)")

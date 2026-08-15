@@ -150,6 +150,11 @@ def chart_analysis(symbol):
     if "error" not in a:
         a["symbol"] = symbol
         a["summary"] = ca.summarise(a)
+        # Jargon-free version of the same read. Given to the LLM alongside the
+        # technical one so it can answer a non-expert in their own terms
+        # instead of paraphrasing "higher highs / EMA stack" on the fly and
+        # risking a wrong gloss.
+        a["summary_plain"] = ca.summarise_plain(a)
     return a
 
 
@@ -474,6 +479,8 @@ def horizon_advice(symbol, horizon_date=None, entry_price=None):
 
     chart = ca.analyse(df, index=core.load_index())
     out["chart_summary"] = ca.summarise(chart) if "error" not in chart else None
+    out["chart_summary_plain"] = (ca.summarise_plain(chart)
+                                  if "error" not in chart else None)
 
     earnings = earnings_watch(symbol, as_of=data_date, horizon_end_date=h_end)
     if earnings:
