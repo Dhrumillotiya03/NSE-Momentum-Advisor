@@ -217,6 +217,22 @@ class TickerState:
         self.connected = False
         self.last_error = None
         self.scroll = 0        # first visible row; the panel exceeds a screen
+        # Index into `symbols` of the row the user has picked out to follow
+        # across the table (click, or arrow keys). None = nothing selected,
+        # which is the launch state — the highlight is an aid you opt into,
+        # not a cursor you have to keep track of. Display-only, like every
+        # other field here: selecting a row reads nothing and writes nothing.
+        self.selected = None
+        # Viewport geometry, republished by draw() each frame and read by the
+        # mouse handler to map a screen y back to a symbol index. Defaults
+        # matter: draw() returns EARLY when the terminal is too narrow, so
+        # without these a click on a narrow terminal would hit an unset
+        # attribute. view_capacity=0 makes any click fall outside the range
+        # test and be ignored, which is the correct behaviour when no rows
+        # are on screen.
+        self.view_first_row = 10
+        self.view_off = 0
+        self.view_capacity = 0
 
 
 def make_ticker(kite, access_token, api_key, state: TickerState):
@@ -337,7 +353,10 @@ def draw_banner(stdscr, w, analytics: StaticAnalytics, state: TickerState):
     safe_addstr(stdscr, 4, 2,
                 "Support/Resistance anchored to price at launch (restart to refresh); price/high/low/gain/distance are live tick-by-tick.",
                 color("dim"))
-    safe_addstr(stdscr, 5, 2, "Ctrl-C to exit", color("dim"))
+    safe_addstr(stdscr, 5, 2,
+                "Click a row (or ↑/↓) to highlight it across all columns; "
+                "click again or Esc to clear.  q / Ctrl-C to exit",
+                color("dim"))
     safe_addstr(stdscr, 6, 0, "=" * w, color("dim"))
 
 
@@ -373,10 +392,25 @@ def fmt_num(x, decimals=2):
     return f"{x:,.{decimals}f}" if x is not None and x == x else "-"
 
 
-def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytics):
+def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytics,
+              selected=False):
     """Renders one stock as a SINGLE row — every field at a fixed x-position
     matching the header, tight to its actual content (no wasted padding).
-    Watchlist-only: no book/position dependency (see module docstring)."""
+    Watchlist-only: no book/position dependency (see module docstring).
+
+    `selected` paints the row as a solid reverse-video bar (white background,
+    dark text in a normal terminal) so one stock's values can be read straight
+    across the table — the spreadsheet-style row highlight. The bar is drawn
+    across the FULL width first so the gaps BETWEEN columns are highlighted
+    too; a bar with holes in it defeats the purpose of tracing a row.
+
+    On a selected row the per-field colours are deliberately dropped for one
+    uniform attribute. Combining A_REVERSE with each field's own colour
+    "works", but renders as a patchwork of green/red/cyan/yellow BACKGROUNDS
+    across a single row, which is harder to follow than the unhighlighted
+    version — the opposite of what the highlight is for. The colours are
+    still there the moment the row is deselected, and price direction stays
+    readable from the sign of CHG/OPEN."""
     price = state.prices.get(sym)
     open_px = state.day_open.get(sym)
     high_px = state.day_high.get(sym)
@@ -386,34 +420,48 @@ def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytic
     if price is None:
         price = analytics.prev_close.get(sym)  # show yesterday's close until first tick
 
-    name = sym.replace(".NS", "")
-    safe_addstr(stdscr, row, X_SYMBOL, f"{name:<11}", curses.A_BOLD)
+    # One uniform attribute for every field when selected; otherwise each
+    # field keeps its own colour. `hl()` centralises that choice so a field
+    # added later can't silently miss the highlight.
+    bar = curses.A_REVERSE | curses.A_BOLD
 
-    safe_addstr(stdscr, row, X_PRICE, fmt_num(price), curses.A_BOLD)
+    def hl(attr):
+        return bar if selected else attr
+
+    if selected:
+        # Full-width bar UNDER the fields, so inter-column gaps highlight too.
+        safe_addstr(stdscr, row, 0, " " * max(0, w - 1), bar)
+
+    name = sym.replace(".NS", "")
+    safe_addstr(stdscr, row, X_SYMBOL, f"{name:<11}", hl(curses.A_BOLD))
+
+    safe_addstr(stdscr, row, X_PRICE, fmt_num(price), hl(curses.A_BOLD))
 
     if price and open_px:
         chg = (price / open_px - 1) * 100
         chg_s, chg_attr = f"{chg:+.2f}%", (color("green") if chg >= 0 else color("red"))
     else:
         chg_s, chg_attr = "-", 0
-    safe_addstr(stdscr, row, X_CHG, chg_s, chg_attr | curses.A_BOLD)
+    safe_addstr(stdscr, row, X_CHG, chg_s, hl(chg_attr | curses.A_BOLD))
 
-    safe_addstr(stdscr, row, X_HIGH, f"{high_px:,.0f}" if high_px else "-", color("green"))
-    safe_addstr(stdscr, row, X_LOW, f"{low_px:,.0f}" if low_px else "-", color("red"))
+    safe_addstr(stdscr, row, X_HIGH, f"{high_px:,.0f}" if high_px else "-",
+                hl(color("green")))
+    safe_addstr(stdscr, row, X_LOW, f"{low_px:,.0f}" if low_px else "-",
+                hl(color("red")))
 
     if support and price:
         dist = (price / support - 1) * 100
         s_s = f"{support:,.0f} ({dist:+.1f}%)"
     else:
         s_s = "-"
-    safe_addstr(stdscr, row, X_SUPPORT, s_s, color("cyan"))
+    safe_addstr(stdscr, row, X_SUPPORT, s_s, hl(color("cyan")))
 
     if resistance and price:
         dist = (resistance / price - 1) * 100
         r_s = f"{resistance:,.0f} ({dist:+.1f}%)"
     else:
         r_s = "-"
-    safe_addstr(stdscr, row, X_RESIST, r_s, color("yellow"))
+    safe_addstr(stdscr, row, X_RESIST, r_s, hl(color("yellow")))
 
     tags = verdict_for(sym, price, analytics)
     if tags:
@@ -422,6 +470,7 @@ def draw_card(stdscr, row, w, sym, state: TickerState, analytics: StaticAnalytic
     else:
         verdict_s = "-"
         verdict_attr = color("dim")
+    verdict_attr = hl(verdict_attr)
     avail = max(0, w - X_VERDICT - 1)
     if len(verdict_s) > avail:   # rare multi-tag combo — truncate cleanly, not mid-word
         verdict_s = verdict_s[:max(0, avail - 3)] + "..."
@@ -448,19 +497,40 @@ def draw(stdscr, state: TickerState, analytics: StaticAnalytics):
     capacity = max(1, (last_row - first_row + 1) // CARD_HEIGHT)
     total = len(state.symbols)
     max_off = max(0, total - capacity)
+
+    # Keep the selected row on screen. Arrow keys move the SELECTION (Excel-
+    # style) rather than the viewport, so the viewport has to follow it, or
+    # arrowing past the last visible row would silently move an off-screen
+    # cursor. Done before clamping `scroll` so both end up consistent.
+    sel = getattr(state, "selected", None)
+    if sel is not None:
+        sel = max(0, min(sel, total - 1))
+        state.selected = sel
+        if sel < state.scroll:
+            state.scroll = sel
+        elif sel >= state.scroll + capacity:
+            state.scroll = sel - capacity + 1
+
     off = min(max(0, getattr(state, "scroll", 0)), max_off)
     state.scroll = off
+    # Remember the geometry so a mouse click can map a screen y back to a
+    # symbol index without re-deriving (and possibly disagreeing with) it.
+    state.view_first_row, state.view_off, state.view_capacity = first_row, off, capacity
 
     row = first_row
-    for sym in state.symbols[off:off + capacity]:
-        draw_card(stdscr, row, w, sym, state, analytics)
+    for i, sym in enumerate(state.symbols[off:off + capacity]):
+        draw_card(stdscr, row, w, sym, state, analytics,
+                  selected=(state.selected == off + i))
         row += CARD_HEIGHT
 
     if total > capacity:
         shown_hi = min(off + capacity, total)
+        sel_s = (f"   selected: {state.symbols[state.selected].replace('.NS','')}"
+                 if state.selected is not None else "")
         safe_addstr(stdscr, h - 1, 0,
                     f"  {off+1}-{shown_hi} of {total}   "
-                    f"↑/↓ PgUp/PgDn Home/End to scroll, q to quit",
+                    f"↑/↓ PgUp/PgDn Home/End · click to highlight · Esc clears"
+                    f"{sel_s}",
                     color("cyan"))
     stdscr.refresh()
 
@@ -541,6 +611,17 @@ def main(stdscr, symbols):
     curses.init_pair(4, curses.COLOR_CYAN, -1)
     curses.init_pair(5, curses.COLOR_WHITE, -1)   # dim substitute (color_pair 5 used sparingly, A_DIM varies by terminal)
 
+    # Mouse: BUTTON1_CLICKED only, deliberately NOT ALL_MOUSE_EVENTS —
+    # grabbing every event (drag/move) stops the terminal's own text
+    # selection working, so you could no longer copy a price out of the
+    # screen. Wrapped because a terminal without mouse support raises here,
+    # and the keyboard path must keep working on one.
+    try:
+        curses.mousemask(curses.BUTTON1_CLICKED)
+        curses.mouseinterval(0)   # report clicks immediately, don't wait to detect a double-click
+    except Exception:
+        pass
+
     kite = ensure_kite_client(stdscr)
     if kite is None:
         return
@@ -586,19 +667,57 @@ def main(stdscr, symbols):
                 ch = -1
             if ch in (ord("q"), ord("Q")):
                 break
+            elif ch == curses.KEY_MOUSE:
+                # Click a row to highlight it. getmouse() raises if the queue
+                # emptied between the KEY_MOUSE signal and the read, which
+                # happens on some terminals — never let that kill the loop.
+                try:
+                    _id, mx, my, _z, _bstate = curses.getmouse()
+                except Exception:
+                    my = None
+                if my is not None:
+                    idx = (state.view_off
+                           + (my - state.view_first_row) // CARD_HEIGHT)
+                    if (my >= state.view_first_row
+                            and idx < state.view_off + state.view_capacity
+                            and 0 <= idx < len(state.symbols)):
+                        # Clicking the highlighted row again clears it, so the
+                        # mouse alone can both set and unset the highlight.
+                        state.selected = None if state.selected == idx else idx
+            elif ch == 27:            # Esc — clear the highlight
+                state.selected = None
             elif ch == curses.KEY_DOWN:
-                state.scroll += 1
+                # Arrows move the SELECTION once something is selected
+                # (spreadsheet behaviour, and draw() scrolls to follow); with
+                # nothing selected they scroll the list as they always did, so
+                # the pre-existing muscle memory still works untouched.
+                if state.selected is None:
+                    state.scroll += 1
+                else:
+                    state.selected += 1
             elif ch == curses.KEY_UP:
-                state.scroll -= 1
+                if state.selected is None:
+                    state.scroll -= 1
+                else:
+                    state.selected -= 1
             elif ch == curses.KEY_NPAGE:
                 state.scroll += 10
+                if state.selected is not None:
+                    state.selected += 10
             elif ch == curses.KEY_PPAGE:
                 state.scroll -= 10
+                if state.selected is not None:
+                    state.selected -= 10
             elif ch == curses.KEY_HOME:
                 state.scroll = 0
+                if state.selected is not None:
+                    state.selected = 0
             elif ch == curses.KEY_END:
                 state.scroll = len(state.symbols)   # draw() clamps to the max
-            # draw() clamps scroll into range, so no bounds logic is needed here.
+                if state.selected is not None:
+                    state.selected = len(state.symbols) - 1
+            # draw() clamps scroll and selection into range, so no bounds
+            # logic is needed here.
     except KeyboardInterrupt:
         pass
     finally:
