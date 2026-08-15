@@ -238,6 +238,13 @@ class TickerState:
         # chart is a MODE rather than a separate window/loop so ticks keep
         # arriving and the price marker stays live while you study it.
         self.chart_symbol = None
+        # Chart zoom/pan. chart_bars = how many sessions are on screen;
+        # chart_offset = how many bars back from the newest the window ends
+        # (0 = right at the latest bar). Reset whenever a chart is opened, so
+        # every chart starts from the same known view rather than inheriting
+        # wherever the previous symbol was left.
+        self.chart_bars = CHART_BARS
+        self.chart_offset = 0
 
 
 def make_ticker(kite, access_token, api_key, state: TickerState):
@@ -504,10 +511,23 @@ CHART_BARS = 90     # ~4.5 months of sessions — enough to see where levels cam
 # started at was only 8.5 months, which reads as "9 months" and is an odd
 # window to reason about).
 POPOUT_BARS = 250
+# Zoom bounds for the terminal chart. The floor keeps enough bars for the
+# swing structure to still be readable; the ceiling is a practical cap —
+# beyond ~2 years one terminal column per session exceeds any real screen,
+# and draw_chart already clips the window to the plot width anyway.
+MIN_CHART_BARS = 15
+MAX_CHART_BARS = 500
 
 
-def chart_series(sym, bars=CHART_BARS):
-    """Recent daily OHLC for the chart. Read-only; returns None if unusable."""
+def chart_series(sym, bars=CHART_BARS, offset=0):
+    """Daily OHLC window for the chart. Read-only; None if unusable.
+
+    `offset` is how many bars back from the newest the window ENDS, so the
+    chart can be panned into history once zoomed in — zooming without panning
+    only ever tightens the view around the latest bar, which is the half of
+    the feature that matters least when you are checking whether a level held
+    the last time price was there.
+    """
     df = core.load_stock(sym)
     if df is None or len(df) < 10:
         return None
@@ -515,7 +535,11 @@ def chart_series(sym, bars=CHART_BARS):
     need = ("open", "high", "low", "close")
     if not all(k in cols for k in need):
         return None
-    sub = df.tail(bars)
+    end = len(df) - max(0, int(offset))
+    end = max(min(end, len(df)), 1)
+    sub = df.iloc[max(0, end - bars):end]
+    if len(sub) < 2:
+        return None
     return {
         "dates": list(sub.index),
         "open": [float(x) for x in sub[cols["open"]]],
@@ -563,7 +587,14 @@ def draw_chart(stdscr, state: TickerState, analytics: StaticAnalytics):
     sym = state.chart_symbol
     name = sym.replace(".NS", "")
 
-    series = chart_series(sym)
+    series = chart_series(sym, getattr(state, "chart_bars", CHART_BARS),
+                          getattr(state, "chart_offset", 0))
+    if series is None and getattr(state, "chart_offset", 0):
+        # Panned past the start of this symbol's history — snap back to the
+        # newest window rather than showing an empty chart the user then has
+        # to guess their way out of.
+        state.chart_offset = 0
+        series = chart_series(sym, getattr(state, "chart_bars", CHART_BARS))
     if series is None:
         safe_addstr(stdscr, 0, 2, f"No usable price history for {name}.", color("red"))
         safe_addstr(stdscr, 2, 2, "Esc / c to go back", color("dim"))
@@ -598,6 +629,12 @@ def draw_chart(stdscr, state: TickerState, analytics: StaticAnalytics):
         stdscr.refresh()
         return
 
+    # One terminal column per session, so the plot width is a hard ceiling on
+    # how far out the chart can usefully zoom. Publish it so the zoom-out key
+    # can clamp to it: without this, chart_bars keeps climbing past what is
+    # drawable and the next few '-' presses (and the first few '+' presses
+    # back) change nothing on screen, which reads as a broken key.
+    state.chart_max_bars = plot_w
     n = min(len(series["close"]), plot_w)
     o = series["open"][-n:]
     hi = series["high"][-n:]
@@ -693,10 +730,12 @@ def draw_chart(stdscr, state: TickerState, analytics: StaticAnalytics):
         strength.append(f"S {support:,.0f} (strength {s_str})")
     if resistance:
         strength.append(f"R {resistance:,.0f} (strength {r_str})")
+    strength.append("levels are from launch (restart to refresh)")
     safe_addstr(stdscr, h - 2, 2, "   ".join(strength), color("dim"))
+    panned = f" · panned back {state.chart_offset}" if getattr(state, "chart_offset", 0) else ""
     safe_addstr(stdscr, h - 1, 2,
-                "Esc / c back · g full chart window · q quit    "
-                "levels are from launch (restart to refresh)",
+                f"+/- zoom ({len(cl)} bars{panned}) · ←/→ pan · 0 reset · "
+                "g full window · Esc/c back · q quit",
                 color("cyan"))
     stdscr.refresh()
 
@@ -1017,6 +1056,25 @@ def main(stdscr, symbols):
                     state.chart_symbol = None
                 elif ch in (ord("g"), ord("G")):
                     popout_chart(state.chart_symbol)
+                # Zoom is MULTIPLICATIVE: a fixed +/-10 bars is imperceptible
+                # at 250 bars and a huge jump at 20. 1.4x gives a roughly even
+                # feel across the range.
+                elif ch in (ord("+"), ord("=")):          # zoom in
+                    state.chart_bars = max(MIN_CHART_BARS,
+                                           int(state.chart_bars / 1.4))
+                elif ch in (ord("-"), ord("_")):          # zoom out
+                    ceiling = min(MAX_CHART_BARS,
+                                  getattr(state, "chart_max_bars", MAX_CHART_BARS))
+                    state.chart_bars = min(ceiling,
+                                           max(state.chart_bars + 1,
+                                               int(state.chart_bars * 1.4)))
+                elif ch == curses.KEY_LEFT:               # pan back in time
+                    state.chart_offset += max(1, state.chart_bars // 4)
+                elif ch == curses.KEY_RIGHT:              # pan toward today
+                    state.chart_offset = max(
+                        0, state.chart_offset - max(1, state.chart_bars // 4))
+                elif ch == ord("0"):                      # reset the view
+                    state.chart_bars, state.chart_offset = CHART_BARS, 0
                 continue
 
             if ch in (ord("c"), ord("C")):
@@ -1026,6 +1084,11 @@ def main(stdscr, symbols):
                 if 0 <= idx < len(state.symbols):
                     state.chart_symbol = state.symbols[idx]
                     state.selected = idx
+                    # Fresh chart, default view — otherwise the next symbol
+                    # opens wherever the previous one was zoomed and panned to,
+                    # which reads as a rendering bug rather than a carried-over
+                    # setting.
+                    state.chart_bars, state.chart_offset = CHART_BARS, 0
             elif ch in (ord("g"), ord("G")):
                 idx = state.selected if state.selected is not None else state.view_off
                 if 0 <= idx < len(state.symbols):
