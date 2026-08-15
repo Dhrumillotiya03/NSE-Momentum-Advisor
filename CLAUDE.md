@@ -177,6 +177,32 @@ stock_ai/
   folded into production COST (K isn't NSE-calibrated, would launder an
   assumption into a validated number) — re-run before any material
   capital increase.
+- CAPACITY CURVE AT REAL CAPITAL (2026-08-14,
+  research_slippage_capacity.py). The ₹10L above is a config.yaml DEFAULT,
+  not a decision — the real Zerodha book is ₹68L, so the "re-run before
+  scaling capital" trigger was already met and unnoticed (the assumed and
+  actual figures live in different files). USER'S INTENT, asked directly
+  2026-08-14: a ₹10-20L CARVE-OUT, NOT converting the whole book. CAGR
+  drag vs a 27.35% baseline — ₹10L: 0.95/1.89/3.76pp at K=5/10/20; ₹20L:
+  1.34/2.67/5.29pp; ₹68L whole book: 2.46/4.89/9.61pp; ₹2Cr:
+  4.20/8.28/16.08pp. So the planned carve-out is FINE (impact stays at or
+  below the modelled 10bps/side commission until ~K=10) while a full-book
+  conversion would NOT have been. K IS STILL UNCALIBRATED — treat the
+  K=5..20 spread as real uncertainty, not a range to pick from; narrowing
+  it is exactly what log_market_depth.py exists for, which puts the depth
+  collection problem ON THE CRITICAL PATH (depth → K → impact at real
+  capital → is this deployable), not off to the side in research infra.
+  Still NOT folded into production COST, same reasoning as above.
+  METHOD (reusable): %ADV is strictly LINEAR in capital (order value =
+  capital × exposure × weight; ADV is capital-independent), so order sizes
+  are collected ONCE and scaled — verified, not assumed (direct collection
+  at ₹20L reproduces the scaled vector with max abs diff 0.0 across 657
+  orders). Aggregate impact as mean(k·√%ADV) over REAL orders, NOT
+  k·√(median %ADV): impact is concave and order sizes are right-skewed
+  (p99 ≈ 40× median), so collapsing to the median first understates the
+  drag — research_slippage.py's own Part C does this. Tax stacks on top
+  and is the larger drag at this cadence (research_net_returns.py). See
+  memory slippage-capacity-curve-2026-08.
 
 ## Strategy (currently backtested, don't casually re-tune without re-running full backtest)
 - Cash equity only (no derivatives), vol-adjusted momentum, monthly rebalance (21 trading days).
