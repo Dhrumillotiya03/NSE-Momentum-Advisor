@@ -525,6 +525,34 @@ def chart_series(sym, bars=CHART_BARS):
     }
 
 
+def window_extremes(series):
+    """Highest high and lowest low WITHIN the charted window, with dates.
+
+    Deliberately the window's own extremes rather than the all-time ones: a
+    chart showing a year should quote the year's range, the same way "52-week
+    high" means the last 52 weeks. Quoting an all-time high on a 4-month chart
+    would name a price that isn't on screen.
+    """
+    hi_i = max(range(len(series["high"])), key=lambda i: series["high"][i])
+    lo_i = min(range(len(series["low"])), key=lambda i: series["low"][i])
+    return {
+        "high": series["high"][hi_i], "high_date": series["dates"][hi_i],
+        "low": series["low"][lo_i], "low_date": series["dates"][lo_i],
+    }
+
+
+def window_label(series):
+    """Human name for the charted span — '1Y', '6M' — for labelling extremes.
+
+    Derived from the actual dates rather than the bar count, because sessions
+    per month vary with holidays and a name listed mid-window has fewer bars
+    than the request asked for.
+    """
+    days = (series["dates"][-1] - series["dates"][0]).days
+    months = max(1, round(days / 30.44))
+    return f"{months // 12}Y" if months >= 12 else f"{months}M"
+
+
 def draw_chart(stdscr, state: TickerState, analytics: StaticAnalytics):
     """Full-screen candlestick chart for state.chart_symbol, with this
     system's own support/resistance drawn across it and the live price
@@ -636,6 +664,30 @@ def draw_chart(stdscr, state: TickerState, analytics: StaticAnalytics):
         safe_addstr(stdscr, bottom + 1, left + plot_w - 10,
                     str(dates[-1].date()), color("dim"))
 
+    # Window high/low — the charted span's own range, marked on the plot and
+    # spelled out with dates so "how far is this from its high" is answerable
+    # without squinting at the axis.
+    ext = window_extremes({"high": hi, "low": lo, "dates": dates})
+    wl = window_label({"dates": dates})
+    for key, dkey, mark, pair in (("high", "high_date", "▲", "green"),
+                                  ("low", "low_date", "▼", "red")):
+        r = row_for(ext[key])
+        x = left + dates.index(ext[dkey]) if ext[dkey] in dates else None
+        if top <= r <= bottom and x is not None and x < w - 1:
+            safe_addstr(stdscr, r, x, mark, color(pair) | curses.A_BOLD)
+
+    # Say the DIRECTION rather than a signed "away": "+102% away" from the low
+    # reads as though price were somehow further from it than it is.
+    vs_high = (live / ext["high"] - 1) * 100 if live else None
+    vs_low = (live / ext["low"] - 1) * 100 if live else None
+    ext_s = (f"{wl} high {ext['high']:,.0f} ({ext['high_date'].date()})"
+             + (f" · now {abs(vs_high):.1f}% below" if vs_high is not None else "")
+             + f"    {wl} low {ext['low']:,.0f} ({ext['low_date'].date()})"
+             + (f" · now {abs(vs_low):.1f}% above" if vs_low is not None else ""))
+    # Row 1: the plot starts at row 2 and the date footer already owns
+    # bottom+1 (= h-3), so this sits directly under the title instead.
+    safe_addstr(stdscr, 1, 2, ext_s, curses.A_BOLD)
+
     strength = []
     if support:
         strength.append(f"S {support:,.0f} (strength {s_str})")
@@ -718,6 +770,19 @@ def render_popout(sym, save_to=None):
         if p is not None:
             txt += f"  —  P(touch) {p}%"
         ax.axhline(lvl, color=colr, ls="--", label=txt)
+
+    # Window high/low, marked where they actually occurred. Drawn as thin
+    # dotted greys rather than more dashed colour so they read as context
+    # behind the S/R levels, which are the actionable lines on this chart.
+    ext = window_extremes(s)
+    wl = window_label(s)
+    for key, dkey, colr, marker, label in (
+            ("high", "high_date", "dimgrey", "v", f"{wl} high"),
+            ("low", "low_date", "dimgrey", "^", f"{wl} low")):
+        ax.axhline(ext[key], color=colr, ls=":", linewidth=1,
+                   label=f"{label} {ext[key]:,.0f}  ({ext[dkey].date()})")
+        ax.plot([ext[dkey]], [ext[key]], marker=marker, color=colr,
+                markersize=7, zorder=5)
 
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%d %b"))
     fig.autofmt_xdate()
