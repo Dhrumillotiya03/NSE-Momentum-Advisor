@@ -666,6 +666,38 @@ stock_ai/
   symbol — same results, far fewer API calls on a 15-minute timer.
   Loggers stamp HorizonEnd/HorizonDays; rows predating those columns are NaN
   and readers must treat them as 21d.
+- LOGGERS RECORD THE PREVIOUS COMPLETED SESSION (2026-08-19, user spec —
+  `sr_daily_logger.LOG_PREVIOUS_SESSION`, set False to revert). `log_stock`
+  now drops any bar dated today (or later — `>=`, so an NTP-skew future bar
+  goes too) via `drop_today_bar`, so a run at ANY hour produces the identical
+  row. `drop_partial_candle` only removed today's bar before 16:00, so an
+  EVENING run logged today — precisely the 17:00-23:00 window in which Kite's
+  historical_data() has not settled (Bhavcopy ~19:00-20:00+), recording prices
+  that get revised overnight. sr_dynamic_logger imports `log_stock` so it
+  inherits; sr_backtest/sr_build_touchtable do NOT call it and are unaffected;
+  backfill_sr_log still works (a past target date is never "today").
+  The 00:30 pipeline is UNCHANGED — at 00:30 no bar is dated today, so nothing
+  is dropped. Only 16:00-24:00 runs shift. LIVE QUOTES ARE NOW SUPPRESSED in
+  the loggers as a consequence: a live tick describes NOW while the row
+  describes a prior session, and dating a row to one session while pricing it
+  from another is the same two-points-in-time error `--as-of` already avoids.
+  `log_stock` discards a passed `live_price`, and main() skips the fetch.
+- MEASUREMENT-RECORD CONTAMINATION, MEASURED NOT FIXED (2026-08-19,
+  `audit_sr_log.py`, read-only). The above was found by a control test:
+  rebuilding an already-logged date reproduced the ARCHIVE close, not the
+  logged CMP. Auditing the whole log, **296 of 1085 rows (27%)** carry a CMP
+  that matches no archive bar for their own date — whole-panel on 2026-08-03
+  (56), 08-04 (54), 08-13 (59), 08-17 (59), plus a 1-3/day tail through July.
+  Two causes, both now prevented: pre-settlement evening runs, and mid-session
+  runs where the row took the last COMPLETED bar's date but a LIVE tick's
+  price. Effect on measured accuracy (10d, day-0 excluded): removing them
+  moves R1 61.5%→66.1% and overall 45.3%→47.7%, S1 essentially unchanged
+  (+0.1pp) — direction consistent, but ~1.5 SE at n≈250-370 and the clean set
+  is a SUBSET of the full, so NOT significant; don't quote it as a correction.
+  DELIBERATELY NOT REPAIRED: the rows do record what the system saw at the
+  time, and rebuilding them (`backfill_sr_log.py --date`) makes the record
+  uniform at the cost of discarding that. Run the audit before trusting any
+  hit-rate number that spans these dates.
 - LOGGER OUTPUT IS THREE FILES (2026-08-03, user spec). Each logger run writes:
   (1) `sr_daily_log.csv` — the cumulative append-only record, unchanged; this
   is what sr_monthend_analysis reads and must not be rotated or truncated.

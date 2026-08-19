@@ -146,9 +146,25 @@ def main():
     log_df = pd.read_csv(LOG_PATH)
     watchlist = {s.replace(".NS", "") for s in L.WATCHLIST}
 
-    print(f"Scope: WATCHLIST members, dates >= {since}, "
-          f"on days the panel mostly logged.\n")
-    gaps = missing_rows(log_df, watchlist, since=since)
+    if "--date" in argv:
+        # WHOLE-DAY mode: the panel logged NOTHING on this date (the pipeline
+        # simply did not run that day), so there is no partial day for
+        # missing_rows to find — its quorum loop only iterates dates that
+        # already appear in the log. Target every WATCHLIST member directly.
+        # Still point-in-time: build_row truncates each symbol's history to
+        # bars <= the target date, so a run made days later cannot see bars
+        # that did not exist then.
+        target = pd.Timestamp(argv[argv.index("--date") + 1])
+        d = log_df[log_df["Date"] != "AVG"].copy()
+        d["Date"] = pd.to_datetime(d["Date"], errors="coerce")
+        have = set(d[d["Date"] == target]["Symbol"])
+        gaps = [(s, target) for s in sorted(watchlist) if s not in have]
+        print(f"Scope: WHOLE DAY {target.date()} — {len(gaps)} WATCHLIST "
+              f"symbol(s) missing ({len(have)} already present).\n")
+    else:
+        print(f"Scope: WATCHLIST members, dates >= {since}, "
+              f"on days the panel mostly logged.\n")
+        gaps = missing_rows(log_df, watchlist, since=since)
     if not gaps:
         print("No missing WATCHLIST rows — nothing to backfill.")
         return

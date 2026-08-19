@@ -27,6 +27,14 @@ import sr_horizon as H
 
 LOG_PATH = "../data/sr_daily_log.csv"
 
+# Log the last session STRICTLY BEFORE today, whatever time the run happens
+# (user spec 2026-08-19). Guarantees every row describes a COMPLETED, SETTLED
+# session, so a 17:00 run and a 00:30 run produce the identical row instead of
+# the evening one capturing pre-settlement prices that get revised overnight.
+# See drop_today_bar() for the evidence that motivated this. Set False to
+# restore the old "log whatever the newest bar is" behaviour.
+LOG_PREVIOUS_SESSION = True
+
 # TODAY-ONLY snapshot, OVERWRITTEN each run — a convenience view of "where do
 # things stand right now". Nothing is lost by overwriting: every day is
 # preserved in the monthly file below.
@@ -119,15 +127,54 @@ def drop_partial_candle(df):
     return df
 
 
+def drop_today_bar(df, now=None):
+    """Log the last session STRICTLY BEFORE today — never today's own bar.
+
+    WHY (user spec 2026-08-19). drop_partial_candle above only removes today's
+    bar before 16:00, so an evening run logged TODAY. That is the window in
+    which Kite's historical_data() has not yet settled: official NSE
+    settlement (Bhavcopy) typically finishes 19:00-20:00 IST or later, so a
+    17:00-23:00 run records prices that are still in flux and get revised
+    overnight. Caught in the log itself: the 2026-08-17 rows carried CMP
+    values (RELIANCE 1322.0, WIPRO 179.1, TITAN 5049.0) that match NO bar in
+    the archive — 1322.0 turned out to be 08-18's settled close. Since
+    sr_daily_log.csv is the MEASUREMENT RECORD the S/R model is scored
+    against, a row priced at a number that never existed scores the model on
+    a price that never happened.
+
+    Logging only completed, settled sessions makes the row identical no
+    matter what time of day the pipeline runs. The 00:30 schedule is
+    unaffected — at 00:30 there is no bar dated "today" yet, so nothing is
+    dropped and behaviour is exactly as before. Only 16:00-24:00 runs change.
+
+    Uses >= rather than == so a future-dated bar (clock skew during an NTP
+    sync has produced these here before) is also removed rather than logged.
+    """
+    if not LOG_PREVIOUS_SESSION:
+        return df
+    now = now or datetime.now()
+    while len(df) and df.index[-1].date() >= now.date():
+        df = df.iloc[:-1]
+    return df
+
+
 def log_stock(sym, live_price=None):
     df = load_stock(sym)
     if df is None or len(df) < 60:
         print(f"  ⚠️  {sym}: no data, skipped")
         return None
     df = drop_partial_candle(df)
+    df = drop_today_bar(df)
     if len(df) < 60:
         print(f"  ⚠️  {sym}: no completed data, skipped")
         return None
+
+    # A live tick describes NOW; the bar being logged is a PRIOR session.
+    # Using both would date the row to one session and price it from another
+    # — the same "two points in time in one row" error that --as-of already
+    # suppresses live quotes to avoid. The Date stamp wins; the tick is dropped.
+    if live_price is not None and df.index[-1].date() != datetime.now().date():
+        live_price = None
 
     close      = float(df["Close"].iloc[-1])
     # LIVE CMP when the market is open, else the last completed close. Run at
@@ -356,7 +403,14 @@ def main():
     # during the session, the live price; outside it, that session's CLOSE.
     # Never a stale tick pretending to be either.
     live = {}
-    if is_market_open():
+    if LOG_PREVIOUS_SESSION:
+        # Rows describe the last COMPLETED session, so a live tick has nothing
+        # to contribute — log_stock would discard it anyway (a row cannot be
+        # dated to one session and priced from another). Skipping the fetch
+        # avoids a pointless Kite call on every mid-session run.
+        print("  ⓘ Logging the last COMPLETED session — CMP = that session's "
+              "close (no live fetch).")
+    elif is_market_open():
         syms = [s for s in (normalize_symbol(x) for x in symbols)
                 if s not in INDEX_FILES]
         try:
