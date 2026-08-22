@@ -92,6 +92,24 @@ def is_last_trading_day_of_month(dates, as_of=None):
     up to 3 days late nearly every month (July 2026: fired 07-31, spec says
     07-28) and disagreed with the S/R subsystem's horizon. One definition now
     drives exit_engine, paper_trader, agent_sim and ai_assistant.
+
+    THE TEST IS "FIRST SESSION AT OR AFTER THE TARGET", not equality against a
+    rolled-back date (rewritten 2026-08-22). Comparing `last == rebalance_day`
+    was correct only with a calendar that already extends past the target. The
+    LIVE calendar stops at today, so rebalance_day's holiday roll-back had
+    nothing to roll back to and returned TODAY — making every session in the
+    week before the last Tuesday test True. August 2026 fired on 08-18, 08-19,
+    08-20 and 08-21 against a target of 08-25, and the paper book ran a real
+    rotation on 08-19, four sessions early.
+
+    `last >= target and previous_session < target` is immune to that: it
+    cannot fire before the target, exactly one session satisfies it, and it
+    needs no knowledge of the future calendar. The one deviation from the
+    "roll BACK over a holiday" spec is that when the last Tuesday IS a holiday
+    this fires on the NEXT session rather than the previous one — a day late
+    instead of a day early. That direction is deliberate: firing early is what
+    corrupted the book, and no live check can tell a holiday from a date that
+    simply has not arrived yet.
     """
     if len(dates) == 0:
         return False
@@ -99,18 +117,59 @@ def is_last_trading_day_of_month(dates, as_of=None):
         dates.values if hasattr(dates, "values") else dates, errors="coerce")).dropna()
     if len(idx) == 0:
         return False
-    idx = idx.sort_values()
+    idx = idx.normalize().sort_values()
     last = pd.Timestamp(as_of).normalize() if as_of is not None else idx[-1].normalize()
-    return last == rebalance_day(last.year, last.month, idx)
+    from sr_horizon import last_tuesday_of_month
+    prior = idx[idx < last]
+    if len(prior) == 0:
+        return last >= last_tuesday_of_month(last.year, last.month)
+    prev = prior[-1]
+    # Did a rebalance target fall in the gap (prev, last]? Both months are
+    # checked because a holiday last-Tuesday at the very end of a month pushes
+    # the firing session into the NEXT month — March 2026's target (03-31) is
+    # a holiday with no later March session, so testing only April's target
+    # would skip that rebalance entirely (it did: March 2026 and May 2011
+    # never fired).
+    for y, m in {(prev.year, prev.month), (last.year, last.month)}:
+        target = last_tuesday_of_month(y, m)
+        if prev < target <= last:
+            return True
+    return False
 
 
 def rebalance_day(year, month, trading_days):
     """The actual session the month's rebalance falls on: the last Tuesday of
-    the month, rolled BACK to the previous trading session if it's a holiday."""
+    the month, rolled BACK to the previous trading session if it's a holiday.
+
+    THE ROLL-BACK ONLY APPLIES ONCE THE TARGET IS REACHED (fixed 2026-08-22).
+    It previously took the latest session within 7 days of the target
+    unconditionally — but mid-month the calendar has not got to the target
+    yet, so "the latest session at or before it" is simply TODAY. That made
+    every session in the week before the last Tuesday test as the rebalance
+    day: for August 2026 (target 08-25) is_last_trading_day_of_month returned
+    True on 08-18, 08-19, 08-20 AND 08-21. The paper book duly ran a month-end
+    rotation on 08-19, four sessions early, selling a position and booking a
+    realised loss the strategy never intended — and would have rotated again
+    on each later run.
+
+    A holiday can only be DISTINGUISHED from "not there yet" by whether the
+    calendar has passed the target at all, so when the last known session is
+    still before the target the target is returned unchanged (a future date,
+    which no session equals — correctly firing nothing).
+
+    NOTE this function is only safe to compare for EQUALITY when the calendar
+    already extends past the target (backtests, gate_report). The live daily
+    check must use is_last_trading_day_of_month, which does not depend on the
+    roll-back resolving the same way on every run — see its docstring.
+    """
     from sr_horizon import last_tuesday_of_month
     target = last_tuesday_of_month(year, month)
-    sessions = trading_days[(trading_days <= target)
-                            & (trading_days >= target - pd.Timedelta(days=7))]
+    if len(trading_days) == 0:
+        return target
+    idx = pd.DatetimeIndex(trading_days).normalize().sort_values()
+    if idx[-1] < target:
+        return target          # target not reached yet — nothing to roll back to
+    sessions = idx[(idx <= target) & (idx >= target - pd.Timedelta(days=7))]
     if len(sessions) == 0:
         return target
     return sessions[-1].normalize()
