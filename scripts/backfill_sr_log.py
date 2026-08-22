@@ -200,6 +200,21 @@ def main():
     print(f"Wrote {len(built)} backfilled row(s) to {LOG_PATH} "
           f"(flagged {FLAG_COL}=1).")
 
+    # The MONTH file is derived from the same rows and must not drift from the
+    # cumulative log. Earlier versions of this script wrote only LOG_PATH, so
+    # every backfilled date was silently absent from sr_month_YYYY-MM.csv —
+    # August showed 08-04 at 56 rows and 08-05..08-07 at 60 against 61 in the
+    # cumulative log, and 08-18/08-20 missing outright. write_month dedupes on
+    # (Date, Symbol) and rebuilds AVG rows from scratch, so re-feeding rows is
+    # safe and idempotent.
+    #
+    # sr_today.csv is deliberately NOT written: it is the "where do things
+    # stand right now" view, and a backfill of a PAST date must not overwrite
+    # it with stale rows.
+    for path, n, complete in L.write_month(new_df):
+        tag = "AVG rows written" if complete else "AVG rows pending last Tuesday"
+        print(f"  month file updated: {path} ({n} daily rows, {tag})")
+
 
 if __name__ == "__main__":
     main()
