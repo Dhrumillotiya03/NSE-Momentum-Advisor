@@ -171,7 +171,13 @@ def step():
     import core
 
     index = core.load_index()
-    today = pd.Timestamp(index.index[-1])
+    # Last COMPLETED session, never today's own bar, so the sim's decisions
+    # and fills do not depend on what hour the pipeline ran — same rule as
+    # paper_trader and sr_daily_logger. See core.last_completed_session.
+    today = core.last_completed_session(index.index)
+    if today is None:
+        print("[sim] no completed session in the index yet — nothing to do")
+        return
     today_str = today.strftime("%Y-%m-%d")
 
     if os.path.exists(SIM_LOG):

@@ -57,6 +57,41 @@ def load_index():
     return df.dropna(subset=["Close"]).sort_values("Date").set_index("Date")["Close"]
 
 
+def last_completed_session(dates, now=None):
+    """The newest session STRICTLY BEFORE today — never today's own bar.
+
+    THE BOOKS MUST BE POINT-IN-TIME REGARDLESS OF RUN HOUR (user spec
+    2026-08-22). paper_trader and agent_sim took `index[-1]` directly, so the
+    session they processed depended on what time the pipeline happened to
+    run: trim_partial.py strips today's partial candle only before 16:00, so
+    a morning run processed yesterday while a 16:00+ run processed TODAY — on
+    a bar that Kite has not settled yet (Bhavcopy finishes ~19:00-20:00, the
+    whole reason the price pull was moved off an evening slot). Measured in
+    the pipeline's own log: runs at 11:03, 11:58, 14:58 and 11:21 all
+    processed the previous session, while 16:43, 18:15 and 20:10 processed
+    the same day.
+
+    Deriving the date here instead makes a run at ANY hour produce the
+    identical result, which is what sr_daily_logger.drop_today_bar already
+    does for the S/R measurement record. LIVE/MONITORING tools deliberately
+    do NOT use this — market_scanner, intraday_watch, live_quotes and the
+    announcement feeds are supposed to see today.
+
+    `>=` rather than `==`: a future-dated bar from clock skew during an NTP
+    sync has occurred in this repo before, and must be dropped too, not
+    treated as the latest session.
+
+    Returns a Timestamp, or None if no completed session exists.
+    """
+    idx = pd.DatetimeIndex(pd.to_datetime(
+        getattr(dates, "index", dates), errors="coerce")).dropna().normalize()
+    if len(idx) == 0:
+        return None
+    today = pd.Timestamp(now).normalize() if now is not None else pd.Timestamp.now().normalize()
+    past = idx[idx < today]
+    return past.max() if len(past) else None
+
+
 def load_sector_map():
     if not os.path.exists(SECTOR_FILE):
         return {}

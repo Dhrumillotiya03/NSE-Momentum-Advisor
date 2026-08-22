@@ -44,7 +44,8 @@ import numpy as np
 import pandas as pd
 
 import strategy_config as sc
-from core import scan_universe, market_regime, load_stock, load_index
+from core import (scan_universe, market_regime, load_stock, load_index,
+                  last_completed_session)
 from backtest_portfolio import select_top_n_capped, load_sector_map, conviction_weights
 from exit_engine import is_last_trading_day_of_month
 
@@ -127,7 +128,16 @@ def close_on(sym, date):
 def step():
     index = load_index()
     index_dates = index.index if hasattr(index, "index") else index
-    today = pd.Timestamp(index_dates[-1])
+    # The last COMPLETED session, never today's own bar — so the book steps
+    # identically whether the pipeline runs at 11:00 or at 17:00. Previously
+    # this was index_dates[-1], which made the processed session depend on
+    # whether trim_partial.py had stripped today's partial candle (it only
+    # does so before 16:00), and a 16:00+ run therefore priced the book off
+    # an unsettled bar. See core.last_completed_session.
+    today = last_completed_session(index_dates)
+    if today is None:
+        print("[paper] no completed session in the index yet — nothing to do")
+        return
     today_str = today.strftime("%Y-%m-%d")
 
     state = load_state()

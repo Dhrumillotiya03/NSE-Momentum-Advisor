@@ -1027,6 +1027,29 @@ stock_ai/
   were verified by repricing the restored positions at the 08-17 closes and
   matching each book's own logged 08-17 equity to the paisa. See memory
   rebalance-fired-early-2026-08.
+- THE BOOKS STEP ON THE LAST COMPLETED SESSION, ANY RUN HOUR (2026-08-22 user
+  spec, `core.last_completed_session`). paper_trader and agent_sim took
+  `index[-1]` directly, so which session they processed depended on WHAT TIME
+  the pipeline ran: trim_partial.py strips today's partial candle only before
+  16:00 (`now.hour >= 16` → returns without touching anything), so a morning
+  run processed YESTERDAY while a 16:00+ run processed TODAY — on a bar Kite
+  has not settled (Bhavcopy ~19:00-20:00, the very reason the price pull was
+  moved off an evening slot; see kite-settlement-lag-2026-08). Confirmed in
+  the pipeline's own log: runs at 11:03/11:58/14:58/11:21 all processed the
+  previous session, while 16:43/18:15/20:10 processed the same day. The user
+  runs the pipeline 11:00-17:00, i.e. straddling that boundary. Both books now
+  derive the date via `core.last_completed_session` (newest bar STRICTLY
+  before today, `>=` so an NTP-skew future bar is dropped too) — the same
+  guarantee sr_daily_logger.drop_today_bar already gave the S/R measurement
+  record. Verified identical output at 11:00/15:00/16:00/18:00/20:00, and the
+  step is byte-identical to the previous behaviour for a pre-16:00 run
+  (sandbox replay of 08-21 reproduced ₹1,036,025 exactly). LIVE/MONITORING
+  TOOLS ARE DELIBERATELY UNCHANGED and must stay that way — market_scanner,
+  intraday_watch, live_quotes, live_ticker and the announcement feeds are
+  supposed to see today; only the BOOKS are point-in-time. Consequence to
+  expect: the books always lag one session, so a rebalance dated 08-25 is
+  executed by the run on 08-26 — correct, and the month-end check self-heals a
+  missed run (see the month-end entry above).
 - CHART ANALYSIS (chart_analysis.py, new 2026-08-01) — candlestick/price-action
   read: trend structure (higher-highs/lower-lows via swing points), 20/50/200 EMA
   posture + stacking, position in 52w range, volume behaviour (surge, up-vs-down
