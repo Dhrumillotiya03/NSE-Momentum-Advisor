@@ -990,6 +990,43 @@ stock_ai/
   ai_assistant; verified to fire exactly once per month across 199 months. The
   BACKTEST is unaffected — it rebalances on a fixed 21-day grid, not calendar
   dates (still 20.80% CAGR after the change).
+  FIRED UP TO 4 SESSIONS EARLY — FIXED 2026-08-22, AND IT CORRUPTED BOTH LIVE
+  BOOKS. The equality test `last == rebalance_day(...)` is only valid with a
+  calendar that already extends PAST the target. The live calendar stops at
+  today, so rebalance_day's holiday roll-back ("latest session at or before
+  the last Tuesday") had nothing to roll back to and returned TODAY — making
+  EVERY session in the week before the target test True. August 2026 (target
+  08-25) fired on 08-18, 08-19, 08-20 AND 08-21. paper_trader duly ran a real
+  month-end rotation on 08-19: sold ADANIENSOL 57sh @1538 booking a realised
+  −₹6,300.67, trimmed WELCORP, queued HFCL; agent_sim did the same (sold
+  ADANIENSOL 41sh, bought ₹493k WELCORP, ran cash to ₹256 which blocked a
+  RADICO order). It would have rotated again on EVERY later run — only the
+  user's missed 08-18/20/21 runs kept it to one. Missed because the
+  last-Tuesday rule landed 2026-08-03, AFTER July's rebalance, so August was
+  the first month to exercise it live, and the original "once per month across
+  199 months" check used the FULL calendar where the roll-back resolves fine.
+  THE LIVE TEST IS NOW "first session at or after the target"
+  (`prev < target <= last`): cannot fire early, exactly one session satisfies
+  it, needs no future calendar. Both the previous and current month's targets
+  are checked — a holiday last-Tuesday at a month's END pushes the firing
+  session into the NEXT month, and testing only that month's target skipped
+  the rebalance entirely (March 2026 and May 2011 never fired in an
+  intermediate version). DELIBERATE SPEC DEVIATION: a holiday last Tuesday now
+  fires on the NEXT session, not the previous one (March 2026 → 04-01) — a
+  session late instead of early, because no live check can tell a holiday from
+  a date that has not arrived, and firing EARLY is what corrupted the book.
+  Re-verified by replaying all 4,081 sessions with the calendar truncated to
+  each one (i.e. as the pipeline actually sees it): 199/200 target months fire
+  exactly once, 0 more than once, only Aug 2026 unfired because 08-25 is still
+  future. SELF-HEALS A MISSED RUN: if the pipeline does not run on the
+  rebalance day it fires on the next session instead, once — verified both
+  ways. BOOKS REPAIRED 2026-08-22 (backups
+  data/_quarantine/*_pre_rebalancebug_2026-08-22.*): the 08-19 rotation was
+  reversed in both books and paper_trader replayed 08-18..08-21 through its
+  OWN step() against a truncated index (not a reimplementation). Both reverts
+  were verified by repricing the restored positions at the 08-17 closes and
+  matching each book's own logged 08-17 equity to the paisa. See memory
+  rebalance-fired-early-2026-08.
 - CHART ANALYSIS (chart_analysis.py, new 2026-08-01) — candlestick/price-action
   read: trend structure (higher-highs/lower-lows via swing points), 20/50/200 EMA
   posture + stacking, position in 52w range, volume behaviour (surge, up-vs-down
