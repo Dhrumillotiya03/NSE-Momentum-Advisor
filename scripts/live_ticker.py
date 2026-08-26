@@ -224,6 +224,10 @@ class TickerState:
         # not a cursor you have to keep track of. Display-only, like every
         # other field here: selecting a row reads nothing and writes nothing.
         self.selected = None
+        # (row index, monotonic time) of the last mouse event acted on, so a
+        # single physical click delivered twice (see the mousemask comment in
+        # run()) cannot toggle the highlight on and straight back off.
+        self.last_click = (None, 0.0)
         # Viewport geometry, republished by draw() each frame and read by the
         # mouse handler to map a screen y back to a symbol index. Defaults
         # matter: draw() returns EARLY when the terminal is too narrow, so
@@ -306,6 +310,10 @@ def make_ticker(kite, access_token, api_key, state: TickerState):
 
 MIN_WIDTH = 140   # X_VERDICT (104) + a readable minimum for verdict text
 CARD_HEIGHT = 1    # one row per stock
+# A single physical click can be delivered as two curses events on some
+# builds (PRESSED then CLICKED). Anything on the same row inside this
+# window is that echo, not a second click by the user.
+CLICK_DEBOUNCE_S = 0.35
 
 
 def color(pair_name):
@@ -992,14 +1000,28 @@ def main(stdscr, symbols):
     curses.init_pair(4, curses.COLOR_CYAN, -1)
     curses.init_pair(5, curses.COLOR_WHITE, -1)   # dim substitute (color_pair 5 used sparingly, A_DIM varies by terminal)
 
-    # Mouse: BUTTON1_CLICKED only, deliberately NOT ALL_MOUSE_EVENTS —
+    # Mouse: button-1 press and click, deliberately NOT ALL_MOUSE_EVENTS —
     # grabbing every event (drag/move) stops the terminal's own text
     # selection working, so you could no longer copy a price out of the
     # screen. Wrapped because a terminal without mouse support raises here,
     # and the keyboard path must keep working on one.
+    #
+    # BOTH _PRESSED and _CLICKED are masked because the two curses
+    # implementations disagree about which one a plain click produces:
+    # ncurses synthesises BUTTON1_CLICKED from a press/release pair, while
+    # PDCurses (windows-curses) commonly delivers BUTTON1_PRESSED. Masking
+    # only CLICKED left Windows with no working row selection at all. The
+    # cost of masking both is that a platform may deliver two events for one
+    # physical click, which would toggle the highlight straight back off —
+    # the handler debounces on (row, time) for exactly that reason.
+    #
+    # mouseinterval() is deliberately NOT set: the platform default (~200ms)
+    # is what lets ncurses resolve a press+release into a click at all.
+    # Setting it to 0 — as this did until 2026-08-26 — means "press and
+    # release must be under 0ms to count as a click", i.e. no click is ever
+    # recognised, which silently disabled the mouse everywhere.
     try:
-        curses.mousemask(curses.BUTTON1_CLICKED)
-        curses.mouseinterval(0)   # report clicks immediately, don't wait to detect a double-click
+        curses.mousemask(curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED)
     except Exception:
         pass
 
@@ -1107,9 +1129,19 @@ def main(stdscr, symbols):
                     if (my >= state.view_first_row
                             and idx < state.view_off + state.view_capacity
                             and 0 <= idx < len(state.symbols)):
-                        # Clicking the highlighted row again clears it, so the
-                        # mouse alone can both set and unset the highlight.
-                        state.selected = None if state.selected == idx else idx
+                        # One physical click can arrive as both a PRESSED and
+                        # a CLICKED event depending on the curses build, which
+                        # would toggle the row on then off. Treat a repeat on
+                        # the same row inside CLICK_DEBOUNCE_S as that echo.
+                        last_idx, last_t = state.last_click
+                        now = time.monotonic()
+                        if not (last_idx == idx
+                                and now - last_t < CLICK_DEBOUNCE_S):
+                            # Clicking the highlighted row again clears it, so
+                            # the mouse alone can both set and unset it.
+                            state.selected = (None if state.selected == idx
+                                              else idx)
+                        state.last_click = (idx, now)
             elif ch == 27:            # Esc — clear the highlight
                 state.selected = None
             elif ch == curses.KEY_DOWN:
