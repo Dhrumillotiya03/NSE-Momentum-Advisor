@@ -1099,6 +1099,57 @@ stock_ai/
   (a momentum breakout name's nearest support is routinely 40-80% below
   price — technically correct but meaningless to surface as a bare
   percentage without that flag). Assistant toolset is now 10 tools.
+- FIBONACCI RETRACEMENT + STOCHASTIC RSI ADDED 2026-08-31
+  (chart_analysis.fib_retracement / stoch_rsi), DISPLAY ONLY, RESEARCHED
+  BEFORE BUILDING per user instruction. User asked for TradingView-style Fib
+  levels and a two-line oscillator crossover they'd seen "predict" a reversal;
+  both were checked against TradingView's OWN documentation and the academic
+  literature first (WebSearch/WebFetch, not assumed). TradingView itself makes
+  NO accuracy claim for either: Auto Fib is "based on the theory that markets
+  will retrace a specific portion of a move" and is recommended for use "with
+  other tools"; Stochastic RSI's own docs warn "this can generate many more
+  signals and therefore more bad signals" and call trading crossovers against
+  trend "a dangerous proposition." fib_retracement reproduces TradingView's
+  Auto Fib (ZigZag swing_points -> 23.6/38.2/50/61.8/78.6% of the range,
+  anchored on the most recent swing high/low). Its display output only lists
+  levels and a leg description — it makes no directional touch claim, so the
+  bug below (found while TESTING it, not in this display function itself)
+  never reached what the user actually sees. stoch_rsi
+  matches TradingView's own 14/14/3/3 defaults (%K/%D on RSI, not price).
+  Wired into chart_analysis.analyse()/summarise()/summarise_plain() the same
+  way every other function in the file is — descriptive fields, plain-English
+  caveat, verified zero errors across the full 61-symbol fixed panel.
+  TESTED, NOT JUST SHIPPED (2026-08-31, research_fib_stochrsi.py,
+  PREREG_fib_stochrsi.md pre-registered BEFORE running): reused the exact
+  flow-change + permutation-control harness built for the August 2026 S/R
+  review (see below), applied point-in-time (monthly test dates, `past =
+  df[df.index<=td]`, same convention as sr_backtest.py) across the F&O-liquid
+  ~200-name universe and up to ~11 years of history. THREE CONFIGS, FIXED
+  BEFORE SEEING RESULTS: FIB-ALONE, STOCHRSI-ALONE, COMBINED (fib touch AND
+  same-direction StochRSI cross within 2 sessions — the lowest-prior config,
+  a 7th instance of the auxiliary-overlay-confirms-a-level shape already
+  rejected six times on this strategy). A REAL BUG WAS CAUGHT IN THE RESEARCH SCRIPT
+  (research_fib_stochrsi.py — NOT chart_analysis.py itself) BEFORE TRUSTING
+  THE RESULT: the first run scored FIB-ALONE at -33pp vs control, an
+  implausibly large NEGATIVE edge — traced to computing touch direction ONCE
+  per fib LEG and applying it to all 5 ratio levels, when by the test date
+  price had often already retraced PAST some of them (a live example: DOWN
+  leg, price at 212.32, but the 23.6-61.8% levels sat at 206.72-211.78, all
+  BELOW spot, only 78.6% still genuinely ahead) — testing an already-passed
+  level as "will price fall back through it" is a momentum-unfavourable
+  question by construction and alone produced the spurious result. Fixed to
+  classify touch direction PER LEVEL against current price (matching how S/R
+  levels are classified everywhere else in this codebase), and added the
+  day-0 guard fib_retracement itself doesn't have (a level already inside the
+  touch band at test time is a guaranteed hit with zero predictive content —
+  the same defect min-separation fixed for S1/R1, absent here since Fib
+  levels are unfiltered arithmetic fractions). RESULT after the fix: see
+  PREREG_fib_stochrsi.md's RESULT section (filled in once the full run
+  completes) — chart_analysis.py's two functions remain permanently
+  display-only regardless of the outcome unless the pre-registered bar is
+  cleared, and even then only a SEPARATE, harder walk-forward study (this
+  strategy's own standard bar) could justify wiring either into
+  exit_engine/paper_trader/agent_sim/the scorer.
 - EARNINGS AWARENESS (ai_assistant.earnings_watch, new 2026-08-01) —
   DISPLAY-ONLY estimated next-earnings date, surfaced in stock_status and
   horizon_advice (flagged if it falls inside the requested horizon: "expect

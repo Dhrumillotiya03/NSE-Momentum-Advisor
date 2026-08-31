@@ -381,6 +381,132 @@ def anchored_vwap_from_last_swing_low(df, window=5):
     }
 
 
+# ---------- Fibonacci retracement (display only — see PREREG_fib_stochrsi.md) ----------
+
+FIB_RATIOS = (0.236, 0.382, 0.5, 0.618, 0.786)
+
+# Same convention as sr_daily_logger: a Fib swing "reaches" a level within this
+# band. Kept identical to support_resistance.TOUCH_PCT-equivalent so a reading
+# taken from this module lines up with the rest of the S/R subsystem rather
+# than silently using a different tolerance.
+FIB_TOUCH_PCT = 0.01
+
+
+def fib_retracement(df, window=5):
+    """TradingView's Auto Fib Retracement, reproduced: find the last two
+    opposite-type swing pivots (ZigZag), take the vertical range between them,
+    and mark the standard ratio fractions of that range.
+
+    RESEARCHED BEFORE BUILDING (2026-08-31) — TradingView's own documentation
+    describes this as "based on the theory that markets will retrace a
+    specific portion of a move before continuing" and recommends using it
+    "with other tools", making no accuracy claim. The peer-reviewed test
+    (Tsinaslanidis & Guijarro 2021, Dow/NASDAQ/DAX) found bouncing on a
+    Fibonacci zone statistically indistinguishable from bouncing on a
+    non-Fibonacci zone at a comparable distance — the same permutation-control
+    result this repo's own August 2026 S/R review reached independently on its
+    own levels (see memory sr-levels-dont-mark-flow-changes-2026-08). DISPLAY
+    ONLY, same status as every other function in this file: never wired into
+    exit_engine/paper_trader/agent_sim/the scorer regardless of what the
+    pre-registered test in PREREG_fib_stochrsi.md finds, unless that study
+    clears its own bar.
+
+    Anchors on the most recent swing high and swing low (whichever is later
+    defines the CURRENT leg), matching TradingView's "last significant swing"
+    behavior rather than a fixed lookback window.
+    """
+    highs, lows = swing_points(df, window)
+    if not highs or not lows:
+        return {}
+    hi_idx, lo_idx = highs[-1], lows[-1]
+    hi, lo = float(df["High"].iloc[hi_idx]), float(df["Low"].iloc[lo_idx])
+    if hi <= lo:
+        return {}
+    # Direction of the CURRENT leg: whichever pivot is more recent anchors the
+    # move, and price is retracing FROM that pivot BACK TOWARD the other one.
+    uptrend_leg = hi_idx > lo_idx     # swing high came after swing low -> rose into it
+    rng = hi - lo
+    levels = {}
+    for r in FIB_RATIOS:
+        # Retracement measured back from the leg's endpoint, matching
+        # TradingView: an up-leg retraces DOWN from the high, a down-leg
+        # retraces UP from the low.
+        level = hi - rng * r if uptrend_leg else lo + rng * r
+        levels[f"{r*100:.1f}%"] = round(level, 2)
+    price = float(df["Close"].iloc[-1])
+    near = {k: v for k, v in levels.items()
+            if abs(price / v - 1) <= FIB_TOUCH_PCT * 5}   # +-5% "on the chart" band
+    return {
+        "leg": "UP (retracing down from swing high)" if uptrend_leg
+               else "DOWN (retracing up from swing low)",
+        "swing_high": round(hi, 2), "swing_high_date": str(df.index[hi_idx].date()),
+        "swing_low": round(lo, 2), "swing_low_date": str(df.index[lo_idx].date()),
+        "levels": levels,
+        "price": round(price, 2),
+        "nearest_levels": near,
+        "caveat": ("Descriptive only. TradingView makes no accuracy claim for "
+                   "these levels, and the peer-reviewed test found no edge over "
+                   "an arbitrary level at the same distance — see module docstring."),
+    }
+
+
+# ---------- Stochastic RSI (display only — see PREREG_fib_stochrsi.md) ----------
+
+def _rsi_series(close, period=14):
+    """Same Wilder RSI as core.compute_rsi, but returns the full series (that
+    function returns only the last value) — Stoch RSI needs the trailing
+    window of RSI itself, not one point."""
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss.replace(0, np.nan)
+    return 100 - 100 / (1 + rs)
+
+
+def stoch_rsi(df, rsi_period=14, stoch_period=14, k_smooth=3, d_smooth=3):
+    """TradingView's Stochastic RSI: the stochastic %K/%D calculation applied
+    to RSI instead of price. Defaults (14/14/3/3) match TradingView's own.
+
+    RESEARCHED BEFORE BUILDING (2026-08-31) — TradingView's own documentation
+    is unusually direct about this one: "by adding the Stochastic calculation
+    to RSI, speed is greatly increased. This can generate many more signals
+    and therefore more bad signals as well as the good ones," and it warns
+    that trading %K/%D crossovers against the prevailing trend is "a dangerous
+    proposition." The academic literature on oscillator crossover RULES
+    (Bajgrowicz & Scaillet 2012, JFE, Dow Jones 1897-2011, false-discovery-rate
+    controlled) found an investor could never have selected the future
+    best-performing rule ex ante, and that even IN-SAMPLE performance is wiped
+    out by realistic transaction costs. DISPLAY ONLY — same status as
+    fib_retracement above and everything else in this file.
+    """
+    r = _rsi_series(df["Close"], rsi_period)
+    lo = r.rolling(stoch_period).min()
+    hi = r.rolling(stoch_period).max()
+    raw_k = ((r - lo) / (hi - lo).replace(0, np.nan) * 100)
+    k = raw_k.rolling(k_smooth).mean()
+    d = k.rolling(d_smooth).mean()
+    if k.isna().iloc[-1] or d.isna().iloc[-1]:
+        return {}
+    k_last, d_last, k_prev, d_prev = (float(k.iloc[-1]), float(d.iloc[-1]),
+                                      float(k.iloc[-2]), float(d.iloc[-2]))
+    cross = None
+    if k_prev <= d_prev and k_last > d_last:
+        cross = "BULLISH_CROSS (%K crossed above %D)"
+    elif k_prev >= d_prev and k_last < d_last:
+        cross = "BEARISH_CROSS (%K crossed below %D)"
+    zone = ("overbought (>80)" if k_last > 80 else
+            "oversold (<20)" if k_last < 20 else "neutral")
+    return {
+        "k": round(k_last, 1), "d": round(d_last, 1), "zone": zone,
+        "cross": cross,
+        "caveat": ("Descriptive only. TradingView's own documentation warns "
+                   "Stoch RSI crossovers generate many false signals and that "
+                   "trading them against trend is dangerous. Crossover-rule "
+                   "profitability is not supported in the academic literature "
+                   "once transaction costs are included — see module docstring."),
+    }
+
+
 # ---------- top-level ----------
 
 def _weekly_read(df, window=252 * 5 // 7):
@@ -442,6 +568,8 @@ def analyse(df, lookback_patterns=10, index=None):
         "relative_strength": relative_strength(df, index) if index is not None else {},
         "volume": volume_behaviour(df),
         "volatility": volatility_state(df),
+        "fib_retracement": fib_retracement(df),
+        "stoch_rsi": stoch_rsi(df),
         "candlestick_patterns_last_%dd" % lookback_patterns: pats,
         "recent_candle_bias": ("bullish" if bull > bear else
                                "bearish" if bear > bull else "neutral/mixed"),
@@ -480,6 +608,13 @@ def summarise(a):
         parts.append(a["volume"]["reading"].capitalize() + ".")
     if a.get("volatility", {}).get("reading"):
         parts.append(a["volatility"]["reading"].capitalize() + ".")
+    fib = a.get("fib_retracement", {})
+    if fib.get("nearest_levels"):
+        lv = ", ".join(f"{k} @ {v}" for k, v in fib["nearest_levels"].items())
+        parts.append(f"Fib ({fib['leg']}): near {lv}. Unvalidated — see caveat.")
+    sto = a.get("stoch_rsi", {})
+    if sto.get("cross"):
+        parts.append(f"StochRSI {sto['cross']} ({sto['zone']}). Unvalidated — see caveat.")
     recent = [p for p in a.get("candlestick_patterns_last_10d", []) if p["bars_ago"] <= 3]
     if recent:
         parts.append("Recent candles: " + ", ".join(
@@ -604,6 +739,19 @@ def summarise_plain(a):
         out.append("Careful: the short-term and longer-term pictures disagree.")
     elif ag == "MIXED":
         out.append("The longer-term picture is less clear than the short-term one.")
+
+    fib = a.get("fib_retracement", {})
+    if fib.get("nearest_levels"):
+        first = next(iter(fib["nearest_levels"].items()))
+        out.append(f"Chart-based Fibonacci lines put a level near {first[1]} "
+                   f"({first[0]}) — a popular charting tool, but tested and NOT "
+                   f"shown to predict where a stock actually turns.")
+    sto = a.get("stoch_rsi", {})
+    if sto.get("cross"):
+        direction = "up" if "BULLISH" in sto["cross"] else "down"
+        out.append(f"A momentum indicator (Stochastic RSI) just crossed {direction} "
+                   f"— a commonly-watched signal, but not one shown to be reliable "
+                   f"once trading costs are counted.")
 
     return " ".join(out)
 
