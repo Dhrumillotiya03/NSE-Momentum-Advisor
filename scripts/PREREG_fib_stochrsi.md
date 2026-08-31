@@ -3,6 +3,63 @@
 **Written 2026-08-31, BEFORE running any test below. Frozen. Amendments
 appended with reason, never silently edited.**
 
+## RESULT (2026-08-31, research_fib_stochrsi.py, run same-day) — 0/3 CONFIGS CLEARED. ALL REJECTED.
+
+F&O-liquid ~200-name universe, monthly test dates 2016-07 through 2026-07
+(121 dates), point-in-time (`past = df[df.index <= td]`, trailing 300-bar
+context window, same convention as sr_backtest.py).
+
+| config | n (real) | dates | real flow | control flow | diff | 95% CI | edge>=5pp | OOS confirms |
+|---|---|---|---|---|---|---|---|---|
+| FIB-ALONE | 45,321 | 121 | 64.7% | 64.2% | +0.5pp | [-0.1,+1.1] | FAIL | yes, but... |
+| STOCHRSI-ALONE | 4,548 | 121 | 51.8% | 50.2% | +1.6pp | [-0.5,+3.6] | FAIL | no |
+| COMBINED | 3,174 | 121 | 59.8% | 64.1% | -4.3pp | [-6.1,-2.6] | FAIL | no |
+
+**FIB-ALONE** essentially reproduces Tsinaslanidis & Guijarro (2021)
+verbatim: real and control are statistically indistinguishable at any
+economically meaningful scale. The CI is technically tight enough (n=45k) to
+show a hairline-positive point estimate, and the OOS split even clears
+criterion 3 in isolation (+1.2pp, CI [+0.2,+2.3]) — but criterion 2 (edge
+>=5pp) fails outright at 0.5pp/1.2pp, so this is "statistically detectable,
+economically worthless," exactly the trap criterion 2 exists to catch. A
+0.5pp edge does not survive a single round-trip's transaction cost once
+translated into price terms, let alone repeated trading.
+
+**STOCHRSI-ALONE** fails both in-sample and out-of-sample; the CI spans zero
+in both windows and the OOS point estimate flips sign (-1.8pp), the classic
+signature of an in-sample fluctuation that isn't a real effect. Worth
+recording: a `--quick` 30-symbol smoke test of this same code showed a
+misleadingly large +7.4pp in-sample edge that collapsed to +0.1pp OOS on that
+same small sample — pure small-n noise, exactly why the full universe and the
+OOS split are both load-bearing here, not just process for its own sake.
+
+**COMBINED is the most decisive of the three** — its CI *excludes zero in the
+UNFAVOURABLE direction* (-4.3pp, CI [-6.1,-2.6], real WORSE than control).
+Requiring both signals to agree does not filter for quality; it filters for a
+subset of touches with no compensating advantage over an arbitrary level,
+while discarding 93% of the sample (3,174 of 45,321 Fib touches) to get
+there. Confirms the pre-registration's own stated prior: an AND-conjunction
+of two already-weak signals is not a stronger signal, and per the decision
+rule this is NOT chased with further combined-config variants.
+
+**A real implementation bug was caught before trusting the first FIB-ALONE
+number**, worth recording since it nearly produced a false "large negative
+edge" that would have been reported as a finding rather than a defect. The
+initial run scored FIB-ALONE at -33pp vs control — computing touch direction
+once per Fibonacci LEG and applying it to all 5 ratio levels, when by the
+test date price had frequently already retraced past some of them (live
+example: a DOWN leg with price at 212.32, but the 23.6-61.8% levels sat at
+206.72-211.78, all BELOW spot — only 78.6% was still genuinely ahead of
+price). Testing an already-passed level as "will price fall back through it"
+asks a momentum-UNFAVOURABLE question by construction, which alone explained
+nearly the entire spurious effect. Fixed to classify direction PER LEVEL
+against current price (matching how every other level in this codebase is
+classified) plus a day-0 guard (fib_retracement carries no min-separation
+filter, unlike S1/R1, so an untreated day-0 rate would have inflated the
+result the same way it once did for the S/R subsystem before that fix). The
+corrected numbers above are what survived this.
+
+
 ## Where this came from
 
 The user asked for TradingView-style Fibonacci levels and, separately,

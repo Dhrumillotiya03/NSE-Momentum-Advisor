@@ -1143,13 +1143,24 @@ stock_ai/
   day-0 guard fib_retracement itself doesn't have (a level already inside the
   touch band at test time is a guaranteed hit with zero predictive content —
   the same defect min-separation fixed for S1/R1, absent here since Fib
-  levels are unfiltered arithmetic fractions). RESULT after the fix: see
-  PREREG_fib_stochrsi.md's RESULT section (filled in once the full run
-  completes) — chart_analysis.py's two functions remain permanently
-  display-only regardless of the outcome unless the pre-registered bar is
-  cleared, and even then only a SEPARATE, harder walk-forward study (this
-  strategy's own standard bar) could justify wiring either into
-  exit_engine/paper_trader/agent_sim/the scorer.
+  levels are unfiltered arithmetic fractions). RESULT after the fix (full
+  ~200-symbol, 11-year run, same day): 0/3 CONFIGS CLEARED. FIB-ALONE
+  (n=45,321 touches) essentially reproduces Tsinaslanidis & Guijarro verbatim:
+  real 64.7% vs control 64.2%, +0.5pp, CI [-0.1,+1.1] — statistically
+  detectable at this n but an order of magnitude below the 5pp bar, and would
+  not survive one round-trip's transaction cost regardless. STOCHRSI-ALONE
+  (n=4,548): +1.6pp, CI [-0.5,+3.6], OOS point estimate FLIPS SIGN (-1.8pp) —
+  an in-sample fluctuation, not a real effect (a --quick 30-symbol smoke test
+  had shown a misleading +7.4pp that collapsed to +0.1pp OOS on the small
+  sample, illustrating exactly why the full run mattered). COMBINED (n=3,174,
+  fib touch AND same-direction cross within 2 sessions) is the most decisive
+  of the three: CI EXCLUDES ZERO IN THE UNFAVOURABLE DIRECTION (-4.3pp, CI
+  [-6.1,-2.6]) — requiring both signals to agree filters for a WORSE subset,
+  not a better one, while discarding 93% of the touches to get there. 7th
+  confirmation of the auxiliary-overlay-fails pattern on this strategy.
+  chart_analysis.py's fib_retracement/stoch_rsi remain permanently
+  display-only; per the pre-registration this line of work is CLOSED, not
+  queued for a different threshold or config.
 - EARNINGS AWARENESS (ai_assistant.earnings_watch, new 2026-08-01) —
   DISPLAY-ONLY estimated next-earnings date, surfaced in stock_status and
   horizon_advice (flagged if it falls inside the requested horizon: "expect
