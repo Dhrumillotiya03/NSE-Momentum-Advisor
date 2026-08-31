@@ -492,14 +492,28 @@ def main():
                   "symbol's price_data/etf_data CSV.")
 
         if len(corp):
-            print(f"\nℹ️  {len(corp)} symbol(s) temporarily behind — NOT an "
-                  f"error, nothing to fix: "
+            # This block used to say "NOT an error, nothing to fix ...
+            # self-resolves in a few sessions". It does NOT self-resolve once
+            # the gap exceeds update_prices_kite.AGREE_TOL: the refused bar
+            # stays the newest bar and therefore stays the splice point, so
+            # the symbol freezes for good. Five symbols have now frozen this
+            # way under a "nothing to fix" banner (CHENNPETRO/INDUSTOWER/
+            # HINDPETRO in August, BATAINDIA/CESC for 9 sessions to 2026-08-31)
+            # and the missing sessions are unrecoverable if the name is needed
+            # live. Telling the operator the exact repair command matters more
+            # than reassuring them.
+            print(f"\n⚠️  {len(corp)} symbol(s) behind after a dividend/split: "
                   + ", ".join(corp["Symbol"].tolist()))
-            print("   These recently had a dividend/split. Kite's raw price "
-                  "and the adjusted archive")
-            print("   briefly disagree until the archive catches up — "
-                  "self-resolves in a few sessions.")
-            print("   Re-running will not speed this up.")
+            print("   Kite's price and the archive disagree because the "
+                  "archive has not applied the")
+            print("   adjustment. A SMALL gap does clear by itself; a large "
+                  "one never does — the refused")
+            print("   bar stays the splice point and the symbol freezes. If "
+                  "these are still behind")
+            print("   tomorrow, repair with:")
+            print("       python readjust_archive.py "
+                  + " ".join(corp["Symbol"].tolist()[:6]) + " --apply")
+            print("       python update_prices_kite.py")
 
 
 if __name__ == "__main__":

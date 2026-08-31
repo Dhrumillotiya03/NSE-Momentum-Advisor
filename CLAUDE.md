@@ -1220,9 +1220,11 @@ stock_ai/
   manual re-check must not drop every other symbol from today's diagnosis.
   `sr_daily_logger.py` reads the watch file and splits its "symbol logged
   behind today" warning into two: real problems ("investigate, NOT
-  expected") vs corporate-action ("informational only, self-resolves,
-  re-running will not speed this up") — before this split, both looked
-  identical to a non-technical operator.
+  expected") vs corporate-action — before this split, both looked
+  identical to a non-technical operator. NOTE the corporate-action half USED to
+  read "informational only, self-resolves, re-running will not speed this up"
+  and that was FALSE past AGREE_TOL; it now names the repair command. See the
+  adjustment-lag deadlock entry below.
 - OHLC-UNIFORMITY TEST ADDED 2026-08-11 (fix_stale_bar.py) — the plateau
   heuristic above is NO LONGER the primary discriminator; it is now a
   fallback. THE DEADLOCK IT FIXED: `agreement()` splices at the CSV's
@@ -1261,6 +1263,71 @@ stock_ai/
   IDENTICAL. NOTE 46 of 500 price CSVs have no `Symbol` column at all — a
   pre-existing schema variation, not damage; append_new builds rows from
   each file's own columns so it is preserved.
+- ADJUSTMENT-LAG DEADLOCK + THE "SELF-RESOLVES" MESSAGE WAS FALSE (2026-08-31,
+  `readjust_archive.py`). A SECOND, distinct way the splice point freezes
+  forever — and the one the operator was actively told to ignore. When a
+  dividend goes ex, the live feeds back-adjust the whole history by a constant
+  ratio; the archive is append-only and never rewritten, so it alone keeps the
+  old level. Past AGREE_TOL (0.5%) `append_new` returns "disagree", writes
+  nothing, and the refused bar STAYS the newest bar and therefore stays the
+  splice point. Both `update_prices_kite` and `sr_daily_logger` announced this
+  as "NOT an error, nothing to fix ... self-resolves in a few sessions,
+  re-running will not speed this up". That is true only BELOW the tolerance —
+  i.e. never in the case that actually prints it. Five symbols froze under that
+  banner: CHENNPETRO/INDUSTOWER/HINDPETRO (repaired 2026-08-14) and
+  BATAINDIA/CESC (9 sessions, to 2026-08-31). Both messages now name the repair
+  command instead. Sessions missed this way are NOT recoverable later if the
+  name is needed live.
+  THE REPAIR IS A UNIFORM RESCALE, NOT A yfinance RE-DOWNLOAD —
+  `redownload_fix.py` was retired for reasons that still stand (intermittent
+  NaN-OHLC bars; a wholesale rewrite moves every historical price). A rescale
+  touches one multiplicative constant, keeps each row's provenance, leaves
+  Volume alone, and reproduces exactly what the accepted 2026-08-14 repair did
+  (verified against `_quarantine/INDUSTOWER.NS_pre_readjust_2026-08-14.csv`:
+  O/H/L ratio 0.963730, std 8e-8, volume untouched).
+  TWO REFERENCES, BECAUSE KITE'S OWN HISTORY IS NOT DIVIDEND-CONSISTENT — the
+  trap that made the first version of this tool refuse a correct repair.
+  BATAINDIA paid TWO dividends (Rs 9 ex 07-31, Rs 25 ex 08-19) and kite/yfinance
+  measures 1.01301 BEFORE 07-31 and exactly 1.00000 from 07-31 on: yfinance
+  back-adjusted the Rs 9, Kite did not. So Kite cannot judge whether the ARCHIVE
+  is internally consistent (measuring against it showed a bogus two-level
+  0.97938/0.96680 split). Use yfinance to validate the archive whole-history
+  (it is the archive's native adjustment convention — yf/csv was a single
+  uniform factor, field spread 3e-11 across all 2873 rows) and Kite ONLY at the
+  splice point, which is the one bar `append_new` compares. Both must pass.
+  Anything relying on Kite history matching the archive across an ex-date is
+  making this same mistake, `fix_stale_bar.py`'s plateau walk-back included.
+- STALENESS IS NOW REPORTED BY OUTCOME, NOT BY CAUSE (2026-08-31,
+  `update_prices_kite.stale_report`). The per-symbol statuses are cause-based
+  (no-token / disagree / no-data) and each cause had its own quiet path:
+  "no-token" collapsed into one aggregate line reading "delisted/renamed, left
+  untouched", "no-data" was never printed at all. So symbols stopped updating
+  for MONTHS with nothing in the log looking wrong — found 2026-08-31 by
+  diffing every CSV against the index: GSPL 77 sessions behind, AKZOINDIA 54,
+  JBCHEPHARM 26, GUJGASLTD 20, RELINFRA 19. Only BATAINDIA/CESC were flagged
+  anywhere. Measuring the OUTCOME (how far behind the index is each CSV) catches
+  all of those with one check and keeps catching causes nobody has thought of
+  yet — same principle as fix_stale_bar preferring a measured OHLC ratio over an
+  inferred plateau. Runs at the end of every price update.
+  RELINFRA WAS NOT DELISTED, JUST RENAMED: it moved to NSE's trade-for-trade
+  series, so Kite's tradingsymbol is `RELINFRA-BE` and `nse.get("RELINFRA")`
+  missed. It was trading normally the whole time and its splice point agreed to
+  0.0000% — 19 sessions lost to a suffix. Fixed via
+  `update_prices_kite.SYMBOL_ALIASES` (archive filename -> Kite tradingsymbol);
+  only add an entry once the splice check has been seen to pass, since a wrong
+  mapping appends another company's prices into this one's history. The other
+  four ARE genuine corporate events and are correctly left frozen (price_data is
+  never pruned): GSPL and GUJGASLTD merged (GUJGASLTD now re-lists with only 31
+  bars of history from 2026-07-17, far short of the 126d lookback), AKZOINDIA
+  delisted, JBCHEPHARM gone from both feeds.
+  INDEX FILES ARE NOT COVERED BY fix_stale_bar — it scans PRICE_DIR only, so
+  `indiavix.csv` sat frozen 27 days on a textbook partial-candle write (2026-08-04
+  Open/High/Low matched Kite EXACTLY, Close 12.10 vs 12.19), visible the whole
+  time as `INDIA VIX disagree 0.74%` in the log and as the sole
+  data_integrity_check warning. Repaired by hand 2026-08-31 (+18 bars). VIX is
+  not in the trading path (only support_resistance's INDEX_FILES map; the VIX
+  overlay was rejected) so impact was nil — but nifty50.csv rides the same
+  uncovered path and is NOT harmless: it defines sessions, regime and month-end.
 - OPS CADENCE: NOTHING new needs running daily. run_price_update.sh (systemd
   timer stockai-price-update, Tue-Sat 00:30 IST, Persistent=true) already
   runs the full pipeline — price update, both S/R loggers, exit/paper/advisor/

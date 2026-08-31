@@ -59,6 +59,21 @@ ETF_DIR = "../data/etf_data/"
 INDEX_SYMBOLS = {"nifty50.csv": "NIFTY 50", "indiavix.csv": "INDIA VIX"}
 ETF_SYMBOLS = ["GOLDBEES", "MON100"]
 
+# NSE SERIES / RENAME ALIASES — archive filename -> Kite tradingsymbol.
+#
+# A symbol moved to the trade-for-trade (BE) series keeps trading and keeps its
+# price series, but Kite's tradingsymbol gains a "-BE" suffix, so nse.get(base)
+# misses and the symbol lands in the silent "no-token ... delisted/renamed"
+# bucket. RELINFRA sat frozen 19 sessions that way (2026-08-03 -> 2026-08-31)
+# while still trading normally; its splice point agreed to 0.0000%, i.e. the
+# data was there the whole time and only the NAME was wrong.
+#
+# Only add an entry once the splice check has been seen to pass — a wrong
+# mapping here would append another company's prices into this one's history.
+SYMBOL_ALIASES = {
+    "RELINFRA": "RELINFRA-BE",
+}
+
 OHLC = ["Open", "High", "Low", "Close"]
 AGREE_TOL = 0.005      # max |kite/csv - 1| on overlapping bars
 OVERLAP_BARS = 5
@@ -235,6 +250,67 @@ def append_new(path, k, cutoff, symbol=None, dry=False):
     return "added", len(rows)
 
 
+def stale_report(max_list=25):
+    """OUTCOME-based staleness check: how far behind the index is each CSV?
+
+    The per-symbol statuses above are CAUSE-based (no-token, disagree,
+    no-data), and every cause has its own quiet path — "no-token" is summarised
+    in one line, "no-data" is not printed at all. So a symbol can stop updating
+    for months without anything in the log looking wrong. Measured 2026-08-31:
+    GSPL was 77 sessions behind, AKZOINDIA 54, JBCHEPHARM 26, GUJGASLTD 20,
+    RELINFRA 19 (that one still trading normally, just renamed to RELINFRA-BE)
+    — none of them mentioned anywhere except inside an aggregate count.
+
+    Measuring the OUTCOME instead catches all of those with one check, and
+    keeps catching causes nobody has thought of yet. Same principle as
+    fix_stale_bar.py preferring a measured OHLC ratio over an inferred plateau.
+    """
+    try:
+        idx = pd.read_csv(INDEX_DIR + "nifty50.csv", usecols=["Date"])
+        sessions = pd.to_datetime(idx["Date"], errors="coerce").dropna()
+        sessions = pd.DatetimeIndex(sessions).normalize().unique()
+    except Exception as e:
+        print(f"\n(stale check skipped — cannot read index: {e})")
+        return
+    if not len(sessions):
+        return
+
+    behind = []
+    for f in sorted(os.listdir(PRICE_DIR)):
+        if not f.endswith(".csv"):
+            continue
+        try:
+            df = pd.read_csv(PRICE_DIR + f, usecols=["Date", "Close"])
+        except Exception:
+            continue
+        d = pd.to_datetime(df["Date"], errors="coerce")
+        d = d[df["Close"].notna()]
+        d = d.dropna()
+        if not len(d):
+            continue
+        last = pd.Timestamp(d.max()).normalize()
+        n = int((sessions > last).sum())
+        if n >= 2:
+            behind.append((n, f[:-4].replace(".NS", ""), str(last.date())))
+
+    if not behind:
+        print("\nStaleness: every price CSV is current with the index.")
+        return
+    behind.sort(reverse=True)
+    print(f"\nSTALE: {len(behind)} symbol(s) more than 1 session behind the "
+          f"index (newest session {pd.Timestamp(sessions.max()).date()}):")
+    for n, sym, last in behind[:max_list]:
+        print(f"  {sym:16s} {n:3d} sessions behind   last={last}")
+    if len(behind) > max_list:
+        print(f"  ... and {len(behind) - max_list} more")
+    print("  A symbol frozen for many sessions is NOT self-healing. Check, in "
+          "order: a renamed/series-changed")
+    print("  ticker (add to SYMBOL_ALIASES), a missed dividend adjustment "
+          "(python readjust_archive.py), or a")
+    print("  genuine delisting/merger (expected — leave it, price_data is "
+          "never pruned).")
+
+
 def main():
     argv = sys.argv[1:]
     dry = "--dry-run" in argv
@@ -310,7 +386,7 @@ def main():
         if i % 100 == 0:
             print(f"    [{i}/{len(files)}]", flush=True)
         base = f[:-4].replace(".NS", "")
-        token = nse.get(base)
+        token = nse.get(base) or nse.get(SYMBOL_ALIASES.get(base, ""))
         if not token:
             missing.append(base)
             counts["no-token"] = counts.get("no-token", 0) + 1
@@ -376,19 +452,28 @@ def main():
         json.dump({"updated": today, "symbols": merged}, f)
 
     if corp_actions:
-        # This is the message a non-technical operator actually needs: NOT a
-        # data problem, self-resolves, no action to take. "disagree" alone
-        # gives no way to distinguish this from a real outage — that gap is
-        # what made the 2026-08-05 incident opaque.
+        # WHAT THIS MESSAGE USED TO SAY, AND WHY IT WAS WRONG. It read "this
+        # clears on its own in a few sessions ... nothing to fix, and
+        # re-running will not speed it up." That is true only for a mismatch
+        # INSIDE AGREE_TOL — but this message is printed precisely when the
+        # mismatch EXCEEDS it, which is the case that never self-heals:
+        # append_new refuses the splice, the refused bar stays the newest bar,
+        # so it stays the splice point forever. Measured 2026-08-31: BATAINDIA
+        # and CESC sat frozen 9 sessions under this "nothing to fix" banner,
+        # after CHENNPETRO/INDUSTOWER/HINDPETRO did the same in August.
         print(f"\n{len(corp_actions)} symbol(s) among today's 'disagree' rows "
-              f"are mid dividend/split adjustment, NOT stale or broken: "
+              f"are mid dividend/split adjustment: "
               f"{', '.join(corp_actions[:10])}"
               + (" ..." if len(corp_actions) > 10 else ""))
-        print("  Their whole price history recently shifted by a fixed ratio "
-              "(the archive re-adjusting for a")
-        print("  dividend). This clears on its own in a few sessions as the "
-              "adjustment settles. Nothing to fix,")
-        print("  and re-running will not speed it up.")
+        print("  Their price history shifted by a fixed ratio (a dividend the "
+              "archive has not applied yet).")
+        print("  This does NOT clear on its own once the gap exceeds "
+              f"{AGREE_TOL*100:.1f}% — the refused bar stays the splice")
+        print("  point, so the symbol freezes permanently. Repair with:")
+        print(f"      python readjust_archive.py {' '.join(corp_actions[:6])} --apply")
+        print("      python update_prices_kite.py   # then append the freed-up sessions")
+
+    stale_report()
 
 
 if __name__ == "__main__":
