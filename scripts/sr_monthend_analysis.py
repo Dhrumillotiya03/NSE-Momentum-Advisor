@@ -582,6 +582,203 @@ def _index_tape_context(start, end):
 
 
 # ──────────────────────────────────────────────
+# 1d. ACTED-ON OUTCOMES
+# ──────────────────────────────────────────────
+
+# Threshold for the flow-change race, in percent either side of the level.
+FLOW_THRESH = 2.0
+
+
+def _race(after, level, direction, thresh):
+    """After a touch, did price move `thresh`% the RIGHT way before the wrong way?
+
+    STARTS ON THE BAR AFTER THE TOUCH, deliberately. The touch bar cannot be
+    used: price reaches a support by FALLING to it, so that same bar's High sits
+    above the level by construction and "moved favourably" fires on bar zero for
+    almost every observation — measured, it put the 1% race at 88%. Daily bars
+    also carry no intraday sequencing, so a same-bar high may have printed
+    BEFORE the low. Same reason CLAUDE.md records that daily-Low touch tests
+    overstate win rate ~9pp against a close-only rule.
+    """
+    r = after.iloc[1:]
+    if len(r) < 2:
+        return None
+    for _, b in r.iterrows():
+        if direction == "down":
+            fav = float(b["High"]) >= level * (1 + thresh / 100)
+            adv = float(b["Low"]) <= level * (1 - thresh / 100)
+        else:
+            fav = float(b["Low"]) <= level * (1 - thresh / 100)
+            adv = float(b["High"]) >= level * (1 + thresh / 100)
+        if fav or adv:
+            return bool(fav and not adv)   # same-bar tie resolved AGAINST the level
+    return False
+
+
+def analyse_acted_outcomes(log_df):
+    """What happened to someone who ACTED on the level, not just watched it.
+
+    Three different questions, deliberately reported together because they give
+    very different numbers and the subsystem is routinely read as answering all
+    three at once:
+
+      REACHED   — P(touch), what the table actually predicts.
+      HELD      — reached, and price never closed back through it.
+      FLOW      — reached, then moved FLOW_THRESH% the right way before the
+                  wrong way. This is the "a level where the stock turns"
+                  reading, and it is the OLD sr_reach_table's touch-and-bounce
+                  metric, which the P(touch) rebuild deliberately replaced.
+
+    THE CONTROL COLUMN IS NOT OPTIONAL. Measured on 2026-08, FLOW came out at
+    70% — which looks like a large edge until you place a level at a comparable
+    distance that has nothing to do with support structure, which also scores
+    71%. Two mechanical effects inflate the raw number: a bar whose Low touches
+    the level almost always CLOSES above its own low (91% of August's support
+    touches closed favourably on the touch bar itself, median +1.11%), and a
+    quiet mean-reverting tape bounces off any price. Printing FLOW without the
+    control would manufacture an edge out of both.
+
+    The control permutes DISTANCES across the symbols logged on the same date:
+    same distance distribution, same tape, no link to where support actually
+    sits. An earlier version rebuilt the level from its own distance
+    (cmp0*(1-dist)), which reconstructs the level EXACTLY and reported a 0.0
+    difference by construction.
+    """
+    print(f"\n{'='*70}")
+    print(f"  1d. ACTED-ON OUTCOMES — reached / held / changed flow (+-{FLOW_THRESH:.0f}%)")
+    print(f"{'='*70}")
+
+    rng = np.random.default_rng(0)
+    cache = {}
+    real, ctrl, hs = [], [], []
+    pending = {}
+
+    for _, row in log_df.iterrows():
+        sym = row["Symbol"]
+        if sym not in cache:
+            cache[sym] = load_price(sym)
+        pdf = cache[sym]
+        if pdf is None:
+            continue
+        W = WINDOW_DAYS
+        if USE_LOGGED_HORIZON and pd.notna(row.get("HorizonDays")):
+            W = int(row["HorizonDays"])
+        if W <= 0:
+            continue
+        fwd = pdf[pdf.index > row["Date"]].head(W)
+        if len(fwd) < W:          # horizon not closed — not scoreable
+            continue
+        cmp_ = row.get("CMP")
+        if pd.isna(cmp_) or float(cmp_) <= 0:
+            continue
+        cmp_ = float(cmp_)
+
+        for side, direction in [("S1", "down"), ("R1", "up")]:
+            lv = row.get(side)
+            if pd.isna(lv) or float(lv) <= 0:
+                continue
+            L = float(lv)
+            tou = (fwd["Low"] <= L * (1 + TOUCH_PCT)) if direction == "down" \
+                else (fwd["High"] >= L * (1 - TOUCH_PCT))
+            touched = bool(tou.any())
+            rec = {"Date": row["Date"], "side": side, "touched": touched,
+                   "held": np.nan, "flow": np.nan, "ret": np.nan}
+            if touched:
+                f = fwd.index[tou.argmax()]
+                after = fwd.loc[f:]
+                end = float(after["Close"].iloc[-1])
+                rec["held"] = (not bool((after["Close"] < L).any())) if direction == "down" \
+                    else (not bool((after["Close"] > L).any()))
+                rec["ret"] = (end / L - 1) * 100 if direction == "down" \
+                    else (L / end - 1) * 100
+                rec["flow"] = _race(after, L, direction, FLOW_THRESH)
+                c0 = float(after["Close"].iloc[0])
+                hs.append(c0 / L - 1 if direction == "down" else 1 - c0 / L)
+            real.append(rec)
+            pending.setdefault((row["Date"], side), []).append(
+                (cmp_, abs(L / cmp_ - 1), direction, fwd))
+
+    if not real:
+        print("  No level has a closed horizon yet.")
+        return
+
+    for (dt, side), grp in pending.items():
+        if len(grp) < 3:
+            continue
+        for (cmp_, _, direction, fwd), dc in zip(
+                grp, rng.permutation([g[1] for g in grp])):
+            Lc = cmp_ * (1 - dc) if direction == "down" else cmp_ * (1 + dc)
+            tc = (fwd["Low"] <= Lc * (1 + TOUCH_PCT)) if direction == "down" \
+                else (fwd["High"] >= Lc * (1 - TOUCH_PCT))
+            if not tc.any():
+                continue
+            after = fwd.loc[fwd.index[tc.argmax()]:]
+            res = _race(after, Lc, direction, FLOW_THRESH)
+            if res is not None:
+                ctrl.append({"Date": dt, "side": side, "flow": res})
+
+    R = pd.DataFrame(real)
+    C = pd.DataFrame(ctrl)
+    print(f"  {'':>5} {'levels':>7} {'reached':>9} {'+HELD':>9} {'+FLOW':>9} "
+          f"{'control':>9} {'mean ret':>10}")
+    for side in ["S1", "R1"]:
+        g = R[R["side"] == side]
+        if not len(g):
+            continue
+        t = g[g["touched"]]
+        c = C[C["side"] == side] if len(C) else C
+        cf = f"{c['flow'].mean()*100:8.0f}%" if len(c) else "       —"
+        print(f"  {side:>5} {len(g):7d} {g['touched'].mean()*100:8.0f}% "
+              f"{t['held'].mean()*100:8.0f}% {t['flow'].mean()*100:8.0f}% {cf} "
+              f"{t['ret'].mean():+9.2f}%")
+    print(f"\n  reached  = P(touch), the quantity the table predicts")
+    print(f"  +HELD    = of those reached, price never closed back through the level")
+    print(f"  +FLOW    = of those reached, moved {FLOW_THRESH:.0f}% the right way first")
+    print(f"  control  = SAME race at a permuted distance, unrelated to support structure")
+
+    # HELD scales with horizon and is NOT comparable across rows logged at
+    # different points in the month: with one session left a level can barely
+    # be broken, so late-month rows inflate it. Pooled HELD read 53% on August
+    # while the month-START levels (16 sessions to run) held only 28%.
+    ht = R[R["touched"]].copy()
+    if "Horizon" not in ht.columns and len(ht):
+        ht = ht.join(log_df.set_index(["Date"])[[]], how="left")
+    print(f"\n  HELD BY HORIZON — it is nearly automatic when little time is left, so the")
+    print(f"  pooled figure above is not comparable across the month:")
+    hh = R[R["touched"]].merge(
+        log_df[["Date", "Symbol", "HorizonDays"]].drop_duplicates("Date"),
+        on="Date", how="left")
+    if "HorizonDays" in hh.columns and hh["HorizonDays"].notna().any():
+        hh["hb"] = pd.cut(pd.to_numeric(hh["HorizonDays"], errors="coerce"),
+                          [0, 4, 8, 12, 25],
+                          labels=["1-4d left", "5-8d", "9-12d", "13d+"])
+        for b, g in hh.groupby("hb", observed=True):
+            if len(g) < 10:
+                continue
+            print(f"      {str(b):>10}  n={len(g):4d}   held {g['held'].mean()*100:3.0f}%"
+                  f"   flow {g['flow'].mean()*100:3.0f}%")
+
+    if len(C) and len(R[R["touched"]]):
+        a = R[R["touched"]]["flow"].dropna().to_numpy(dtype=float)
+        b = C["flow"].dropna().to_numpy(dtype=float)
+        if len(a) > 20 and len(b) > 20:
+            diff = np.array([rng.choice(a, len(a), True).mean()
+                             - rng.choice(b, len(b), True).mean() for _ in range(4000)])
+            print(f"\n  FLOW minus control: {diff.mean()*100:+.1f}pp  "
+                  f"95% CI [{np.percentile(diff,2.5)*100:+.1f}, "
+                  f"{np.percentile(diff,97.5)*100:+.1f}]  "
+                  f"P(level better) {(diff>0).mean()*100:.0f}%")
+            print(f"  A control this close means the raw FLOW number is the TAPE, not the level.")
+    if hs:
+        h = np.array(hs)
+        print(f"\n  Mechanical head start: the touch bar itself closes favourably "
+              f"{(h>0).mean()*100:.0f}% of")
+        print(f"  the time, median {np.median(h)*100:+.2f}% — a bar whose Low reaches a level "
+              f"nearly always")
+        print(f"  closes above its own low. Much of FLOW is that, banked before the race starts.")
+
+
+# ──────────────────────────────────────────────
 # 2. LEVEL DRIFT
 # ──────────────────────────────────────────────
 
@@ -874,6 +1071,7 @@ def main():
     res_df = analyse_hit_rates(log_df)
     analyse_by_horizon(res_df)
     analyse_vol_regime(res_df)
+    analyse_acted_outcomes(log_df)
     analyse_drift(log_df)
     analyse_calibration(res_df)
     analyse_n_sensitivity(res_df)

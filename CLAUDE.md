@@ -1390,6 +1390,48 @@ stock_ai/
   moving S1 32.1->30.4% and R1 34.7->31.3%, both well inside the confidence
   intervals, and rebuilding trades a real record of what the system saw for a
   uniformity the numbers do not need.
+- THE LEVELS DO NOT MARK FLOW CHANGES — TESTED 2026-08-31, NEGATIVE (section 1d,
+  `analyse_acted_outcomes`). The user's working definition of S/R is "a level
+  where the stock CHANGES ITS FLOW: on reaching support it then rises, on
+  reaching resistance it then falls". That is a touch-AND-BOUNCE question — the
+  metric the OLD sr_reach_table measured and that the P(touch) rebuild
+  deliberately replaced — so the system predicts REACHING while it was being
+  read as predicting TURNING. Measured across every August log date at each
+  row's own horizon: touched levels moved 2% the right way before the wrong way
+  69% (S1) / 67% (R1) of the time, which looks like a large edge and is not.
+  A PERMUTATION CONTROL — the same race at a distance shuffled across the
+  symbols logged that day, so it has the same distance distribution and the
+  same tape but no link to where support actually sits — scores 73% / 62%.
+  FLOW minus control +0.4pp, 95% CI [-6.9, +7.1], P(level better) 56%. The
+  dynamic panel independently agrees (60/58% vs control 62/61%, control HIGHER).
+  TWO MECHANICAL ARTEFACTS inflate the raw number and both must be controlled
+  for in any future version of this test: (1) a bar whose Low reaches a level
+  almost always CLOSES above its own low — 86% of August's touches closed
+  favourably on the touch bar itself, median +1.09% — so the race must start on
+  the NEXT bar (starting on the touch bar put the 1% race at 88%); (2) a quiet
+  mean-reverting tape bounces off any price. A FIRST version of the control was
+  wrong in a way worth recording: it rebuilt the level as cmp0*(1-dist) using
+  that level's OWN distance, which reconstructs the level EXACTLY, so "control"
+  and "real" were the same number and the difference was 0.0 by construction.
+  ALSO: neither factor the user proposed conditioning on carries information
+  here. P(touch) does NOT predict flow change (AUC 0.488; terciles flat at
+  70/72/68%; corr with return -0.024) and it is ANTI-predictive for the
+  narrower "did it hold" question (AUC 0.384 — high P(touch) means a NEAR
+  level, and near levels are both easy to reach and easy to break, so a high
+  S1_prob must never be read as a strong support). HorizonDays shows a gradient
+  (76% at 1-4d to 68% at 13-16d) but is PERFECTLY COLLINEAR with the calendar
+  date inside one month — every August row points at 2026-08-25, so H=16 IS
+  08-03 — and the two cannot be separated without more months. Flow at a 3%
+  threshold falls to 40-52%, i.e. at or below a coin flip: the small-scale
+  bounce is noise around a level, not directional follow-through. This is the
+  5th independent negative on trading these levels, after
+  PREREG_tradeable_levels (199 symbols / 39,987 obs, holdout 43.9%/49.0% vs a
+  55% bar), the S/R improvement batch, the exit-into-resistance test and the
+  containment-band trading test. TREAT THE SUBSYSTEM AS ANSWERING "WHERE MIGHT
+  PRICE GO" (it does that well — AUC 0.839), NOT "WHERE WILL PRICE TURN".
+  Entry pricing lives in full_advisor.py's ATR-based entry/stop/target; the
+  "level it should not dip below" question is containment_band.py's, and that
+  ships as a RISK tool because trading it failed on adverse selection.
 - `sr_monthend_analysis.py` checks hit-rate, level drift, probability calibration,
   n-sensitivity, distance-vs-accuracy — run only after 2-3+ weeks of logged data.
   REWORKED 2026-08-31 after the August review above, because the report itself
@@ -1428,7 +1470,15 @@ stock_ai/
   calibration split on that ratio. READ IT BEFORE SECTION 1. Diagnostic only:
   realised vol is not knowable at log time and must never feed a live
   probability.
-  (7) Calibration now compares actual against the MEAN PREDICTED probability
+  (7) NEW SECTION 1d (acted-on outcomes) — reports REACHED / +HELD / +FLOW side
+  by side, because the subsystem is routinely read as answering all three at
+  once and they give very different numbers. THE CONTROL COLUMN IS NOT OPTIONAL
+  and must never be dropped: FLOW alone reads ~70% and looks like a large edge,
+  while a permuted-distance control reads ~71%. +HELD is reported BY HORIZON
+  too, since it is nearly automatic with one session left (85% at 1-4d vs 37%
+  at 13d+) and the pooled figure is not comparable across the month — pooled
+  HELD read 53% on August while the month-START levels held only 28%.
+  (8) Calibration now compares actual against the MEAN PREDICTED probability
   in each bucket, not the bucket MIDPOINT — the midpoint misstates the gap
   whenever a bucket is wide or rows cluster at one end (August's 0-20 bucket
   averaged 5.7% predicted against a 9.5% midpoint, so the old version reported
