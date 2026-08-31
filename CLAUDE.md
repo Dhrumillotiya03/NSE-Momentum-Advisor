@@ -718,6 +718,25 @@ stock_ai/
   and the AVG row count stays fixed). Any reader of these files must filter
   `Date == "AVG"`; sr_monthend_analysis.load_log does this before parsing
   dates, since "AVG" would otherwise become NaT and be scored as a snapshot.
+  A SYMBOL COULD BE SILENTLY MISSING ITS AVG ROW, FIXED 2026-08-31
+  (`build_avg_rows`). The close-basis-only filter (avoid a day you happened to
+  run multiple times outweighing a day you ran once) was applied GLOBALLY —
+  `if len(closes): daily = closes` — before the per-symbol groupby, so it only
+  checked whether ANY symbol had a close-basis row that month, not whether
+  THIS one did. A symbol whose entire recorded history for the month was
+  live-basis (logged once, mid-session, on the day it entered or left the
+  panel, with no close-basis row ever written) lost its only data and got NO
+  AVG row at all, rather than falling back to what it had. Found live:
+  AARTIIND/GOLDBEES (August, one live-basis row each on 08-03, the day they
+  left the fixed panel) and ANGELONE/PAYTM/PFC/SHRIRAMFIN (July, one
+  live-basis row each on 07-31) were silently absent from every AVG summary.
+  Fixed to apply the close-preference PER SYMBOL inside the groupby, falling
+  back to that symbol's own live-basis rows only when it has no close-basis
+  ones — verified zero regressions among the 61+15 symbols that were already
+  correct. Backups: `data/_quarantine/sr_month_2026-0{7,8}_pre_avgfix_
+  2026-08-31.csv` and the sr_dynamic equivalents (dynamic panel had no
+  missing symbols this time, but shares the same buggy function via
+  `sr_dynamic_logger`'s import of `write_month`).
   sr_dynamic_logger writes the same trio under `sr_dynamic_today.csv` /
   `sr_dynamic_month_YYYY-MM.csv` — NEVER share files with the fixed panel.
   Month files are keyed on each row's own DATA date, so a catch-up run

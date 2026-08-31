@@ -300,17 +300,27 @@ def build_avg_rows(daily):
     Computed from the DAILY rows only — any existing AVG rows are stripped by
     the caller first, so re-running never averages an average back into itself.
     """
-    # Average CLOSE rows only. Including intraday snapshots would weight a day
-    # you happened to run five times five times as heavily, so the average
-    # would describe your run schedule rather than the market. Falls back to
-    # all rows for legacy files written before CMP_basis existed.
-    if "CMP_basis" in daily.columns:
-        closes = daily[daily["CMP_basis"].fillna("close") == "close"]
-        if len(closes):
-            daily = closes
-
     out = []
     for sym, grp in daily.groupby("Symbol", sort=True):
+        # Prefer CLOSE rows for THIS symbol. Including intraday snapshots
+        # would weight a day you happened to run five times five times as
+        # heavily, so the average would describe your run schedule rather
+        # than the market. MUST be per-symbol, not a global filter applied
+        # once across the whole month: a symbol whose entire recorded
+        # history that month is live-basis (e.g. logged once mid-session on
+        # the day it entered or left the panel, with no close-basis row
+        # ever written) was being silently dropped from the AVG output
+        # altogether — a global `if len(closes)` check only sees whether
+        # ANY symbol has a close row, not whether THIS one does, so a
+        # symbol with zero close rows lost its only data instead of falling
+        # back to it. Verified live: AARTIIND/GOLDBEES (August, one
+        # live-basis row each on 08-03) and ANGELONE/PAYTM/PFC/SHRIRAMFIN
+        # (July, one live-basis row each on 07-31) all silently had no AVG
+        # row despite having real, usable data for the month.
+        if "CMP_basis" in grp.columns:
+            closes = grp[grp["CMP_basis"].fillna("close") == "close"]
+            if len(closes):
+                grp = closes
         row = {"Symbol": sym, "Date": AVG_ROW_LABEL}
         for col in AVG_COLUMNS:
             if col in grp.columns:
