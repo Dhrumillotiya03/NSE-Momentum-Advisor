@@ -269,28 +269,58 @@ def merge_log(new_df, log_path):
     return combined.sort_values(["Symbol", "Date"])
 
 
-def month_path_for(date_str):
-    """../data/sr_month_YYYY-MM.csv for a row's DATA date.
+def month_path_for(horizon_end_str):
+    """../data/sr_month_YYYY-MM.csv for a row's own HorizonEnd (its REBALANCE
+    CYCLE), not the calendar month of the log date.
 
-    Keyed on the data date, not wall-clock: a late/catch-up run logging the
-    31st's data on the 1st belongs in the OLD month's file, or the month
-    boundary would silently split one session across two files.
+    A row logged 2026-08-26 targets the SEPTEMBER cycle (horizon_end() rolls
+    to the following month on and after the rebalance day itself — see
+    sr_horizon.py), so filing it under "August" purely because it was LOGGED
+    in August would silently drop it from every 21-day-cycle measurement of
+    September, and would blend two different rebalance cycles' rows into one
+    "August" average. See write_month for the completeness implication of
+    this same rollover.
     """
-    return MONTH_PATH_FMT.format(ym=str(date_str)[:7])
+    return MONTH_PATH_FMT.format(ym=str(horizon_end_str)[:7])
 
 
-def month_is_complete(daily, ym):
-    """Has this month's data collection finished?
+def cycle_key(df):
+    """The rebalance-cycle grouping key for each row: HorizonEnd's own
+    calendar month, falling back to the row's DATA-date month only for
+    legacy rows logged before the HorizonEnd column existed."""
+    key = df["HorizonEnd"].astype(str).str[:7] if "HorizonEnd" in df.columns \
+        else pd.Series([None] * len(df), index=df.index)
+    fallback = df["Date"].astype(str).str[:7]
+    bad = key.isna() | key.isin(["nan", "None", "NaT", ""])
+    return key.where(~bad, fallback)
 
-    True once a logged DATA date reaches the month's rebalance day (the last
-    Tuesday). Uses >= rather than == on purpose: if that Tuesday is an NSE
-    holiday no row will ever fall exactly on it, and an equality test would
-    silently never write the averages for that month.
+
+def month_is_complete(daily, ym, extra_max_date=None):
+    """Has this rebalance CYCLE's data collection finished?
+
+    True once the LATEST DATE OBSERVED reaches the month's rebalance day
+    (the last Tuesday) — that date may come from this cycle's own rows, or
+    from `extra_max_date` (a later date seen elsewhere in the same write,
+    see write_month). The extra_max_date path is NOT optional under
+    cycle-based grouping: horizon_end() rolls to the FOLLOWING cycle on and
+    after the rebalance day itself, so a cycle's own file can never itself
+    contain a row dated on its own target — that row belongs to the NEXT
+    cycle by construction, and completeness can only be proven by a date
+    from outside the cycle's own data advancing past the target.
+
+    Uses >= rather than == on purpose: if that Tuesday is an NSE holiday no
+    row will ever fall exactly on it, and an equality test would silently
+    never write the averages for that month.
     """
     year, month = int(ym[:4]), int(ym[5:7])
     last_tue = H.last_tuesday_of_month(year, month)
     dates = pd.to_datetime(daily["Date"], errors="coerce").dropna()
-    return bool(len(dates)) and dates.max() >= last_tue
+    cand = dates.max() if len(dates) else None
+    if extra_max_date is not None:
+        extra = pd.Timestamp(extra_max_date)
+        if pd.notna(extra) and (cand is None or extra > cand):
+            cand = extra
+    return cand is not None and pd.notna(cand) and cand >= last_tue
 
 
 def build_avg_rows(daily):
@@ -357,18 +387,30 @@ def write_today(new_df, path=None):
 
 
 def write_month(new_df, path_fmt=None):
-    """Append today's rows to this month's file, recomputing the running
-    averages. Rows are deduped on (Date, Symbol) exactly as the main log is,
-    so a re-run replaces its own rows rather than double-counting them into
-    the averages.
+    """Append today's rows to the right rebalance-CYCLE file, recomputing the
+    running averages. Rows are deduped on (Date, Symbol) exactly as the main
+    log is, so a re-run replaces its own rows rather than double-counting
+    them into the averages.
 
-    Rows are grouped by their own DATA date, so a run that straddles a month
-    boundary (a late catch-up logging the 31st alongside the 1st) files each
-    row under the right month instead of lumping both into one.
+    Rows are grouped by CYCLE (each row's own HorizonEnd month), NOT by the
+    calendar month of the log date. A row logged 2026-08-26 targets
+    September's rebalance (horizon_end() rolls over on and after the
+    rebalance day itself), so a "21 trading days per cycle" reading of the
+    August file needs it to stop at the LAST pre-rollover session and the
+    September file to start picking it up from there — filing purely by
+    calendar date would instead blend the tail of one cycle into the head of
+    the wrong month's average, and truncate the other cycle's file short of
+    its own real length. A late/catch-up run logging several dates at once
+    is unaffected: each row still carries its own correct HorizonEnd and
+    therefore lands in the right cycle file regardless of what date it
+    happens to be logged on.
     """
     path_fmt = path_fmt or MONTH_PATH_FMT
     written = []
-    for ym, grp in new_df.groupby(new_df["Date"].astype(str).str[:7]):
+    run_max_date = pd.to_datetime(new_df["Date"], errors="coerce").max()
+    touched = set()
+
+    for ym, grp in new_df.groupby(cycle_key(new_df)):
         path = path_fmt.format(ym=ym)
         combined = merge_log(grp, path)
 
@@ -378,7 +420,7 @@ def write_month(new_df, path_fmt=None):
         daily, _ = split_daily_rows(combined)
         daily = daily.sort_values(["Symbol", "Date"])
 
-        complete = month_is_complete(daily, ym)
+        complete = month_is_complete(daily, ym, extra_max_date=run_max_date)
         if complete:
             out = pd.concat([daily, build_avg_rows(daily)], ignore_index=True)
         else:
@@ -387,6 +429,36 @@ def write_month(new_df, path_fmt=None):
         out = out[ordered_columns(out)]
         out.to_csv(path, index=False)
         written.append((path, len(daily), complete))
+        touched.add(ym)
+
+    # SWEEP: a PRIOR cycle can become complete purely because today's date
+    # has advanced past ITS target, even though none of today's own rows
+    # belong to it — by construction, the very session a cycle's target
+    # date arrives, every row logged that day already targets the
+    # FOLLOWING cycle (see month_is_complete's docstring), so that cycle's
+    # own file can never trigger its own completeness from its own writes.
+    # Re-check every OTHER existing cycle file this run didn't touch.
+    if pd.notna(run_max_date):
+        import glob
+        for path in sorted(glob.glob(path_fmt.format(ym="*"))):
+            base = os.path.basename(path)
+            ym = base.rsplit("_", 1)[-1].removesuffix(".csv")
+            if ym in touched:
+                continue
+            try:
+                existing = pd.read_csv(path)
+            except Exception:
+                continue
+            daily, had_avg = split_daily_rows(existing)
+            if had_avg or not len(daily):
+                continue
+            daily = daily.sort_values(["Symbol", "Date"])
+            if not month_is_complete(daily, ym, extra_max_date=run_max_date):
+                continue
+            out = pd.concat([daily, build_avg_rows(daily)], ignore_index=True)
+            out = out[ordered_columns(out)]
+            out.to_csv(path, index=False)
+            written.append((path, len(daily), True))
     return written
 
 

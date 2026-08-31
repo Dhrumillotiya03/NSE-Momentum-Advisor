@@ -1016,8 +1016,14 @@ def main():
         USE_LOGGED_HORIZON = True
     if "--exclude-day0" in sys.argv:
         EXCLUDE_DAY0 = True
-    # --month YYYY-MM: restrict to one month's LOG dates. The natural cohort,
-    # because every row in a month shares one horizon end (its last Tuesday).
+    # --month YYYY-MM: restrict to one REBALANCE CYCLE — every row whose own
+    # HorizonEnd falls in that month, not every row logged on a calendar date
+    # in that month. Those are NOT the same set: sr_horizon.horizon_end()
+    # rolls to the FOLLOWING month's cycle on and after the rebalance day
+    # itself, so rows logged in the last few calendar days of a month (e.g.
+    # 2026-08-25 onward) already target NEXT month's horizon. Filtering by
+    # calendar date would pull those into the wrong cohort and truncate the
+    # following month's cohort short of its own real ~21-session length.
     if "--month" in sys.argv:
         idx = sys.argv.index("--month")
         MONTH = sys.argv[idx + 1]
@@ -1040,11 +1046,21 @@ def main():
 
     if MONTH:
         before = len(log_df)
-        log_df = log_df[log_df["Date"].dt.strftime("%Y-%m") == MONTH]
+        # Cycle key = HorizonEnd's own month; legacy rows without HorizonEnd
+        # (predating that column, distinct from the pre-v2-scorer cutoff
+        # already dropped above) fall back to their own Date's month, the
+        # only thing knowable about them.
+        if "HorizonEnd" in log_df.columns:
+            cyc = pd.to_datetime(log_df["HorizonEnd"], errors="coerce").dt.strftime("%Y-%m")
+            cyc = cyc.fillna(log_df["Date"].dt.strftime("%Y-%m"))
+        else:
+            cyc = log_df["Date"].dt.strftime("%Y-%m")
+        log_df = log_df[cyc == MONTH]
         if not len(log_df):
             print(f"\nNo rows logged in {MONTH}.")
             sys.exit(0)
-        print(f"\nCohort --month {MONTH}: kept {len(log_df)} of {before} rows")
+        print(f"\nCohort --month {MONTH} (by rebalance cycle, i.e. HorizonEnd): "
+              f"kept {len(log_df)} of {before} rows")
 
     # Data quality is assessed on the RAW cohort, BEFORE any exclusion — a day
     # thinned by --exclude-contaminated is not a "partial day" (a missed run or

@@ -703,12 +703,14 @@ stock_ai/
   is what sr_monthend_analysis reads and must not be rotated or truncated.
   (2) `sr_today.csv` — today only, OVERWRITTEN each run. A convenience view;
   nothing is lost by overwriting since (1) and (3) keep the history.
-  (3) `sr_month_YYYY-MM.csv` — one file per CALENDAR month, appended daily.
-  Daily rows are plain (no avg columns). ONCE the month's data collection
-  reaches the rebalance day (last Tuesday), one `AVG` summary row per stock is
-  appended — Date literally reads `AVG` — holding the month's mean CMP/S1/R1
-  plus `Days` = the number of sessions averaged. Rows also carry `High`/`Low`
-  from the SAME bar as CMP.
+  (3) `sr_month_YYYY-MM.csv` — one file per REBALANCE CYCLE (named for the
+  month its target last-Tuesday falls in — NOT the calendar month rows were
+  LOGGED in; see the 2026-08-31 fix below, this was wrong until then),
+  appended daily. Daily rows are plain (no avg columns). ONCE the month's data
+  collection reaches the rebalance day (last Tuesday), one `AVG` summary row
+  per stock is appended — Date literally reads `AVG` — holding the month's
+  mean CMP/S1/R1 plus `Days` = the number of sessions averaged. Rows also
+  carry `High`/`Low` from the SAME bar as CMP.
   The completeness test is `max(logged date) >= last Tuesday`, NOT equality:
   if that Tuesday is an NSE holiday no row falls exactly on it and an equality
   test would silently never write the averages.
@@ -737,6 +739,69 @@ stock_ai/
   2026-08-31.csv` and the sr_dynamic equivalents (dynamic panel had no
   missing symbols this time, but shares the same buggy function via
   `sr_dynamic_logger`'s import of `write_month`).
+- BIGGER BUG IN THE SAME AREA, FOUND AND FIXED SAME DAY (2026-08-31, user
+  spec — asked directly whether trailing-days-of-a-month data correctly
+  rolls into next month's cycle): month files were grouped by the CALENDAR
+  DATE a row was logged on, but `sr_horizon.horizon_end()` rolls a row's own
+  target to the FOLLOWING month's rebalance on and after the current month's
+  last Tuesday ITSELF (a row logged 2026-08-25 already has HorizonEnd
+  2026-09-29 — verified live: 2026-08-24 HorizonDays=1/HorizonEnd=08-25,
+  2026-08-25 HorizonDays=25/HorizonEnd=09-29, i.e. the row logged ON the
+  rebalance day is already the FIRST row of the NEXT cycle, not the last of
+  the one ending that day). So `sr_month_2026-08.csv` was blending TWO
+  different rebalance cycles: 08-03..08-24 (August's own cycle, HorizonEnd
+  08-25) AND 08-25..08-28 (the START of September's cycle, HorizonEnd
+  09-29) — contaminating August's AVG summary with September-cycle rows, and
+  guaranteeing `sr_month_2026-09.csv` would start short by however many
+  trailing-August-calendar-days actually belonged to it. The user's own
+  framing was exactly right: truncating those days out of September
+  undercounts its true ~21-session cycle. Confirmed the SAME bug existed one
+  cycle back too — `sr_month_2026-07.csv` held 07-29..07-31 rows that
+  targeted August's cycle (ANGELONE/PAYTM/PFC/SHRIRAMFIN's 07-31 rows,
+  exactly the four "recovered" by the AVG-row fix immediately above — they
+  were never really single-day July stragglers, they were August-cycle data
+  mis-filed under July's last calendar day).
+  FIX (`sr_daily_logger.write_month`): rows are now grouped by `cycle_key()`
+  — each row's own `HorizonEnd` month, falling back to the row's own Date's
+  month only for legacy rows logged before HorizonEnd existed (nothing else
+  is knowable about those). NON-OBVIOUS COMPLETENESS WRINKLE: because the
+  rebalance-day row itself already belongs to the NEXT cycle, a cycle's own
+  file can NEVER contain a row dated on its own target — so `month_is_complete`
+  can no longer prove completeness from a cycle's own rows alone. It now
+  accepts an `extra_max_date` (the latest date seen anywhere in the current
+  write) and `write_month` additionally SWEEPS every other existing
+  `sr_month_*.csv`/`sr_dynamic_month_*.csv` file each run, finalizing (writing
+  AVG rows into) any that have reached their target via this run's date even
+  though none of today's own rows landed in them — this is what lets August's
+  file get its AVG rows written on exactly the run that first produces a
+  September row, rather than never, since August's own file can no longer
+  self-trigger. VERIFIED by replaying the full daily log for both panels
+  day-by-day through the new logic in a scratch directory before touching
+  production: August's file correctly stops at 08-24 (complete, AVG written
+  on the 08-25 run), September's file correctly starts collecting from 08-25
+  (not yet complete). PRODUCTION FILES REBUILT (superseding the AVG-only fix
+  above, which was still computed against cycle-contaminated file content):
+  read all existing `sr_month_2026-0{7,8}.csv` daily rows (both panels),
+  regrouped by `cycle_key`, rewritten fresh per cycle rather than merged
+  (merge_log only replaces MATCHING (Date,Symbol) pairs, so it cannot by
+  itself remove a row that no longer belongs in a file at all). Result:
+  August fixed panel 983 rows/63 symbols/complete=True (07-31..08-24);
+  September fixed panel created fresh, 244 rows/61 symbols/complete=False
+  (08-25..08-28, correctly awaiting 09-29); July fixed panel now correctly
+  holds only the 15 symbols with no logged HorizonEnd at all (285 rows).
+  Dynamic panel rebuilt identically. Backups:
+  `data/_quarantine/sr_{,dynamic_}month_2026-0{7,8}_pre_cyclefix_
+  2026-08-31.csv`. `sr_monthend_analysis.py --month` carried the identical
+  bug (filtered by `Date`'s calendar month, not each row's own `HorizonEnd`)
+  and is fixed the same way — verified `--month 2026-08` now reports "Date
+  range: 2026-07-31 -> 2026-08-24" (correctly picking up the July-31 tail
+  AND correctly excluding the August-25-onward head of the next cycle).
+  The published August S/R review's actual NUMBERS are unaffected by this:
+  `analyse_hit_rates` already excludes any row whose forward window hasn't
+  closed, and the 08-25..08-28 rows' September horizon (needing data out to
+  09-29) had zero closed windows against the archive either way — the bug
+  only ever corrupted file-level AVG summaries and any future `--month
+  2026-09` cohort query, not anything already reported.
   sr_dynamic_logger writes the same trio under `sr_dynamic_today.csv` /
   `sr_dynamic_month_YYYY-MM.csv` — NEVER share files with the fixed panel.
   Month files are keyed on each row's own DATA date, so a catch-up run
