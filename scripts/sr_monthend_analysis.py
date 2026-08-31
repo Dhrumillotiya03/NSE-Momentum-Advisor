@@ -13,15 +13,30 @@ Analyses performed:
 
 Usage:
     python sr_monthend_analysis.py
+    python sr_monthend_analysis.py --month 2026-08   ← one month's cohort only
     python sr_monthend_analysis.py --touch-pct 1.0   ← override touch tolerance
-    python sr_monthend_analysis.py --window 10       ← shorter forward horizon
+    python sr_monthend_analysis.py --window 10       ← FIXED forward horizon
     python sr_monthend_analysis.py --exclude-day0    ← drop already-touching levels
+    python sr_monthend_analysis.py --exclude-contaminated  ← drop rows whose CMP
+                                     matches no archive bar for its own date
 
-WINDOW NOTE: a 21-day hit rate needs 21 trading bars after each log date. On a
-log shorter than that, NO window resolves and the rate is unmeasurable at 21d.
---window 7/10 measures a genuinely resolvable shorter horizon instead. A 10d
-rate is NOT comparable to the 21d backtested ~65-68% figure — shorter window,
-strictly fewer touches, so it reads lower by construction.
+THE DEFAULT IS NOW THE PRODUCTION HORIZON (2026-08-31). Every row is scored
+against its OWN logged HorizonDays — distance to that month's last Tuesday —
+because that is the question the subsystem actually answers. It used to default
+to a fixed 21 days, which on the August log produced "R1 95.3%": no August row
+had 21 sessions of forward data, so the figure was built almost entirely from
+JULY rows, and July predates min-separation (levels sat a median 1.9-2.3% from
+spot and were near-guaranteed to be touched). A headline number assembled from
+the previous month's pre-fix rows is worse than no number. `--window N` still
+forces a fixed horizon for comparison; without HorizonDays in the log the tool
+falls back to it and says so.
+
+WINDOW NOTE: an N-day hit rate needs N trading bars after each log date. A
+shorter window is NOT comparable to the 21d backtested ~65-68% figure — fewer
+bars, strictly fewer touches, so it reads lower by construction. The production
+horizon shrinks through the month (16 days early, 1 day at the end), so its
+pooled rate is likewise not comparable to any fixed-window number; section 1b
+breaks it out by horizon length for exactly that reason.
 """
 
 import os, sys
@@ -45,13 +60,30 @@ WINDOW_DAYS = 21
 # production question — "will it touch before the rebalance date?" — where the
 # window differs per row. Rows logged before HorizonDays existed fall back to
 # WINDOW_DAYS.
-USE_LOGGED_HORIZON = False
+# DEFAULT TRUE since 2026-08-31 — see the docstring. Set False by passing an
+# explicit --window N. Falls back to WINDOW_DAYS (loudly) if the log predates
+# the HorizonDays column.
+USE_LOGGED_HORIZON = True
 
 # Exclude levels already inside the touch band on the log date. Those are
 # arithmetically guaranteed hits carrying zero predictive content, and they
 # inflate S1/R1 by ~7pp on this sample. Off by default (keeps the historical
 # definition); --exclude-day0 turns it on.
 EXCLUDE_DAY0 = False
+
+# Restrict to one month's log dates, e.g. "2026-08". None = whole log.
+MONTH = None
+
+# Drop rows whose logged CMP matches no bar in the price archive for its own
+# date. Those come from pre-settlement evening runs and mid-session live-tick
+# rows (see audit_sr_log.py); 27% of August's cohort carried one, concentrated
+# in five whole-panel dates. LOG_PREVIOUS_SESSION closed the leak on 2026-08-19
+# — zero contaminated rows since — so this only ever affects historical months.
+EXCLUDE_CONTAMINATED = False
+CONTAM_TOL = 0.0005   # same 0.05% float-noise tolerance as audit_sr_log.TOL
+
+# Bootstrap draws for the date-clustered confidence intervals.
+BOOTSTRAP_N = 4000
 
 
 # ──────────────────────────────────────────────
@@ -109,6 +141,72 @@ def load_price(symbol):
     for col in ["High", "Low", "Close"]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
     return df.dropna(subset=["High", "Low", "Close"])
+
+
+# ──────────────────────────────────────────────
+# STATISTICAL UNIT: THE DATE, NOT THE ROW
+# ──────────────────────────────────────────────
+
+def clustered_ci(df, col="Hit", n_boot=None):
+    """95% CI for a rate, resampling DATES rather than rows.
+
+    The panel logs ~61 symbols on the same session, and on any given day they
+    share the market's move — a quiet tape suppresses touches across the whole
+    panel at once. Treating those 61 rows as independent observations
+    understates the interval by roughly sqrt(panel size), which is enough to
+    make an ordinary month look like a significant deviation. Resampling whole
+    dates keeps the within-day correlation intact.
+
+    This is the same lesson as the 2026-08-15 touch-table calibration study,
+    which had to switch its statistical unit from rows to dates before its
+    result meant anything.
+    """
+    if "Date" not in df.columns or not len(df):
+        return (float("nan"), float("nan"))
+    dates = df["Date"].unique()
+    if len(dates) < 2:
+        return (float("nan"), float("nan"))
+    groups = [df.loc[df["Date"] == d, col].to_numpy(dtype=float) for d in dates]
+    rng = np.random.default_rng(0)   # fixed seed: same log => same interval
+    n = len(groups)
+    means = np.empty(n_boot or BOOTSTRAP_N)
+    for i in range(len(means)):
+        pick = rng.integers(0, n, n)
+        means[i] = np.concatenate([groups[j] for j in pick]).mean()
+    return float(np.percentile(means, 2.5)), float(np.percentile(means, 97.5))
+
+
+def fmt_ci(lo, hi):
+    if lo != lo or hi != hi:      # NaN
+        return "   —          "
+    return f"[{lo*100:5.1f},{hi*100:5.1f}]"
+
+
+def contaminated_rows(log_df):
+    """(Date, Symbol) pairs whose logged CMP matches no archive bar for that
+    date. Recomputed here rather than read from audit_sr_log's CSV so the
+    exclusion can never silently run against a stale audit."""
+    bad = set()
+    cache = {}
+    for _, r in log_df.iterrows():
+        sym = r["Symbol"]
+        if sym not in cache:
+            cache[sym] = load_price(sym)
+        pdf = cache[sym]
+        if pdf is None or pd.isna(r.get("CMP")):
+            continue
+        d = r["Date"]
+        if d not in pdf.index:
+            continue
+        close = float(pdf.loc[d, "Close"])
+        cmp_ = float(r["CMP"])
+        if close > 0 and abs(cmp_ - close) / close > CONTAM_TOL:
+            bad.add((d, sym))
+    return bad
+
+
+def annualised_vol(returns):
+    return float(returns.std() * np.sqrt(252) * 100) if len(returns) >= 3 else None
 
 
 # ──────────────────────────────────────────────
@@ -210,6 +308,10 @@ def already_touching(cmp_, level, direction):
     return float(cmp_) >= float(level) * (1 - TOUCH_PCT)
 
 
+RES_COLUMNS = ["Level", "Symbol", "Prob", "N", "Hit", "FwdDays",
+               "Date", "Horizon", "DistPct", "VolAssumed", "VolRealised"]
+
+
 def analyse_hit_rates(log_df):
     # Does the log actually carry per-row horizons? --to-month-end silently
     # falls back to WINDOW_DAYS without them, which would misreport what was
@@ -278,8 +380,18 @@ def analyse_hit_rates(log_df):
                 continue
             hit = check_touch(pdf, log_date, row[lvl], direction, W)
             if hit is not None:   # None = window still open, not scoreable
+                cmp_ = row.get("CMP")
+                dist = (float(row[lvl]) / float(cmp_) - 1) * 100 \
+                    if pd.notna(cmp_) and float(cmp_) else np.nan
+                # Vol the table ASSUMED (trailing 252d, what reach_probability_v2
+                # keys on) vs vol that actually MATERIALISED over the window —
+                # the pair section 1c needs to tell a quiet month from decay.
+                hist = pdf.loc[pdf.index <= log_date, "Close"].pct_change().dropna().tail(252)
+                fut = pdf.loc[pdf.index > log_date, "Close"].pct_change().dropna().head(W)
                 results.append((lvl, sym, row[f"{lvl}_prob"], row[f"{lvl}_n"],
-                                hit, fwd_days))
+                                hit, fwd_days, log_date, W, dist,
+                                annualised_vol(hist) if len(hist) >= 30 else np.nan,
+                                annualised_vol(fut)))
             else:
                 open_windows[lvl] = open_windows.get(lvl, 0) + 1
 
@@ -292,30 +404,32 @@ def analyse_hit_rates(log_df):
     if not results:
         print("  Not enough time has passed since logging to evaluate any touches yet.")
         print("  (Need at least ~5 trading days after a log date to check.)")
-        return pd.DataFrame(columns=["Level", "Symbol", "Prob", "N", "Hit", "FwdDays"])
+        return pd.DataFrame(columns=RES_COLUMNS)
 
     if day0_skips:
         print(f"  Excluded {sum(day0_skips.values())} level(s) already inside the "
               f"touch band at log time (guaranteed hits): "
               + ", ".join(f"{k} {v}" for k, v in sorted(day0_skips.items())))
 
-    res_df = pd.DataFrame(results, columns=["Level", "Symbol", "Prob", "N", "Hit", "FwdDays"])
+    res_df = pd.DataFrame(results, columns=RES_COLUMNS)
 
     # Every row here is RESOLVED by construction: check_touch returned None for
     # any window that hadn't completed, and those never entered `results`. So a
     # False is a real miss and the mean is an honest rate — no filter needed.
     # (The previous `FwdDays>=21 | Hit` filter kept all hits but dropped every
     # unresolved miss, which forced 100% whenever no window had closed.)
+    print(f"  {'':4} {'hit rate':>9} {'n':>6} {'dates':>6}  {'95% CI (date-clustered)':>24}")
     for lvl in ["S1", "R1", "S2", "R2"]:
         sub = res_df[res_df["Level"] == lvl]
-        line = f"  {lvl}: "
-        if len(sub):
-            line += f"{sub['Hit'].mean()*100:.1f}% hit rate  (n={len(sub)} resolved)"
-        else:
-            line += "no resolved snapshots yet"
+        if not len(sub):
+            print(f"  {lvl:4} {'—':>9}   no resolved snapshots yet")
+            continue
+        lo, hi = clustered_ci(sub)
+        line = (f"  {lvl:4} {sub['Hit'].mean()*100:8.1f}% {len(sub):6d} "
+                f"{sub['Date'].nunique():6d}  {fmt_ci(lo, hi):>24}")
         pending = open_windows.get(lvl, 0)
         if pending:
-            line += f"  [{pending} window(s) still open — excluded, not scored]"
+            line += f"   [{pending} open]"
         print(line)
 
     if len(res_df):
@@ -330,6 +444,141 @@ def analyse_hit_rates(log_df):
               f"skewed toward EARLIER log dates. Treat as provisional.")
 
     return res_df
+
+
+# ──────────────────────────────────────────────
+# 1b. HORIZON STRATIFICATION
+# ──────────────────────────────────────────────
+
+def analyse_by_horizon(res_df):
+    """The production horizon SHRINKS through the month, so the pooled rate
+    mixes two different questions.
+
+    Every row in a month points at the same last-Tuesday horizon end, so
+    HorizonDays counts down (16 early in the month, 1 on the final day). "Will
+    price touch this tomorrow" and "within sixteen sessions" are not the same
+    question, and P(touch) is monotone in horizon by construction — pooling
+    them produces an average of two things nobody asked. Splitting also gives
+    the cleanest single check of whether horizon scaling works at all: the
+    model's predictions should track the realised rate ACROSS these buckets.
+    """
+    print(f"\n{'='*70}")
+    print("  1b. BY HORIZON LENGTH — the production window shrinks through the month")
+    print(f"{'='*70}")
+    d = res_df[res_df["Level"].isin(["S1", "R1"])].dropna(subset=["Prob"])
+    if len(d) < 20 or d["Horizon"].nunique() < 2:
+        print("  Not enough spread in horizon length to stratify.")
+        return
+    print(f"  {'horizon':>8} {'dates':>6} {'n':>6} {'actual':>8} {'predicted':>10} {'gap':>8}")
+    rows = []
+    MIN_BUCKET = 20   # below this a bucket is one or two symbols' luck
+    for H, g in d.groupby("Horizon"):
+        act, pred = g["Hit"].mean() * 100, g["Prob"].mean()
+        thin = len(g) < MIN_BUCKET
+        if not thin:
+            rows.append((H, act, pred))
+        print(f"  {int(H):7d}d {g['Date'].nunique():6d} {len(g):6d} {act:7.1f}% "
+              f"{pred:9.1f}% {act - pred:+7.1f}"
+              + ("   thin — excluded from the correlations below" if thin else ""))
+    if len(rows) >= 3:
+        # Correlations run on well-populated buckets only. A bucket holding two
+        # observations swings between 0% and 100% on one symbol's move, and a
+        # handful of those is enough to drag the correlation down and make
+        # working horizon scaling look broken. --exclude-contaminated thins
+        # specific horizons hard (it removes whole panel-days), so this guard
+        # matters exactly when the exclusion is on.
+        a = pd.DataFrame(rows, columns=["H", "act", "pred"])
+        print(f"\n  (correlations over {len(a)} buckets with n>={MIN_BUCKET})")
+        print(f"\n  corr(horizon, actual)    = {a['H'].corr(a['act']):+.3f}"
+              "   does reality depend on horizon?")
+        print(f"  corr(horizon, predicted) = {a['H'].corr(a['pred']):+.3f}"
+              "   does the model track it?")
+        print(f"  corr(predicted, actual)  = {a['pred'].corr(a['act']):+.3f}"
+              "   <- near 1.0 means the SHAPE is right even if the LEVEL is off")
+
+
+# ──────────────────────────────────────────────
+# 1c. VOLATILITY REGIME
+# ──────────────────────────────────────────────
+
+def analyse_vol_regime(res_df):
+    """Report the tape the month actually delivered, next to the tape the
+    table assumed.
+
+    WHY THIS SECTION EXISTS. reach_probability_v2 keys on distance x TRAILING
+    252-day volatility, so it cannot see a volatility regime that changes
+    inside the month. August 2026 realised 5.4% annualised on the index — the
+    0.3rd percentile of every 16-session window since 2010, against a 13.3%
+    trailing figure — and the model duly ran ~10pp hot. Conditioned on the
+    regime that materialised, it was calibrated (+5.1pp) where vol came in at
+    or above what was assumed, and hot (-11.7pp) where it came in quieter.
+
+    Without these numbers printed beside the hit rate, the next reader sees a
+    32% rate against a "65-68%" note and concludes the model has decayed. This
+    project has thrown away or misread working instruments three times that
+    way (the fake 100% S/R hit rate, a cash-only month scored "consistent",
+    call_report silently broken for 10 days), and an unexplained rate is the
+    most likely route to discarding a model that is in fact fine.
+
+    It is DIAGNOSTIC, not a correction: realised vol is not knowable at log
+    time, so this explains a month, it never adjusts a probability.
+    """
+    print(f"\n{'='*70}")
+    print("  1c. VOLATILITY REGIME — the tape the month delivered vs the tape assumed")
+    print(f"{'='*70}")
+    d = res_df.dropna(subset=["VolAssumed", "VolRealised", "Prob"]).copy()
+    if len(d) < 30:
+        print("  Not enough scored rows carrying both volatility measures.")
+        return
+    d["ratio"] = d["VolRealised"] / d["VolAssumed"]
+    d = d[np.isfinite(d["ratio"])]
+    print(f"  median trailing-252d vol the table USED    : {d['VolAssumed'].median():5.1f}%")
+    print(f"  median vol actually REALISED over horizon  : {d['VolRealised'].median():5.1f}%")
+    print(f"  median ratio realised/assumed              : {d['ratio'].median():5.2f}"
+          f"   ({(d['ratio'].median()-1)*100:+.0f}% vs assumed)")
+    print(f"  share of rows quieter than assumed         : {(d['ratio'] < 1).mean()*100:5.0f}%")
+
+    idx_line = _index_tape_context(d["Date"].min(), d["Date"].max())
+    if idx_line:
+        print(idx_line)
+
+    print(f"\n  Calibration split on the regime that MATERIALISED:")
+    print(f"  {'subset':>34} {'n':>6} {'dates':>6} {'actual':>8} {'pred':>7} {'gap':>8}")
+    for label, sub in [("realised >= 90% of assumed", d[d["ratio"] >= 0.9]),
+                       ("realised <  90% of assumed", d[d["ratio"] < 0.9])]:
+        if len(sub) < 20:
+            print(f"  {label:>34} {len(sub):6d}   (too few to read)")
+            continue
+        act, pred = sub["Hit"].mean() * 100, sub["Prob"].mean()
+        print(f"  {label:>34} {len(sub):6d} {sub['Date'].nunique():6d} "
+              f"{act:7.1f}% {pred:6.1f}% {act - pred:+7.1f}")
+    print("\n  READ THIS BEFORE JUDGING THE HIT RATE. A P(touch) table fitted on ~11y of")
+    print("  average tape SHOULD overpredict touches in an unusually quiet month — that is")
+    print("  an unconditional model meeting an unusual month, not decay. Only a gap that")
+    print("  persists in the 'realised >= assumed' row is evidence against the model.")
+
+
+def _index_tape_context(start, end):
+    """Where this month's index volatility sits in the archive's own history."""
+    try:
+        idx = pd.read_csv("../data/index_data/nifty50.csv")
+        idx["Date"] = pd.to_datetime(idx["Date"], errors="coerce")
+        idx = idx.dropna(subset=["Date"]).sort_values("Date").set_index("Date")
+        close = pd.to_numeric(idx["Close"], errors="coerce").dropna()
+    except Exception:
+        return None
+    win = close.loc[start:end]
+    if len(win) < 5:
+        return None
+    r = close.pct_change().dropna()
+    month_vol = annualised_vol(win.pct_change().dropna())
+    if month_vol is None:
+        return None
+    roll = (r.rolling(max(5, len(win))).std() * np.sqrt(252) * 100).dropna()
+    pct = float((roll < month_vol).mean() * 100) if len(roll) else float("nan")
+    return (f"\n  index realised vol over this cohort        : {month_vol:5.1f}% ann\n"
+            f"  percentile vs all {len(win)}-session windows    : {pct:5.1f}th"
+            f"   (median window {roll.median():.1f}%)")
 
 
 # ──────────────────────────────────────────────
@@ -369,11 +618,12 @@ def analyse_calibration(res_df):
     print(f"\n{'='*70}")
     print(f"  3. PROBABILITY CALIBRATION — predicted prob vs actual hit-rate")
     print(f"{'='*70}")
-    print(f"  ⓘ Scores the probabilities AS LOGGED. Rows written before the")
-    print(f"    P(touch) table replaced the P(bounce|touched) table carry the")
-    print(f"    OLD metric, so this section cannot judge the new table until a")
-    print(f"    fresh month has been logged under it. Mixed-metric rows make")
-    print(f"    the buckets uninterpretable — not evidence of miscalibration.")
+    print(f"  ⓘ Scores the probabilities AS LOGGED. Rows predating the P(touch)")
+    print(f"    table carry the OLD P(bounce|touched) metric and are dropped as")
+    print(f"    legacy; 2026-08 is the first full month logged entirely under the")
+    print(f"    new table AND under min-separation, so from that month on these")
+    print(f"    buckets do judge the live model. Read section 1c FIRST — a quiet")
+    print(f"    tape moves every bucket down at once and is not miscalibration.")
 
     if len(res_df) == 0:
         print("  No data yet — need touch results from section 1 first.")
@@ -393,21 +643,70 @@ def analyse_calibration(res_df):
         buckets = [(0, 20), (20, 40), (40, 60), (60, 75), (75, 90), (90, 101)]
     else:              # compressed legacy band (P(bounce|touched))
         buckets = [(0, 58), (58, 62), (62, 66), (66, 70), (70, 74), (74, 101)]
-    print(f"  {'Predicted range':<18} {'Actual hit rate':>16} {'n':>6}")
-    print("  " + "─"*44)
-
+    print(f"  {'predicted bin':>14} {'mean pred':>10} {'actual':>8} {'n':>6} "
+          f"{'dates':>6}  {'95% CI':>16}  gap")
+    tot_w = tot_gap = 0.0
     for lo, hi in buckets:
         sub = res_df[(res_df["Prob"] >= lo) & (res_df["Prob"] < hi)]
         if len(sub) == 0:
             continue
         actual = sub["Hit"].mean() * 100
-        label  = f"{lo}-{hi-1}%"
-        gap    = actual - (lo + hi - 1) / 2
-        flag   = " ⚠ overconfident" if gap < -10 else (" ⚠ underconfident" if gap > 10 else "")
-        print(f"  {label:<18} {actual:>15.1f}% {len(sub):>6}{flag}")
+        # MEAN PREDICTED, not the bucket midpoint. The midpoint was a stand-in
+        # for the real prediction and it misstates the gap whenever the bucket
+        # is wide or rows cluster at one end: on the August cohort the 0-20
+        # bucket averaged 5.7% predicted against a 9.5% midpoint, so the
+        # midpoint version reported a 7pp error where the true one was 3pp.
+        pred = sub["Prob"].mean()
+        gap = actual - pred
+        tot_w += len(sub); tot_gap += abs(gap) * len(sub)
+        clo, chi = clustered_ci(sub)
+        # Flag only when the prediction sits OUTSIDE the date-clustered
+        # interval — a fixed +-10pp rule fires on noise in thin buckets and
+        # stays silent on a real miss in a dense one.
+        flag = ""
+        if clo == clo and not (clo * 100 <= pred <= chi * 100):
+            flag = "  OVERCONFIDENT" if gap < 0 else "  underconfident"
+        print(f"  {f'{lo}-{hi-1}%':>14} {pred:9.1f}% {actual:7.1f}% {len(sub):6d} "
+              f"{sub['Date'].nunique():6d}  {fmt_ci(clo, chi):>16} {gap:+6.1f}{flag}")
+    if tot_w:
+        print(f"\n  weighted mean |actual - predicted| = {tot_gap/tot_w:.1f}pp")
 
-    print(f"\n  Well-calibrated = actual hit-rate roughly matches the predicted range.")
+    print(f"\n  Well-calibrated = the predicted value sits inside the date-clustered CI.")
     print(f"  Overconfident   = model says high % but reality is lower — discount high scores.")
+
+    _discrimination(res_df)
+
+
+def _discrimination(res_df):
+    """Separate RANKING quality from CALIBRATION.
+
+    A model can be badly level-shifted and still order outcomes perfectly —
+    which is exactly the August 2026 picture (10pp hot, AUC 0.839). Reporting
+    only the calibration gap would condemn a model whose ranking is intact, so
+    print both. AUC answers "does a higher logged probability actually mean a
+    likelier touch"; Brier skill answers "is this worth more than always
+    quoting the base rate".
+    """
+    y = res_df["Hit"].to_numpy(dtype=float)
+    p = res_df["Prob"].to_numpy(dtype=float) / 100.0
+    n1, n0 = y.sum(), len(y) - y.sum()
+    if n1 < 5 or n0 < 5:
+        return
+    ranks = pd.Series(p).rank().to_numpy()
+    auc = (ranks[y == 1].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
+    brier = float(((p - y) ** 2).mean())
+    base = y.mean()
+    brier_ref = float(((base - y) ** 2).mean())
+    skill = (1 - brier / brier_ref) * 100 if brier_ref else float("nan")
+    print(f"\n  DISCRIMINATION (is the RANKING right, separately from the level?)")
+    print(f"    AUC                     {auc:.3f}   0.5 = coin flip, 0.7 useful, 0.8+ strong")
+    print(f"    Brier                   {brier:.4f}  vs {brier_ref:.4f} for always "
+          f"predicting the {base*100:.1f}% base rate")
+    print(f"    skill over base rate   {skill:+6.1f}%   positive = the probabilities carry "
+          f"real information")
+    print(f"  A large calibration gap with a high AUC is a LEVEL problem, not a broken model.")
+    print(f"  Do NOT flat-shift the probabilities to close it on one month's evidence — that")
+    print(f"  fits the month, and is wrong in the next one with a different volatility regime.")
 
 
 # ──────────────────────────────────────────────
@@ -503,22 +802,30 @@ def analyse_distance(log_df, res_df):
 
 def main():
     global TOUCH_PCT, LOG_PATH, WINDOW_DAYS, EXCLUDE_DAY0
+    global USE_LOGGED_HORIZON, MONTH, EXCLUDE_CONTAMINATED
     if "--touch-pct" in sys.argv:
         idx = sys.argv.index("--touch-pct")
         TOUCH_PCT = float(sys.argv[idx + 1]) / 100
-    # --window N: shorten the forward horizon so windows actually resolve on a
-    # short log. Default 21 = the validated backtest horizon.
+    # --window N: force ONE fixed forward horizon for every row, overriding the
+    # per-row production horizon that is now the default. Use it to compare
+    # against the 21d backtested figure, not as the headline.
     if "--window" in sys.argv:
         idx = sys.argv.index("--window")
         WINDOW_DAYS = int(sys.argv[idx + 1])
-    # --to-month-end: score each snapshot against ITS OWN logged horizon (the
-    # HorizonDays column) rather than one fixed window — i.e. measure exactly
-    # the question the subsystem answers in production.
+        USE_LOGGED_HORIZON = False
+    # --to-month-end is now the DEFAULT and kept only so existing invocations
+    # and the sr_monthly_review.sh script keep working unchanged.
     if "--to-month-end" in sys.argv:
-        global USE_LOGGED_HORIZON
         USE_LOGGED_HORIZON = True
     if "--exclude-day0" in sys.argv:
         EXCLUDE_DAY0 = True
+    # --month YYYY-MM: restrict to one month's LOG dates. The natural cohort,
+    # because every row in a month shares one horizon end (its last Tuesday).
+    if "--month" in sys.argv:
+        idx = sys.argv.index("--month")
+        MONTH = sys.argv[idx + 1]
+    if "--exclude-contaminated" in sys.argv:
+        EXCLUDE_CONTAMINATED = True
     # --log <path>: analyse an alternate log, e.g. ../data/sr_dynamic_log.csv
     # (built by sr_dynamic_logger.py). Default stays the fixed-panel log.
     if "--log" in sys.argv:
@@ -534,12 +841,39 @@ def main():
                   f"(pre-v2 scorer, different probability scale; "
                   f"--keep-legacy to retain)")
 
+    if MONTH:
+        before = len(log_df)
+        log_df = log_df[log_df["Date"].dt.strftime("%Y-%m") == MONTH]
+        if not len(log_df):
+            print(f"\nNo rows logged in {MONTH}.")
+            sys.exit(0)
+        print(f"\nCohort --month {MONTH}: kept {len(log_df)} of {before} rows")
+
+    # Data quality is assessed on the RAW cohort, BEFORE any exclusion — a day
+    # thinned by --exclude-contaminated is not a "partial day" (a missed run or
+    # stale data), and reporting it as one would invent a pipeline fault that
+    # does not exist.
     print(f"\nLoaded {len(log_df)} log rows across {log_df['Symbol'].nunique()} stocks")
     print(f"Date range: {log_df['Date'].min().date()} → {log_df['Date'].max().date()}")
-
     coverage_report(log_df)
 
+    if EXCLUDE_CONTAMINATED:
+        bad = contaminated_rows(log_df)
+        if bad:
+            keep = [(d, s) not in bad for d, s in zip(log_df["Date"], log_df["Symbol"])]
+            dropped_dates = sorted({d.date() for d, _ in bad})
+            log_df = log_df[keep]
+            print(f"\nExcluded {len(bad)} row(s) whose CMP matches no archive bar for "
+                  f"their own date,\n  across {len(dropped_dates)} date(s): "
+                  + ", ".join(str(x) for x in dropped_dates[:8])
+                  + (" ..." if len(dropped_dates) > 8 else ""))
+        else:
+            print("\nNo contaminated rows in this cohort — every CMP matches its "
+                  "own date's archive bar.")
+
     res_df = analyse_hit_rates(log_df)
+    analyse_by_horizon(res_df)
+    analyse_vol_regime(res_df)
     analyse_drift(log_df)
     analyse_calibration(res_df)
     analyse_n_sensitivity(res_df)

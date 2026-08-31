@@ -26,6 +26,18 @@ about which observations were live and which were reconstructed. Live rows
 get Backfilled=0 (blank/NaN on pre-existing rows means "live", since the
 column did not exist when they were written).
 
+FIXED PANEL ONLY — never point this at sr_dynamic_log.csv. The fixed
+WATCHLIST is the same 61 symbols every day, so a missing row is unambiguously
+a lost observation. The DYNAMIC panel's membership is recomputed daily from
+core.scan_universe (holdings + top-N momentum) and genuinely changes: 2026-08-17
+carried BHEL, 08-19 carried LLOYDSME instead, 08-21 SYRMA. scan_universe has no
+point-in-time mode, so reconstructing which names the dynamic panel WOULD have
+held on a missed date means inventing panel membership — the exact
+"fabricate a history the panel never had" failure `missing_rows` guards against
+above, and worse, because it would be invisible in the output. The dynamic
+panel's two missing August sessions (08-18, 08-20) were left as gaps for this
+reason; it is supplementary calibration data, not the measurement record.
+
 Usage (from scripts/):
     python backfill_sr_log.py --dry-run
     python backfill_sr_log.py --apply

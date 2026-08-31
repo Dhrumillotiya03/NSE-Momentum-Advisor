@@ -1341,8 +1341,108 @@ stock_ai/
   MEASURE on lets the thing under test change underneath the test. Rebuild
   only when price history is materially extended, then re-check the
   monotonicity invariant.
+- AUGUST 2026 REVIEW — THE MODEL IS SOUND; THE REPORT WAS THE PROBLEM
+  (2026-08-31, first month logged entirely under the P(touch) table AND
+  min-separation, i.e. the calibration re-check CLAUDE.md flagged as
+  outstanding). Production-horizon cohort (log dates 08-03..08-24, all
+  pointing at the 08-25 last Tuesday, 16 dates x 61 symbols, 2,957 scored
+  levels): S1 32.1% / R1 34.7%, weighted mean calibration gap -10.1pp, 7 of
+  10 probability bins overconfident. NONE of that is decay. Discrimination is
+  strong — AUC 0.839 (S1 0.875, R1 0.805), Brier skill +26.6% over the base
+  rate, corr(predicted, actual) across the 16 horizon lengths +0.997 — so the
+  RANKING is right and only the LEVEL is off. The level is off because AUGUST
+  REALISED 5.4% ANNUALISED ON THE INDEX, THE 0.3rd PERCENTILE OF EVERY
+  16-SESSION WINDOW SINCE 2010, against a 13.3% trailing figure.
+  reach_probability_v2 keys on distance x TRAILING 252d vol so it cannot see a
+  regime that shifts inside the month: it assumed a median 31.0% while 20.2%
+  materialised, with 90% of rows quieter than assumed. Split on the regime
+  that actually arrived, the model was CALIBRATED where vol came in at or
+  above assumed (+5.1pp, mildly underconfident) and hot only where it came in
+  quieter (-11.7pp). A table fitted on ~11y of average tape SHOULD overpredict
+  in the calmest month of that history. DO NOT FLAT-SHIFT THE PROBABILITIES:
+  a -10.1pp shift lifts Brier skill to +31.2% ON THIS MONTH and is wrong in
+  the next normal one. Two hypotheses were generated and REJECTED in the same
+  review: (a) the sub-5d sqrt-extrapolation path (native tables exist only at
+  5/10/15/21d and _interpolate_horizon_prob needs bracketing, so 1-4d falls
+  through to a sqrt rescale) is NOT broken — raw gap -13.7pp vs -9.9pp native,
+  but conditioned on vol the paths are indistinguishable (-12.3 vs -12.9); the
+  sub-5d rows are simply the month's last four and quietest sessions;
+  (b) a SHORTER trailing vol window does not help — every window overestimated
+  August by 30-41% (median realised/assumed 0.59-0.70 at 21/42/63/126/252d)
+  and the best (42d) cuts MAE only 12.0->11.0pp while its correlation with
+  realised vol collapses 0.406->0.258. Worth knowing: the 16-variant sweep
+  varied the vol ESTIMATOR but every one uses `.tail(252)`, so window length
+  had never been tested. ONE finding survives — the distance x vol
+  INTERACTION is under-modelled: near levels are vol-insensitive (0-3% band
+  misses ~4pp in BOTH regimes) while far levels flip from +15.2pp (normal vol)
+  to -20.1pp (quiet) at 5-8%+. That does NOT contradict
+  sr-touch-table-distance-calibration-2026-08, which pooled ACROSS regimes
+  where this conditions ON them. Pre-registered in
+  PREREG_sr_vol_regime_interaction.md and deliberately NOT run — it needs six
+  months under the current code (not before 2027-02) because the effect is
+  defined by the contrast BETWEEN regimes and August supplies one side.
+  Also confirmed: MIN-SEPARATION WORKED (levels within 0.5% of spot 81 -> 0,
+  day-0 guaranteed-hit contamination now 1.8% S1 / 1.4% R1 / 0.0% S2-R2,
+  median |dist| 1.9-2.3% -> 4.5-4.8%), and LOG_PREVIOUS_SESSION KILLED THE CMP
+  CONTAMINATION OUTRIGHT (31% of rows before 2026-08-19, 0 of 427 after).
+  On the open question of the 296 historical contaminated rows: LEAVE THEM and
+  exclude at analysis time (`--exclude-contaminated`) — five dates of sixteen,
+  moving S1 32.1->30.4% and R1 34.7->31.3%, both well inside the confidence
+  intervals, and rebuilding trades a real record of what the system saw for a
+  uniformity the numbers do not need.
 - `sr_monthend_analysis.py` checks hit-rate, level drift, probability calibration,
   n-sensitivity, distance-vs-accuracy — run only after 2-3+ weeks of logged data.
+  REWORKED 2026-08-31 after the August review above, because the report itself
+  was the most dangerous thing in the subsystem — a sound model reading "32%
+  against a 65-68% baseline" with no explanation is how a working instrument
+  gets thrown away, and this repo has misread its own measurements three times
+  already (fake 100% S/R hit rate, a cash-only month scored "consistent",
+  call_report silently broken 10 days). Changes:
+  (1) THE PRODUCTION HORIZON IS NOW THE DEFAULT — every row scores against its
+  own logged HorizonDays. The old fixed-21d default reported "R1 95.3%" on the
+  August log: no August row had 21 sessions of forward data, so the figure was
+  built almost entirely from JULY rows, and July predates min-separation.
+  `--window N` still forces a fixed horizon (and reproduces the old output
+  exactly — verified byte-identical at --window 21); `--to-month-end` is kept
+  as a no-op so existing invocations and sr_monthly_review.sh keep working.
+  (2) `--month YYYY-MM` scopes to one month's cohort. This is the natural unit:
+  every row in a month shares ONE horizon end (its last Tuesday), and pooling
+  months mixes code generations.
+  (3) `--exclude-contaminated` drops rows whose CMP matches no archive bar for
+  its own date, recomputed inline rather than read from audit_sr_log's CSV so
+  the exclusion can never run against a stale audit. Data quality (section 0)
+  is deliberately assessed BEFORE the exclusion — a day thinned by filtering is
+  not a "partial day", and reporting it as one invents a pipeline fault.
+  (4) CONFIDENCE INTERVALS RESAMPLE DATES, NOT ROWS. 61 symbols on one session
+  share the market's move; treating them as independent understates the
+  interval by ~sqrt(panel size), enough to make an ordinary month look like a
+  significant deviation. Same lesson as
+  sr-touch-table-distance-calibration-2026-08.
+  (5) NEW SECTION 1b (by horizon length) — the production window shrinks 16->1
+  through the month, so the pooled rate averages two different questions.
+  Buckets under n=20 are printed but EXCLUDED from the correlations: with
+  --exclude-contaminated removing whole panel-days, a 2-row bucket swings
+  0-100% on one symbol and drags corr(predicted, actual) from 0.956 to 0.797.
+  (6) NEW SECTION 1c (volatility regime) — prints the vol the table assumed vs
+  the vol that materialised, the index percentile of the month's tape, and
+  calibration split on that ratio. READ IT BEFORE SECTION 1. Diagnostic only:
+  realised vol is not knowable at log time and must never feed a live
+  probability.
+  (7) Calibration now compares actual against the MEAN PREDICTED probability
+  in each bucket, not the bucket MIDPOINT — the midpoint misstates the gap
+  whenever a bucket is wide or rows cluster at one end (August's 0-20 bucket
+  averaged 5.7% predicted against a 9.5% midpoint, so the old version reported
+  a 7pp error where the truth was 3pp). Overconfidence is flagged when the
+  prediction falls outside the date-clustered CI, replacing a fixed +-10pp rule
+  that fired on noise in thin buckets and stayed silent on real misses in dense
+  ones. AUC and Brier skill are printed alongside, because a large calibration
+  gap with a high AUC is a LEVEL problem, not a broken model.
+  `./sr_monthly_review.sh [YYYY-MM]` is scoped to one month accordingly.
+  THE DYNAMIC PANEL CANNOT BE BACKFILLED and its two missing August sessions
+  (08-18, 08-20) are left as gaps: its membership is recomputed daily from
+  core.scan_universe, which has no point-in-time mode, so reconstructing a
+  missed date would invent panel membership. backfill_sr_log.py is fixed-panel
+  only and now says so.
   Section 0 is DATA QUALITY (duplicate pairs, partial days, frozen price
   series) and must be read FIRST — a pipeline bug and a miscalibrated model
   look alike in the hit rate but need opposite fixes. `--to-month-end` states
