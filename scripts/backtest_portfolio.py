@@ -505,7 +505,8 @@ def risk_parity_weights(returns, vols, names, shrink=0.3, max_iter=200):
 def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=None,
                                skip_days=0, trail_stop=None, sizing_fn=None,
                                regime_fn=None, stage_days=1, score_fn=None,
-                               exit_signal_fn=None):
+                               exit_signal_fn=None, max_weight=None,
+                               cap_mode="renormalize"):
     """Same selection/sizing/regime logic as run_backtest, but positions
     still in the new top-N carry over (rebalanced to target weight, cost on
     the delta only) instead of being sold and rebought every 21 days.
@@ -525,6 +526,13 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     [0,1] summing to 1}, replacing the production inverse-vol sizing (see
     risk_parity_weights above for a correlation-aware alternative). None =
     production behavior (plain inverse-vol, MAX_WEIGHT-capped).
+
+    max_weight: override strategy_config.MAX_WEIGHT for this run. None =
+    production. cap_mode: "renormalize" (production — clip then rescale back
+    to sum 1, which pushes weights back ABOVE the cap whenever 1/n >= cap) or
+    "absolute" (clip and leave the shortfall in cash, the only variant that
+    actually enforces the documented cap). Both RESEARCH-ONLY —
+    see PREREG_max_weight_cap.md.
 
     regime_fn: optional callable(index, date, breadth) -> regime string,
     replacing get_regime (see confirmed_regime_fn below for an N-day
@@ -646,12 +654,31 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
             # PREREG_conviction_sizing.md for the walk-forward evidence.
             # conviction_weights already normalizes (sums to 1).
             raw_w = conviction_weights(scores, vols, list(top), sc.CONVICTION_TILT)
-        # MAX_WEIGHT cap + renormalize applies regardless of sizing method —
-        # it's a separate single-name concentration control, not part of the
-        # sizing rule itself.
-        w = {s: min(v, sc.MAX_WEIGHT) for s, v in raw_w.items()}
+        # MAX_WEIGHT cap applies regardless of sizing method — it's a separate
+        # single-name concentration control, not part of the sizing rule.
+        #
+        # NOTE the cap is INFEASIBLE whenever 1/n >= cap: every name clips, and
+        # renormalizing n identical values returns exactly 1/n, i.e. straight
+        # back above the cap. At the production n that is SIDEWAYS (3 names,
+        # 33.3%) and BEAR (4 names, 25.0%) — 73% of rebalances — where the book
+        # is exactly equal-weighted and CONVICTION_TILT does nothing at all.
+        # This is production behavior and is what every adopted study measured;
+        # see PREREG_max_weight_cap.md. `max_weight` / `cap_mode` exist to test
+        # alternatives and are research-only (None/"renormalize" = production).
+        cap = sc.MAX_WEIGHT if max_weight is None else max_weight
+        w = {s: min(v, cap) for s, v in raw_w.items()}
         tot2 = sum(w.values())
-        w = {s: v / tot2 for s, v in w.items()}
+        if cap_mode == "renormalize":
+            w = {s: v / tot2 for s, v in w.items()}
+        elif cap_mode == "absolute":
+            # Honour the cap literally: no name exceeds it, and the
+            # un-allocable remainder (1 - n*cap when the cap binds on all)
+            # is simply NOT deployed — w is left summing to tot2 < 1, so the
+            # shortfall stays in `capital` and earns cash_growth like any
+            # other idle rupee. No renormalize step, which is the whole point.
+            pass
+        else:
+            raise ValueError(f"unknown cap_mode {cap_mode!r}")
 
         total_equity = capital + sum(book[s]["cur_value"] for s in keep)
         invested_target = total_equity * exp

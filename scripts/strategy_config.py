@@ -134,7 +134,28 @@ REGIME_NAMES = {
     "BEAR":     4,
     "UNKNOWN":  6,
 }
-MAX_WEIGHT = 0.20               # single-name cap (diversification vs concentration)
+MAX_WEIGHT = 0.20               # single-name cap — BUT SEE BELOW, IT DOES NOT BIND AT n<5
+# THE CAP IS ARITHMETICALLY INFEASIBLE AT THE PRODUCTION n (measured
+# 2026-09-01, PREREG_max_weight_cap.md). It is applied as clip-then-
+# renormalize, so whenever 1/n >= MAX_WEIGHT every name clips and renormalizing
+# n identical values returns exactly 1/n — straight back ABOVE the cap. You
+# cannot have 3 names each <=20% summing to 100%. Realised single-name weight
+# is therefore 33.3% in SIDEWAYS and 25.0% in BEAR, not 20%:
+#     SIDEWAYS n=3  62/62 rebalances fully clipped (100%)
+#     BEAR     n=4  18/30 (60%)
+#     BULL     n=10  0/34 (0%)  <- the only regime where the cap is live
+# 63.5% of all historical rebalances are consequently EXACTLY equal-weighted,
+# and CONVICTION_TILT below does nothing at all in them. concentration-risk-
+# 2026-07 diagnosed this mechanism at BEAR=2 and the note above records the fix
+# as complete; it was not — 4 x 20% = 80% < 100%, so n=4 is still infeasible,
+# just less severely. Raising the cap to 0.30/0.35 was pre-registered and
+# TESTED 2026-09-01: 0/3 configs cleared (cap_0.35 +0.59%, 22/36 windows,
+# failing the win-count gate by 0.74 of a window). The decomposition is the
+# useful part — the tilt is the mechanism (+1.85% at today's cap, +3.63% with
+# headroom) while concentration ALONE is a drag (-1.19%), and they nearly
+# cancel. Do not raise the cap to "unblock" the tilt; find a lever that does
+# not buy concentration at the same time, and pre-register it.
+
 
 # CONVICTION-WEIGHTED SIZING — ADOPTED 2026-08-05 (research_conviction_sizing.py,
 # PREREG_conviction_sizing.md). Production sizing was plain inverse-vol, blind

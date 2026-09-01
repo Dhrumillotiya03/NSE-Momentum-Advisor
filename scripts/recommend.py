@@ -30,6 +30,28 @@ from core import (
 
 # ---------- Presentation ----------
 
+def sizing_note(n_names):
+    """Describe the sizing the engine ACTUALLY applies at this book size.
+
+    This line used to read "live sizing is inverse-vol with a 20% cap" and was
+    wrong twice over: sizing became conviction-weighted on 2026-08-05, and the
+    20% cap is arithmetically infeasible whenever 1/n >= MAX_WEIGHT (n=3 in
+    SIDEWAYS, n=4 in BEAR — 73% of rebalances). There the clip-then-renormalize
+    step hands every name exactly 1/n, i.e. straight back above the cap it just
+    applied, and CONVICTION_TILT does nothing at all. Saying "20% cap" to a user
+    whose book is about to hold three names at 33% each is the kind of quiet
+    misstatement this repo keeps finding in its own reporting.
+    See PREREG_max_weight_cap.md.
+    """
+    if n_names and 1.0 / n_names >= sc.MAX_WEIGHT:
+        return (f"equal-weight placeholder; live sizing is conviction-weighted "
+                f"(tilt {sc.CONVICTION_TILT:g}) but at {n_names} names the "
+                f"{sc.MAX_WEIGHT:.0%} cap binds on every name and renormalizes "
+                f"back to {1.0/n_names:.0%} each — i.e. equal weight in practice")
+    return (f"equal-weight placeholder; live sizing is conviction-weighted "
+            f"(tilt {sc.CONVICTION_TILT:g}) capped at {sc.MAX_WEIGHT:.0%}")
+
+
 def confidence_line(table, score, regime):
     d = confidence_for_score(table, score)
     reg = table["regime_stats"].get(regime, {})
@@ -104,13 +126,14 @@ def cmd_scan():
         d, _ = confidence_line(table, r["score"], regime)
         print_recommendation(i, sym, r, d, reg_stats, regime, sector_map, capital)
         alloc = position_size(capital, weight_each, exposure)
-        print(f"   Indicative allocation (equal-weight placeholder; live sizing is inverse-vol"
-              f" with a {sc.MAX_WEIGHT:.0%} cap): ~Rs.{alloc:,.0f}")
+        print(f"   Indicative allocation ({sizing_note(len(top))}): ~Rs.{alloc:,.0f}")
 
     print(f"\n{'='*60}")
     print("This ranks by the SAME formula validated in the walk-forward backtest.")
-    print("Position sizing at execution time should use inverse-vol weighting")
-    print(f"(see backtest_portfolio.py) with a {sc.MAX_WEIGHT:.0%} single-name cap, not equal-weight.")
+    print("Position sizing at execution time comes from "
+          "ai_assistant.position_sizes() /")
+    print("backtest_portfolio.conviction_weights — not from this equal-weight "
+          "placeholder.")
 
 
 def cmd_single(symbol):
