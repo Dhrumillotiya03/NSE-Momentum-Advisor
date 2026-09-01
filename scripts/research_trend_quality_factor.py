@@ -171,7 +171,13 @@ def main():
     print(f"{len(windows)} overlapping 3y windows\n")
 
     print("Running BASELINE (production run_backtest_laggards_only, score_fn=None)...")
-    baseline_rows = [run_window(matrix, index, turnover, s, e) for s, e in windows]
+    # engine made explicit 2026-09-01 — run_window used to default to the
+    # LEGACY hard-close engine, so this baseline was not the production one.
+    # This study REJECTED all 5 configs and the confound favoured them, so the
+    # rejection holds a fortiori. See walk_forward.run_window.
+    baseline_rows = [run_window(matrix, index, turnover, s, e,
+                                engine=run_backtest_laggards_only)
+                     for s, e in windows]
     n_ok = sum(r is not None for r in baseline_rows)
     print(f"  baseline: {n_ok}/{len(windows)} windows produced a result")
     base_annual = [r[1] for r in baseline_rows if r is not None]

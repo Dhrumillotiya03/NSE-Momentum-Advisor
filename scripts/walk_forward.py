@@ -58,7 +58,41 @@ def make_windows(matrix, window_years, step_months):
     return windows
 
 
-def run_window(matrix, index, turnover_matrix, start, end, engine=run_backtest):
+_ENGINE_REQUIRED = object()
+
+
+def run_window(matrix, index, turnover_matrix, start, end, engine=_ENGINE_REQUIRED):
+    """`engine` is REQUIRED — there is deliberately no default.
+
+    It used to default to `run_backtest`, the LEGACY hard-close engine that
+    CLAUDE.md keeps only for historical comparison. Four research scripts then
+    built their BASELINE with a bare `run_window(matrix, index, turnover, s, e)`
+    while printing "Running BASELINE (production run_backtest_laggards_only)"
+    and comparing it against candidates that DID pass
+    engine=run_backtest_laggards_only. Those studies therefore measured
+    "hard_close vs laggards_only + the change under test", not the change under
+    test — and laggards_only is worth roughly +1pp CAGR on its own, so every
+    candidate got a free ~1pp head start.
+
+    Found 2026-09-01 by an adversarial check that ran the SAME configuration
+    down two code paths and got different equity curves (sizing_fn=None
+    +28.90% vs an explicit tilt=0.50 sizing_fn +31.76%, which must be
+    identical). Impact: PREREG_conviction_sizing.md's +2.89% is +1.85% once
+    corrected (still clears its bar); the trend-quality and exit-flow
+    REJECTIONS are unaffected in direction, since the confound favoured the
+    candidates they rejected anyway.
+
+    A silent wrong default is exactly the failure mode this repo keeps
+    re-discovering in its own instruments, so the fix is to make it impossible
+    to omit rather than to change which engine is silently assumed.
+    """
+    if engine is _ENGINE_REQUIRED:
+        raise TypeError(
+            "run_window() requires an explicit `engine=` — pass "
+            "backtest_portfolio.run_backtest_laggards_only for the production "
+            "engine, or run_backtest for the legacy hard-close one. It used to "
+            "default to the LEGACY engine, which silently invalidated the "
+            "baseline of four studies; see this function's docstring.")
     sub_matrix = matrix[(matrix.index >= start) & (matrix.index <= end)]
     sub_matrix = sub_matrix.loc[:, sub_matrix.isna().mean() <= 0.20]
     if len(sub_matrix) < 300:

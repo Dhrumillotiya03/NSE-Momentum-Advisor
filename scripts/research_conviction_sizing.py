@@ -115,7 +115,17 @@ def main():
     print(f"{len(windows)} overlapping 3y windows\n")
 
     print("Running BASELINE (production run_backtest_laggards_only, sizing_fn=None)...")
-    baseline_rows = [run_window(matrix, index, turnover, s, e) for s, e in windows]
+    # ENGINE MUST BE EXPLICIT. This line read `run_window(matrix, index,
+    # turnover, s, e)` until 2026-09-01, and run_window defaulted to the LEGACY
+    # hard-close engine — so this "baseline" was NOT the production engine the
+    # print above claims, and every candidate (which did pass
+    # run_backtest_laggards_only) got a free ~1pp CAGR head start. Corrected,
+    # tilt=0.50 is +1.85% [+0.54%,+3.17%] 26/36, not the +2.89% [+1.33%,+4.33%]
+    # 33/36 recorded in PREREG_conviction_sizing.md. Still clears the bar; the
+    # adoption stands at a smaller effect. See walk_forward.run_window.
+    baseline_rows = [run_window(matrix, index, turnover, s, e,
+                                engine=run_backtest_laggards_only)
+                     for s, e in windows]
     n_ok = sum(r is not None for r in baseline_rows)
     print(f"  baseline: {n_ok}/{len(windows)} windows produced a result")
     base_annual = [r[1] for r in baseline_rows if r is not None]
