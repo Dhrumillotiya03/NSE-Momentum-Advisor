@@ -124,6 +124,46 @@ stock_ai/
   findings. Its first run caught: record_fill accepted qty<=0 fills (now
   hard-aborts), sell verdicts lacked quantities (now qty_to_sell), stock
   CSVs lag the index intraday (sim fills at last close ≤5d).
+  THE CRITIC WAS BLIND TO ECONOMICS UNTIL 2026-09-01, AND IT MATTERED. The
+  2026-08-25 month-end rebalance executed with "critic problems: 0" while
+  being wrong by up to 19x. `position_sizes()` correctly returned
+  {"weight": "25.2%", "quantity": 394}; the ADVISOR LLM rendered it as prose
+  reading "Weight: 25% ... Quantity to Buy: Calculated based on your current
+  portfolio value" — DROPPING the quantity — and the TRADER LLM read the
+  percentage as a share count and ordered 25 SHARES of each name. HFCL (its
+  own top pick) got ₹5,950 against a ₹97,462 target = 6%; RADICO got 119%.
+  "25" is a plausible share count for 3 of the 4 names, which is why nothing
+  downstream blinked. SECOND, independent failure the same session: orders
+  were applied ADD-TO rather than REBALANCE-TO, leaving the book 54.7%
+  deployed against the 37.5% BEAR mandate (paper book, same window: 37.8%).
+  The old critic only asked "did a BUY produce a position" and "does the
+  journal row count match" — record_fill did its job perfectly; the number
+  the HUMAN acted on was wrong, which for a signals-only system is precisely
+  the failure the sim exists to rehearse. NOTE position_sizes' docstring
+  claims "'how much quantity' can never be improvised by the LLM" — true of
+  the TOOL, false of the PIPELINE, since the tool's output still has to
+  survive being re-rendered into prose. Critic now also checks ECONOMICS:
+  check_notional_vs_plan (executed RUPEES vs position_sizes()'s own plan,
+  ±40% — rupees not share counts, so it is independent of wording),
+  check_exposure (deployed share vs REGIME_EXPOSURE, ±10pp),
+  check_advice_truncated (the trader only ever sees the first 6000 chars and
+  a month-end review is the longest message of the year). Verified by
+  replaying the real 08-25 orders: 4 problems where the old critic raised 0,
+  and a control executing position_sizes()' own quantities raises 0.
+  Affordability downsizes are now logged as deviations instead of silently
+  shrinking a fill. ALSO FIXED: `model_accuracy` scored MANDATED month-end
+  rotations as directional sell forecasts — under laggards-only a month-end
+  sell fires because the name left the top-N, so scoring it by "did it keep
+  falling" reads badly forever by construction; mandated and discretionary
+  sells are now separated. See memory
+  agent-sim-critic-blind-to-economics-2026-09.
+  Its equity.csv still held the un-repaired 2026-08-19 row from the
+  early-rebalance bug (cash ₹256.30 against a journal with no 08-19 trade);
+  repaired 2026-09-01 to ₹1,004,348.30 / ₹634,489.70, validated by
+  reconstructing 08-17 from the journal and matching its logged equity to the
+  paisa (backup data/_quarantine/agentsim_equity_pre_0819fix_2026-09-01.csv).
+  paper_trader had been replayed in August; agent_sim had not, and it has no
+  catch-up mechanism — it covered 31/37 sessions vs paper's 37/37.
 - -18% stop watch is automated at THREE cadences: intraday_watch.py via
   systemd timer stockai-intraday (every 15 min during market hours,
   weekdays — live yfinance quotes ~15-min delayed; alerts STOP breach HIGH,
@@ -232,7 +272,9 @@ stock_ai/
 - Params (all in scripts/strategy_config.py, the single source of truth): 126-day
   lookback, 50-day MA filter, RSI 80 overbought cap (advisory), -18% catastrophic
   stop only (no tight intra-hold exits — validated to cost Sharpe/CAGR by
-  whipsawing out of momentum trends), 20% max position, sector cap 2/sector
+  whipsawing out of momentum trends), 20% max position — WHICH DOES NOT BIND
+  AT THE PRODUCTION n, see the MAX_WEIGHT entry below; realised single-name
+  weight is 33.3% in SIDEWAYS and 25.0% in BEAR — sector cap 2/sector
   (enforced in backtest_portfolio.select_top_n_capped — was documented but NOT
   actually enforced in code until the F&O migration surfaced up to 8/10 names in
   one sector during BULL rebalances). REGIME_NAMES SIDEWAYS=3 (was 6, changed
@@ -412,6 +454,27 @@ stock_ai/
   in; same drift-risk class as the pre-2026-07-17 momentum_score copies).
   Legacy run_backtest (hard-close engine, kept for historical comparison
   only) intentionally left on plain inverse-vol — not production.
+  EFFECT SIZE CORRECTED DOWN 2026-09-01 — THE STUDY'S BASELINE RAN THE WRONG
+  ENGINE. `walk_forward.run_window` defaulted to `run_backtest` (the LEGACY
+  hard-close engine), and research_conviction_sizing.py built its baseline
+  with a bare `run_window(matrix, index, turnover, s, e)` while PRINTING
+  "Running BASELINE (production run_backtest_laggards_only, sizing_fn=None)".
+  Candidates DID pass engine=run_backtest_laggards_only, so the study measured
+  hard_close vs laggards_only + conviction, not conviction. Measured on
+  current data: hard_close 28.90%, laggards_only+inverse-vol 29.91%,
+  laggards_only+conviction 0.50 31.76% — every candidate got a free ~1pp CAGR
+  head start from the engine alone. Corrected, tilt=0.50 is **+1.85% mean
+  CAGR, CI [+0.54%,+3.17%], 26/36 windows** (recorded: +2.89%,
+  [+1.33%,+4.33%], 33/36). It STILL clears the pre-registered bar, so THE
+  ADOPTION STANDS — at ~2/3 the effect and a materially weaker win rate. Quote
+  the corrected figures. `engine` is now a REQUIRED argument on run_window
+  (TypeError if omitted) rather than defaulting to anything; all four affected
+  baselines are explicit. The trend-quality and exit-flow REJECTIONS are
+  unaffected in direction (the confound favoured the candidates they
+  rejected). See memory walk-forward-baseline-engine-2026-09 — and note what
+  caught it: not any CI/win-count/era-split check, all of which describe the
+  DELTA and were consistently wrong, but running ONE configuration down TWO
+  code paths and requiring the answers to match.
   New production baseline (python walk_forward.py --engine laggards_only,
   standard 19-window/6mo-step config): mean CAGR 33.4%, median 36.0%, mean
   Sharpe 1.25, mean max DD 21.5%, worst DD 30.2%, 1/19 negative windows.
@@ -424,6 +487,39 @@ stock_ai/
   sizing is a DIFFERENT, separate mechanism (risk-per-trade off stop
   distance, not portfolio-weight allocation) — NOT touched, was never part
   of this study's evidence, would need its own separate validation.
+- MAX_WEIGHT=0.20 IS A DEAD LETTER AT THE PRODUCTION n — MEASURED, TESTED,
+  NOT CHANGED (2026-09-01, research_max_weight_cap.py +
+  _adversarial.py, PREREG_max_weight_cap.md). The cap is applied as
+  clip-then-renormalize in four places (backtest_portfolio.py's sizing block,
+  paper_trader.py, ai_assistant.py, and described to the user by
+  recommend.py). Whenever 1/n >= MAX_WEIGHT every name clips and renormalizing
+  n identical values returns exactly 1/n — straight back ABOVE the cap it just
+  applied. You cannot have 3 names each <=20% summing to 100%. Measured over
+  126 rebalances: SIDEWAYS (n=3) 62/62 fully clipped, BEAR (n=4) 18/30, BULL
+  (n=10) 0/34 — so **63.5% of all rebalances are EXACTLY equal-weighted and
+  CONVICTION_TILT does nothing at all in them**, and the live paper book (BEAR
+  since 2026-07-10) has never once used the sizing change this repo adopted in
+  August. concentration-risk-2026-07 diagnosed this exact mechanism at BEAR=2
+  and strategy_config records the fix as complete — it was not, 4 x 20% = 80%
+  < 100%. TESTED: cap 0.30, cap 0.35, and an absolute cap (clip at 0.20,
+  un-allocable remainder to cash). **0/3 cleared**; cap_0.35 is marginal
+  (+0.59%, CI [+0.09%,+1.39%], but 22/36 windows against a 22.74 gate) and per
+  the prereg that CLOSES the line rather than prompting a retune. The
+  decomposition is the valuable part: the TILT is the mechanism (+1.85% at
+  today's cap, +3.63% with headroom) while CONCENTRATION ALONE IS A DRAG
+  (-1.19%, CI [-2.42%,-0.28%], 9/36) — raising the cap buys more tilt and pays
+  for it with concentration, and the two nearly cancel. Do NOT raise the cap
+  to unblock the tilt; a future attempt needs a lever that does not buy
+  concentration at the same time (tilting the NUMBER of names or the deployed
+  fraction), pre-registered separately. Also measured: at cap 0.35 the worst
+  single-name weight reaches 45.0% (vs 33.3% today), and honouring the cap
+  absolutely costs ~-3.6pp CAGR for ~-5.1pp worst-case DD — a real risk/return
+  trade-off, recorded not adopted. THE FIRST RUN OF THIS STUDY SAID ADOPT
+  (+3.45%, 34/36) and was wrong — see the run_window engine-default bug in the
+  conviction-sizing entry above; the adversarial checklist is what caught it.
+  Production behaviour is UNCHANGED; the deliverable was the documentation fix
+  (recommend.py no longer claims a 20% cap, and no longer claims inverse-vol
+  sizing either — that was superseded 2026-08-05 and never updated).
 - CORRELATION-AWARE (RISK-PARITY) SIZING and VOLATILITY-TARGETED EXPOSURE
   both tested and REJECTED 2026-08-01 — kept here as the reason conviction
   sizing (above) was framed as a DIFFERENT question, not a re-test of a
@@ -1026,10 +1122,62 @@ stock_ai/
   measurement-instrument failure of the same family (fake 100% S/R hit
   rate, July's cash-month scored "consistent", now this), so periodically
   run every measurement script purely to confirm it still EXECUTES.
+  FOURTH ONE FOUND 2026-09-01, AND EXECUTING WAS NOT ENOUGH — call_report ran
+  fine and printed "TARGET-before-STOP 21%, avg R -0.30" on the first full
+  month of post-rebuild calls, which reads as a losing advisory system. Two
+  aggregation defects, both already in this repo's catalogue:
+  (1) THE STATISTICAL UNIT WAS THE CALL, NOT THE SYMBOL. full_advisor logs its
+  top ~8 names EVERY session, so 145 "calls" were 21 symbols re-observed in
+  one shared tape; the 24 decided calls came from SIX symbols, and 15 of the
+  19 stops were two names (ADANIENSOL x9, LLOYDSME x6) re-logged daily as one
+  deteriorating position drifted down. Same error as counting S/R log rows
+  instead of dates, same shape as the exit-flow study's 3 events driving 29/36
+  window wins.
+  (2) THE RACE WAS SCORED WHILE CENSORED. HORIZON=42 sessions but no call had
+  more than 20 sessions of forward data, so ZERO races could complete and every
+  "resolved" row had resolved EARLY — a self-selected subset, the mirror image
+  of the hit/miss asymmetry behind the fake 100% S/R number.
+  Corrected reading of the same month: holding from the call-day close vs
+  Nifty over the identical span gives per-SYMBOL alpha +2.49%, 95% CI
+  [-0.91%,+6.01%], 12/21 symbols positive — not significant, but nowhere near
+  an indictment; the naive row-level CI is 1.8x too narrow. The stops that
+  fired mostly fired on names that genuinely kept falling. Now: every headline
+  is per-SYMBOL with a symbol-clustered bootstrap (`--by-call` for the old
+  figures, labelled do-not-quote); the race is NOT REPORTED until calls have
+  the full horizon; and a new "THE PICK, SEPARATED FROM THE LEVEL" block
+  reports Nifty-relative alpha, because full_advisor's ATR entry/stop/target
+  geometry has never been walk-forward validated and the PICK is the only half
+  backed by evidence. Caught while building the fix: the ledger already has an
+  `alpha` column (momentum alpha), so a derived `alpha` written only on the
+  has-forward-bars branch left zero-bar calls carrying the LEDGER's value into
+  a return average — reading as +715%; derived keys are now
+  hold_ret/bench_ret/pick_alpha, pre-initialised to NaN. See memory
+  call-report-unit-and-censoring-2026-09.
   `gate_report.py` (manual, monthly) —
   scores each completed paper REBALANCE PERIOD at its percentile of the
-  production backtest's 21d-return distribution; this is the deployment gate
-  made quantitative (2+ periods below p10 = live path diverges, investigate).
+  production backtest's 21d-return distribution (2+ periods below p10 = live
+  path diverges, investigate).
+  IT IS A PLUMBING CHECK, NOT THE DEPLOYMENT DECISION (corrected 2026-09-01
+  off gate_report's own power table). The reference per-period sd is 7.35%,
+  so at the planned 3-6 periods the gate detects a strategy quietly losing
+  1-3%/period only 22-54% of the time, against a 16-31% FALSE-ALARM rate on
+  a strategy behaving exactly as backtested. Those numbers are close enough
+  together that a "consistent" verdict at 3-6 periods rules out GROSS
+  BREAKAGE and establishes nothing else — it is roughly a coin flip on the
+  thing that actually matters. Reaching 80%+ power needs ~12 periods (a
+  year), which is not the plan. So do NOT read "3-6 consistent periods" as
+  clearance to deploy capital.
+  WHAT THE DEPLOYMENT CASE ACTUALLY RESTS ON, in descending order of
+  evidential weight: (1) the walk-forward distribution (19 windows, mean CAGR
+  33.4%, 1/19 negative) — this is the edge evidence and always was;
+  (2) divergence_check.py showing the LIVE path selects identically to the
+  BACKTEST path (deterministic, daily, and this repo has shipped that drift
+  three times, so it is a real check rather than a formality); (3) the cost
+  stack being survivable at the intended size — STCG drag
+  (research_net_returns.py) plus impact, which the 2026-09-01 depth
+  feasibility gate measured at ~2 bps/side at carve-out order sizes, roughly
+  half what K=5 predicts. The paper gate's job is to catch the failure those
+  three cannot see: an operational break between signal and fill.
   PERIODS, NOT CALENDAR MONTHS (2026-08-11): it used to group by calendar
   month, which measures a DIFFERENT object than the reference distribution —
   the book rotates on the last Tuesday, so calendar-August (07-31→08-31)
@@ -1048,6 +1196,32 @@ stock_ai/
   split (on a simulated August, ~HALF the return was idle-cash yield, which
   a bare percentile hides). Gate clock: periods end 08-25, 09-29, 10-27 → 3
   scored ≈late Oct, 6 ≈late Jan. See memory gate-period-definition-2026-08.
+  THE GATE HAS ALMOST NO STATISTICAL POWER, MEASURED 2026-09-01 — read it as a
+  PLUMBING check, not as validation. The reference distribution's per-period sd
+  is 7.35%, which swamps any plausible degradation at 3-6 observations.
+  Simulating the gate's OWN rule (one period < p5, or two < p10) against the
+  reference resampled with a constant per-period handicap:
+      periods | healthy | -1%/pd | -2%/pd | -3%/pd | -5%/pd
+            3 |   16%   |  22%   |  27%   |  30%   |  44%
+            6 |   31%   |  41%   |  48%   |  54%   |  72%
+  "healthy" is the FALSE-ALARM rate on a strategy behaving exactly as
+  backtested. A live path bleeding -2%/period (≈-22%/yr) passes 3 clean periods
+  73% of the time; at -5%/period (-46%/yr) it still passes 56%. At n=3 the
+  detection rate is barely above the false-alarm rate. This is a SAMPLE-SIZE
+  fact — no rework of gate_report fixes it, and 12 periods only reaches 76% at
+  -2%/pd while false alarms climb to 54%. So "1 SCORED period, 66th pctile,
+  consistent" carries almost no information (80% of random draws land p10-p90
+  by construction). gate_report now PRINTS this power table on every run so a
+  clean verdict cannot be over-read. The high-power instrument for "does the
+  live path implement the validated strategy" is divergence_check.py —
+  deterministic, daily. Context on the one scored period (2026-08-25, +4.10%):
+  WELCORP alone contributed +2.71pp and cash yield +0.75pp, so equity picking
+  net of the single best name was +0.65pp. The paper book also entered 4
+  sessions after the period's opening rebalance (the last-Tuesday rule landed
+  mid-flight); the engine's own 07-28 book held to 08-25 returns +5.64% vs the
+  +4.10% realised, and the 07-28 and 08-03 top-4 share only 2 of 4 names — so
+  entry timing is a real live-vs-backtest cost the reference does not model.
+  See memory gate-has-almost-no-power-2026-09.
 - `divergence_check.py` (2026-08-11, read-only, in run_price_update.sh) —
   gate_report scores the paper book's RETURN, which cannot separate "strategy
   fine, market unkind" from "the LIVE path selects differently than the
