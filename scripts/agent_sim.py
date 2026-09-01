@@ -11,9 +11,18 @@ Two roles, both local (Ollama), run once per trading day via run_daily_log.sh:
 
 Orders are executed through the REAL record_fill code paths (do_buy/do_sell,
 duplicate guard, journal) against the sandbox state, at today's close.
-A CRITIC step (plain code, no LLM) then verifies the books moved exactly as
-the orders said and logs every discrepancy, blocked order, and deviation
-from advice.
+A CRITIC step (plain code, no LLM) then checks two different things:
+  PLUMBING  — the books moved exactly as the orders said, journal rows match.
+  ECONOMICS — each executed buy's RUPEE notional against ai_assistant's own
+              position_sizes() plan, the book's deployed share against
+              REGIME_EXPOSURE, and whether the advice was truncated before
+              the trader ever read it.
+The economics half was added 2026-09-01 after the 2026-08-25 rebalance
+executed with "critic problems: 0" while being wrong by up to 19x — the
+advisor rendered position_sizes()'s output as "Weight: 25%" and dropped the
+`quantity` field, the trader read the percentage as a SHARE COUNT, and the
+orders were applied ADD-TO instead of REBALANCE-TO. Every individual order
+looked sane; only the notionals and the resulting exposure did not.
 
 WHAT THIS VALIDATES: the advice -> human -> fill -> books pipeline — the
 layer no backtest exercises. WHAT IT DOES NOT VALIDATE: strategy returns.
@@ -58,6 +67,24 @@ SIM_CASH_START = 1_000_000.0
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen2.5:7b")
+
+# How much of the advisor's answer the trader actually gets to read. A
+# month-end review enumerates every name with its weight AND quantity and is
+# the longest message of the year — exactly the one that must not be cut. The
+# critic now records when this limit was hit (see check_advice_truncated).
+ADVICE_CHAR_LIMIT = 6000
+
+# CRITIC TOLERANCES. These exist because the 2026-08-25 rebalance executed
+# with `critic problems: 0` while being wrong by up to 19x: the advisor
+# rendered position_sizes()'s output as "Weight: 25%" and dropped the
+# `quantity` field, the trader read the percentage as a SHARE COUNT and
+# ordered 25 shares of each name (HFCL got 6% of its target, RADICO 119%),
+# and the orders were executed as ADD-TO rather than REBALANCE-TO, leaving
+# the book 54.7% deployed against a 37.5% BEAR mandate. Neither failure was
+# detectable by the old critic, which only asked "did a BUY produce a
+# position" and "does the journal row count match".
+NOTIONAL_TOL = 0.40      # executed rupees vs the plan's rupees, per name
+EXPOSURE_TOL = 0.10      # deployed share of equity vs REGIME_EXPOSURE
 
 TRADER_PROMPT = """You are a cautious Indian retail investor using a momentum advisory system.
 Below is today's conversation with your advisor about YOUR portfolio.
@@ -140,7 +167,7 @@ def trader_decide(advice_text):
     r = requests.post(OLLAMA_URL, timeout=180, json={
         "model": OLLAMA_MODEL, "stream": False, "format": "json",
         "options": {"temperature": 0.3},
-        "prompt": TRADER_PROMPT.format(advice=advice_text[:6000])})
+        "prompt": TRADER_PROMPT.format(advice=advice_text[:ADVICE_CHAR_LIMIT])})
     r.raise_for_status()
     body = r.json()
     if "response" not in body:
@@ -157,6 +184,84 @@ def trader_decide(advice_text):
         except (KeyError, TypeError, ValueError):
             continue
     return clean, str(out.get("thinking", ""))[:300]
+
+
+# ---------- critic checks ----------
+#
+# The plumbing checks (did a BUY land in the book, does the journal row count
+# match) verify that record_fill did its job. They cannot see the failure that
+# actually matters for a signals-only system: the HUMAN ends up typing the
+# wrong number. These three check the ECONOMICS of what was executed against
+# what the deterministic tool said to do.
+
+def check_advice_truncated(advice, problems):
+    """The trader only ever sees ADVICE_CHAR_LIMIT characters."""
+    if len(advice) > ADVICE_CHAR_LIMIT:
+        problems.append(
+            f"advice was TRUNCATED at {ADVICE_CHAR_LIMIT} chars ({len(advice)} produced) — "
+            f"the trader never saw the tail, which on a month-end review is where "
+            f"the later names' quantities live")
+
+
+def check_notional_vs_plan(executed, problems):
+    """Compare each executed BUY's rupee notional against ai_assistant's own
+    position_sizes() plan — the deterministic tool the advice was built from.
+
+    This is the check that would have caught 2026-08-25. position_sizes()
+    returns both `weight` ("25.2%") and `quantity` (394) per name; the advisor
+    LLM is free to render that badly, and did. Comparing rupees rather than
+    share counts makes the check independent of how the advice was worded.
+    """
+    buys = [e for e in executed if e["action"] == "buy"]
+    if not buys:
+        return
+    try:
+        import ai_assistant as ai
+        plan = ai.position_sizes()
+    except Exception as e:                                  # noqa: BLE001
+        problems.append(f"could not verify notionals against position_sizes(): {e}")
+        return
+    if not isinstance(plan, dict) or "buy_plan" not in plan:
+        problems.append(f"position_sizes() returned no buy_plan ({plan.get('error', plan)}) — "
+                        f"executed buys could not be verified")
+        return
+    want = {p["symbol"]: float(p["rupees"]) for p in plan["buy_plan"]}
+    for e in buys:
+        got = e["qty"] * e["price"]
+        target = want.get(e["symbol"])
+        if target is None:
+            problems.append(f"{e['symbol']}: BUY ₹{got:,.0f} executed but the name is NOT in "
+                            f"today's position_sizes() plan")
+            continue
+        if target > 0 and abs(got - target) / target > NOTIONAL_TOL:
+            problems.append(
+                f"{e['symbol']}: executed ₹{got:,.0f} ({e['qty']} sh) vs plan ₹{target:,.0f} "
+                f"= {got/target:.0%} of target — the quantity the human acted on is wrong")
+
+
+def check_exposure(state, equity, problems):
+    """Deployed share of equity vs the regime's mandated REGIME_EXPOSURE.
+
+    Catches a month-end executed as ADD-TO instead of REBALANCE-TO: every
+    individual order can look sane while the book ends up carrying far more
+    risk than the mandate allows.
+    """
+    if equity <= 0:
+        return
+    try:
+        import core
+        import strategy_config as sc
+        regime, _ = core.market_regime()
+        mandate = sc.REGIME_EXPOSURE[regime]
+    except Exception as e:                                  # noqa: BLE001
+        problems.append(f"could not check exposure against REGIME_EXPOSURE: {e}")
+        return
+    deployed = 1.0 - state["cash"] / equity
+    if abs(deployed - mandate) > EXPOSURE_TOL:
+        problems.append(
+            f"book is {deployed:.1%} deployed vs the {mandate:.1%} {regime} mandate "
+            f"({'OVER' if deployed > mandate else 'UNDER'}-exposed by "
+            f"{abs(deployed - mandate):.1%} of equity)")
 
 
 # ---------- one session ----------
@@ -256,6 +361,12 @@ def step():
                 blocked.append({**o, "why": f"insufficient cash (₹{state['cash']:,.0f})"})
                 continue
             qty = min(o["qty"], afford)
+            if qty < o["qty"]:
+                # Silently downsizing a fill hides the reason the book ended
+                # up smaller than the advice — record it as a deviation.
+                blocked.append({**o, "qty": o["qty"] - qty,
+                                "why": f"partially downsized to {qty} sh by available "
+                                       f"cash (₹{state['cash']:,.0f})"})
         else:
             held = pos.get("qty", 0)
             if held <= 0:
@@ -292,6 +403,13 @@ def step():
     for s, p in state["positions"].items():
         px = close_on(s, today)
         equity += (px if px else p.get("entry_price", 0)) * p["qty"]
+
+    # ECONOMIC checks — see the note above check_advice_truncated. These are
+    # what make a "0 problems" report mean something.
+    check_advice_truncated(advice, problems)
+    if executed:
+        check_notional_vs_plan(executed, problems)
+    check_exposure(state, equity, problems)
 
     append_csv(SIM_EQUITY, {"date": today_str, "equity": round(equity, 2),
                             "cash": round(state["cash"], 2),
@@ -366,22 +484,49 @@ def model_accuracy(log):
                   f"mean alpha {sum(rel)/len(rel):+.1%}")
 
     # SELLS: what did the stock do AFTER the model said sell?
+    #
+    # MANDATED vs DISCRETIONARY matters and used to be conflated. Under
+    # laggards-only, a month-end sell fires because the name dropped out of
+    # the sector-capped top-N — it is the MANDATE executing, not a forecast
+    # that the stock will fall. Scoring those by "did it keep falling" reads
+    # badly forever by construction: momentum names routinely keep running
+    # after they stop being the BEST momentum names. Only a sell taken OFF a
+    # rebalance day is a discretionary directional call the model owns.
+    month_end_dates = set()
+    if log is not None and "month_end" in log:
+        month_end_dates = set(
+            log.loc[log["month_end"].astype(str).isin(["True", "late"]), "date"].astype(str))
+
     sells = jr[jr["action"] == "SELL"]
     if len(sells):
         print(f"  SELL calls ({len(sells)}):")
-        vindicated = 0
+        disc_total = disc_good = 0
         for _, t in sells.iterrows():
             now = latest_close(t["symbol"])
             if now is None:
                 continue
             after = now / t["price"] - 1
-            verdict = ("GOOD EXIT (kept falling)" if after < -0.01 else
+            mandated = str(t["date"]) in month_end_dates
+            verdict = ("kept falling" if after < -0.01 else
+                       "kept rising" if after > 0.01 else "flat")
+            if mandated:
+                tag = f"MANDATED rotation ({verdict} after — not a forecast)"
+            else:
+                tag = ("GOOD EXIT (kept falling)" if after < -0.01 else
                        "cost upside" if after > 0.01 else "neutral")
-            vindicated += after < -0.01
+                disc_total += 1
+                disc_good += after < -0.01
             pnl = t.get("pnl", "")
             print(f"    {t['date']} SELL {t['symbol']:16s} @ ₹{t['price']:.2f}, since then "
-                  f"{after:+.1%} -> {verdict} (realized P&L ₹{pnl})")
-        print(f"    -> {vindicated}/{len(sells)} sells vindicated so far")
+                  f"{after:+.1%} -> {tag} (realized P&L ₹{pnl})")
+        n_mand = len(sells) - disc_total
+        if disc_total:
+            print(f"    -> {disc_good}/{disc_total} DISCRETIONARY sells vindicated "
+                  f"({n_mand} mandated month-end rotations excluded — the mandate "
+                  f"chose those, not the model)")
+        else:
+            print(f"    -> 0 discretionary sells to score; all {n_mand} were mandated "
+                  f"month-end rotations, which are not forecasts and are not scored")
 
     print(f"\n  CAVEAT: one month = ONE rebalance period. This scores the month's calls;")
     print(f"  it cannot validate or refute the strategy (that's gate_report.py over 3-6")

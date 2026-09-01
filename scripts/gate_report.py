@@ -31,9 +31,23 @@ converted into a regime-conditional reference distribution: slicing ~128
 periods by regime leaves buckets too thin to be a real distribution, and it
 would become a way to explain away every bad month.
 
+WHAT THIS GATE IS, precisely (power block added 2026-09-01). It is a PLUMBING
+and gross-breakage check, NOT strategy validation, and the difference is
+measurable: the reference distribution's per-period sd is ~7.4%, so at the 3-6
+observations the gate plans to use, one period's noise swamps any plausible
+degradation. Simulating the gate's own rule against the reference gives a 16%
+false-alarm rate at n=3 on a perfectly healthy strategy versus only 27%
+detection for one bleeding 2%/period (~-22%/yr); a path losing 5%/period
+(-46%/yr) still passes three clean periods 56% of the time. A clean gate
+therefore rules out gross breakage and establishes nothing about the edge.
+This is a sample-size fact — no rework of this script fixes it. The
+high-power instrument for "does the live path implement the validated
+strategy" is divergence_check.py: deterministic, daily, and it answers the
+attribution question this script cannot.
+
 Reading it:
   - periods between p10 and p90: normal — the paper book behaves like the
-    backtest said it would.
+    backtest said it would. This is WEAK evidence; see the power block.
   - a period below p5 (or two below p10): the live signal path may diverge
     from the backtest (data issue, execution gap, or regime the history
     never saw) — investigate BEFORE deploying, don't average it away.
@@ -336,6 +350,46 @@ def print_attribution(period, matrix=None):
           f"the other {1-dep:.0%} sat in cash by design")
 
 
+def print_power(ref, n_scored, shifts=(-0.01, -0.02, -0.03, -0.05), trials=40000):
+    """What this verdict can and cannot tell you.
+
+    Added 2026-09-01. The gate was being read as strategy VALIDATION, and it
+    cannot be that: the reference distribution's per-period sd is ~7.4%, which
+    swamps any plausible degradation at 3-6 observations. Simulating the gate's
+    OWN rule (one period < p5, or two < p10) against the reference resampled
+    with a constant per-period handicap gives the detection rates below — at
+    n=3 a live path bleeding 2%/period (roughly -22%/yr) is caught 27% of the
+    time against a 16% false-alarm rate on a perfectly healthy strategy.
+
+    This is a sample-size fact, not a defect in the paper book or this script.
+    It is printed so a "consistent" verdict is not over-read: the gate is a
+    PLUMBING and sanity check. The high-power instrument for "does the live
+    path implement the validated strategy" is divergence_check.py, which is
+    deterministic and answers daily instead of over six months.
+    """
+    rng = np.random.default_rng(12345)
+    p5, p10 = np.percentile(ref, 5), np.percentile(ref, 10)
+
+    def alarm_rate(n, shift):
+        d = rng.choice(ref, size=(trials, n), replace=True) + shift
+        return float((((d < p5).any(axis=1)) | ((d < p10).sum(axis=1) >= 2)).mean())
+
+    print(f"\n  WHAT THIS GATE CAN DETECT (reference per-period sd {ref.std():.2%})")
+    head = "  " + f"{'periods':>9s} " + f"{'healthy':>9s} " + " ".join(
+        f"{s:+.0%}/pd".rjust(9) for s in shifts)
+    print(head)
+    for n in (max(1, n_scored), 3, 6, 12):
+        row = [alarm_rate(n, 0.0)] + [alarm_rate(n, s) for s in shifts]
+        mark = " <- now" if n == max(1, n_scored) else ""
+        print("  " + f"{n:>9d} " + " ".join(f"{v:8.0%}" for v in row) + mark)
+    print("  'healthy' is the FALSE-ALARM rate on a strategy behaving exactly as")
+    print("  backtested; the rest are DETECTION rates for one quietly losing that")
+    print("  much per 21-session period. At 3-6 periods these are close together —")
+    print("  a clean gate does NOT establish the edge, it only rules out gross")
+    print("  breakage. Treat this as a plumbing check and read divergence_check.py")
+    print("  (deterministic, daily) for whether the live path matches the backtest.")
+
+
 def main():
     args = sys.argv[1:]
     want_attrib = "--attrib" in args
@@ -412,6 +466,8 @@ def main():
         print("  structurally muted vs a pooled all-regime reference.")
     elif n_scored >= 3 and n_low == 0:
         print("  Gate progressing: no bottom-decile periods so far.")
+
+    print_power(ref, n_scored)
 
     op = open_period(periods)
     if op:
