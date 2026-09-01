@@ -150,7 +150,7 @@ def compute_supertrend(df, period=10, multiplier=3):
 
     return direction.iloc[-1], supertrend_line.iloc[-1]
 
-def get_trade_levels(df, atr_stop=None):
+def get_trade_levels(df, atr_stop=None, cur=None, symbol=None):
     """Entry/stop/target for a MOMENTUM call.
 
     REWRITTEN 2026-08-01. The old construction priced entry AT the nearest
@@ -169,8 +169,14 @@ def get_trade_levels(df, atr_stop=None):
     Target: nearest resistance if it offers real upside, else an ATR projection
            (a momentum name at 52w highs has no overhead resistance to use).
     """
-    current = float(df["Close"].iloc[-1])
-    support, resistance, s_str, r_str = get_levels(df)
+    # `cur`/`symbol` default to None so the advisor's own call is unchanged.
+    # They exist because support_resistance.get_trade_levels now DELEGATES here
+    # rather than keeping a second, older construction of the same quantity —
+    # see the note there. The interactive S/R tool runs on live quotes, and a
+    # live price must drive level selection (CLAUDE.md 2026-08-04), so the
+    # reference price has to be threadable through.
+    current = float(cur) if cur else float(df["Close"].iloc[-1])
+    support, resistance, s_str, r_str = get_levels(df, symbol=symbol, cur=cur)
     atr = atr_stop if atr_stop and not np.isnan(atr_stop) else current * 0.02
 
     # --- entry: shallow pullback, not a deep support bounce ---

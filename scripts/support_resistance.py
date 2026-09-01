@@ -931,16 +931,41 @@ def strength_label(n):
 # ──────────────────────────────────────────────
 
 def get_trade_levels(df, symbol=None, cur=None):
+    """Entry/stop/target for a momentum call — DELEGATES to full_advisor.
+
+    REWRITTEN 2026-09-01. This function used to carry its OWN construction:
+    buy_zone = the nearest support, stop = support * 0.97, and rr measured
+    from support rather than from where you would actually buy. That is
+    precisely the construction full_advisor.get_trade_levels was REBUILT away
+    from on 2026-08-01 (CLAUDE.md, "LEVELS WERE ANTI-MOMENTUM"): for a strong
+    momentum name the nearest support sits 35-44% below price, making the
+    entry an unfillable limit, the rr 0.01-0.71, and the stop far wider than
+    the -18% catastrophic stop that would fire long before it.
+
+    That fix never reached this copy, so the INTERACTIVE tool kept printing
+    the defective numbers for a month while the advisor printed correct ones.
+    Same failure class as the two drifted momentum_score copies and the three
+    inlined inverse-vol copies: a quantity computed in two places, fixed in
+    one. The fix is not to re-patch this one — it is to have only one.
+
+    Imported lazily because full_advisor imports get_levels from this module;
+    a module-level import would be circular.
+
+    Return shape is unchanged, so both call sites here are untouched.
+    """
+    from full_advisor import get_trade_levels as _advisor_levels
+    from core import compute_atr
+
     cur = round(float(cur) if cur else float(df["Close"].iloc[-1]), 2)
-    support, resistance, s_str, r_str = get_levels(df, symbol=symbol, cur=cur)
-    stop   = round(support * 0.97, 2)
-    risk   = support - stop
-    reward = resistance - support
-    rr     = round(reward / risk, 2) if risk > 0 else 0
+    atr = compute_atr(df)
+    if atr is None or np.isnan(atr) or atr == 0:
+        atr = None                      # advisor falls back to 2% of price
+    buy, stop, target, support, resistance, rr, s_str, r_str = _advisor_levels(
+        df, atr, cur=cur, symbol=symbol)
     return {
         "current":    cur,
-        "buy_zone":   support,
-        "target":     resistance,
+        "buy_zone":   buy,
+        "target":     target,
         "stop":       stop,
         "rr":         rr,
         "s_strength": s_str,
@@ -1120,6 +1145,21 @@ def analyse_table(symbols, as_of=None, live_prices=None, live_sources=None):
               f"table — approximate; direction and rough size are right, the "
               f"exact value is not calibrated at this horizon.")
     print(f"  ⚠ = level >15% from CMP   📦Hi/Lo = delivery volume signal")
+    # A HIGH probability is not a STRONG level. The number answers "will price
+    # REACH this", and reaching is mostly a function of distance — so a high
+    # figure means the level is NEAR, and near levels are as easy to break as
+    # they are to touch. Measured on the August 2026 panel, P(touch) is
+    # ANTI-predictive for whether a level then holds (AUC 0.384), and the
+    # levels themselves do no better at marking a turn than a random price at
+    # the same distance (+0.4pp vs a permutation control, CI spans zero).
+    # This caveat lives in the month-end report already; it belongs here too,
+    # because this is where the number is actually read before a decision.
+    print(f"  ⚠ A HIGH % means the level is NEAR — NOT that it is strong.")
+    print(f"    P(touch) does not predict whether a level HOLDS (it is mildly")
+    print(f"    anti-predictive: AUC 0.384), and these levels mark reversals no")
+    print(f"    better than a random price the same distance away. Use them for")
+    print(f"    \"how far might this move\", never as a buy/sell trigger —")
+    print(f"    entry/stop/target come from full_advisor.py's ATR levels.")
 
     # ── MONTHLY CONTAINMENT BAND ──────────────────────────────────────────
     # S1/R1 above answer "will price REACH this level" (P(touch)). That is the
@@ -1204,10 +1244,21 @@ def analyse(symbols):
         for i, (p, t_, sc) in enumerate(sups):
             label    = s_labels[i] if i < len(s_labels) else f"S{i+1} — Support"
             dist     = round((cur-p)/cur*100, 1)
-            marker   = "  ← buy zone" if i == 0 else ""
+            marker   = "  ← nearest support" if i == 0 else ""
             prob, ns = reach_probability_v2(df, p, "down")
             prob_str = f"  [{prob}% prob, cell n={ns}]" if prob is not None else ""
             print(f"  {label:<30} [{strength_label(t_):8}] [score:{sc:.2f}]  ₹{p:,.2f}  (-{dist}%){prob_str}{marker}")
+
+        # Same caveat as the table view — see the note there. The per-level
+        # "[xx% prob]" above is P(TOUCH), which is mostly distance restated, so
+        # a high number means NEAR, not strong.
+        print(f"\n  ⚠ [xx% prob] = P(touch) by month-end — a HIGH % means the")
+        print(f"    level is NEAR, NOT that it is strong. P(touch) does not")
+        print(f"    predict whether a level HOLDS (anti-predictive, AUC 0.384),")
+        print(f"    and these levels mark reversals no better than a random")
+        print(f"    price the same distance away. Use for \"how far might this")
+        print(f"    move\", never as a buy/sell trigger — entry/stop/target come")
+        print(f"    from full_advisor.py's ATR levels.")
 
         deliv = get_delivery_signal(sym, df)
         if deliv: print(f"\n  {deliv}")

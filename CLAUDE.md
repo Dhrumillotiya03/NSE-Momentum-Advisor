@@ -501,6 +501,52 @@ stock_ai/
   data/_quarantine/depth_2026-08-14_precleanup.csv), and `coverage` reports
   symbols-PER-SNAPSHOT so a mostly-empty near-close snapshot cannot read as
   a full one.
+- STUDY 4 FEASIBILITY GATE RUN 2026-09-01 BEFORE MORE COLLECTION
+  (research_depth_feasibility.py, PREREG amendment 1). The pre-registration
+  deferred the calibration's design until "enough sessions accumulate", but
+  never asked the most basic question: IS A 5-LEVEL BOOK DEEP ENOUGH TO SPAN
+  THE ORDERS THIS STRATEGY PLACES? That is CROSS-SECTIONAL (book shape), not
+  time-series, so one session answers it — and answering it in 2027 after
+  committing months of market-hours uptime would have been the expensive
+  order. Panel: 1,230 book observations, 221 symbols, 4 sessions.
+  (1) INSTRUMENT PASSES AT CARVE-OUT SIZES ONLY. Orders fitting inside the
+  visible 5 levels: 98.5% at Rs 1L (Rs 10L capital), 93.8% at Rs 2L (Rs 20L),
+  66.5% at Rs 6.8L (Rs 68L), 32.3% at Rs 20L (Rs 2Cr). The visible 5 levels
+  are a median 0.53% of the FULL book, so censoring is a property of the
+  5-level WINDOW, not of the stock's liquidity.
+  (2) THE FEED HAS A HARD CEILING. The visible ask window spans a median of
+  only 5.15 bps, so that is the maximum impact it can ever report. Measured
+  impact as a share of that ceiling: 35% at Rs 1L, 41% at Rs 2L, 64% at Rs 20L,
+  77% at Rs 50L — above ~Rs 10L/order the number reports the INSTRUMENT, not
+  the market. THIS RETIRES AN OPEN QUESTION: the Rs 2Cr end of the capacity
+  curve can NEVER be calibrated from 5-level depth, so keep quoting K=5..20
+  there and stop expecting collection to resolve it.
+  (3) MEASURED IMPACT IS WELL BELOW THE ASSUMED K, where measurable. Per-side
+  median impact (size-weighted fill vs mid, walking the resting ask) vs model
+  prediction at the same order size — Rs 1L: 1.82 bps measured vs 3.74 (K=5) /
+  7.47 (K=10) / 14.95 (K=20); Rs 2L: 2.10 vs 5.26 / 10.51 / 21.03. Implied
+  K = 2.44 and 2.02, BELOW the bottom of the assumed range. About half the
+  measured cost is just the half-spread (median 1.40 bps) — a carve-out-sized
+  order barely walks past the touch. So the Rs 10-20L carve-out's modelled
+  0.95-2.67pp CAGR drag is CONSERVATIVE, and a static-book walk is itself a
+  patient-order UPPER bound (real execution gets replenishment).
+  (4) THE SHALLOW EXPONENT DOES NOT REFUTE THE SQUARE-ROOT LAW. Fitting
+  log(impact)=a+b*log(size) within each book gives median b=0.183 (balanced
+  panel, books uncensored at EVERY size: 0.148) vs the model's 0.5, 97-99% of
+  books below 0.5 — and censoring composition is ruled out because the
+  balanced panel agrees. BUT saturation (2) produces the identical signature
+  and the two are NOT separable inside a 5-level window. Recorded as a BOUND
+  ("within the top of book, impact grows much more slowly than sqrt; past
+  level 5 is unobservable"), NOT as a refutation — "we refuted Almgren-Chriss
+  on 4 sessions of top-of-book data" is the overclaim the prereg habit exists
+  to prevent.
+  STILL NOT FOLDED INTO PRODUCTION COST — 4 sessions, one volatility regime.
+  The amendment PRE-REGISTERS the adoption rule: >=20 sessions spanning >1
+  volatility tercile, restricted to sizes under the 60%-of-ceiling saturation
+  threshold, reported per liquidity tier if implied K spreads >2x across
+  turnover terciles, and adopt the UPPER end of the session range, not the
+  mean. Collection stays worthwhile — its remaining job is day-to-day and
+  regime VARIATION at carve-out sizes, which one quiet session cannot give.
 - EXIT-SIDE DELIVERY%/OI FLOW SIGNALS tested and REJECTED 2026-08-10
   (research_exit_flow_signals.py + _pertrigger.py,
   PREREG_exit_side_flow_signals.md, Study 5 — final study in the
@@ -1291,6 +1337,34 @@ stock_ai/
   candidates, entries 0.6-2.3% below close, and the advisor's top-4 now EQUALS
   the strategy's top-4. The July ledger's 1/8 fill rate was this bug, so
   pre-2026-08-01 advisor_calls_log rows are NOT comparable to later ones.
+- THE ADVISOR'S LEVEL FIX NEVER REACHED THE S/R TOOL (2026-09-01). There were
+  TWO functions named `get_trade_levels` — `full_advisor.get_trade_levels`
+  (REBUILT 2026-08-01, ATR-based) and `support_resistance.get_trade_levels`
+  (the ORIGINAL anti-momentum construction: buy_zone = nearest support,
+  stop = support*0.97, rr measured from support instead of from where you
+  would actually buy). The interactive S/R tool printed the defective one —
+  as `📥 Buy / 🛑 Stop / 🎯 Target` in `--verbose` and as the `R:R` column in
+  the default table — for a month after the advisor was fixed. Same failure
+  class as the two drifted momentum_score copies and the three inlined
+  inverse-vol copies: one quantity computed in two places, fixed in one.
+  MEASURED ON THE 60-NAME FIXED PANEL, the defect had CHANGED SHAPE since
+  2026-08-01 but not gone away — min-separation (2026-08-05) caps levels near
+  spot, so the old "stop 40% wide" symptom no longer appears (0/60 wider than
+  -18%). What remained: entries a median -6.81% below spot (vs -1.17% now),
+  i.e. still unfillable inside a month for a momentum name, and — the live
+  danger — **R:R inflated to a median 4.77 against an honest 1.88**, because
+  risk was a fixed 3% of support rather than a real stop distance from a real
+  entry. Every setup in that table read ~2.5x better than it was.
+  FIXED by DELEGATION, not by re-patching: `support_resistance.get_trade_levels`
+  now calls `full_advisor.get_trade_levels`, so there is ONE construction.
+  full_advisor's gained `cur=`/`symbol=` kwargs (default None) so the live
+  reference price still drives level selection on the interactive path;
+  verified byte-identical advisor output across 40 names with them unset.
+  Import is LAZY inside the function — full_advisor imports get_levels from
+  support_resistance, so a module-level import is circular. Return shape
+  unchanged, both call sites untouched. Invariants now hold 60/60 (entry <=
+  spot, stop below entry, stop never wider than the catastrophic stop, target
+  above entry) — exactly what the old version violated.
 - SECTORS.JSON GAP FIXED 2026-08-01: 14 eligible names (WELCORP, RADICO,
   LLOYDSME, SONACOMS, M&MFIN, NAM-INDIA, EXIDEIND, HEG, CHENNPETRO, IIFL,
   360ONE, PPLPHARMA, ANANTRAJ, MANAPPURAM) were unmapped and all shared ONE
@@ -1474,6 +1548,26 @@ stock_ai/
   not in the trading path (only support_resistance's INDEX_FILES map; the VIX
   overlay was rejected) so impact was nil — but nifty50.csv rides the same
   uncovered path and is NOT harmless: it defines sessions, regime and month-end.
+- INTRADAY TIMER IS NOW MONOTONIC, NOT CALENDAR (2026-09-01). `stockai-intraday`
+  ran `OnCalendar=Mon..Fri *-*-* 09..15:00/15:00`, which systemd evaluates
+  against the REALTIME clock. This laptop repeatedly boots with a stale clock
+  that NTP then corrects (the gotcha already in this file, first hit
+  2026-07-15). On 2026-09-01 it booted ~5h09m FAST: systemd computed the next
+  firing as the FOLLOWING day 09:00 and would have skipped the whole session.
+  `systemctl restart` AND `daemon-reexec` both failed to shake it loose — the
+  user manager holds the stale reference. Diagnosis is visible as a journal
+  whose newest entry is stamped hours ahead of `date`.
+  This is not cosmetic: depth has NO historical endpoint, so a skipped session
+  is lost permanently and Study 4 is gated on sessions collected. Replaced with
+  `OnBootSec=2min` + `OnUnitActiveSec=15min` — monotonic, counts elapsed time,
+  immune to realtime jumps. Firing all day is safe and cheap because all three
+  ExecStart scripts (`intraday_watch`, `market_scanner`, `log_market_depth`)
+  call `market_open_now()` first and exit in ~0.7s outside NSE hours: ~69 extra
+  no-op firings/day, ~2 min CPU total. Old unit kept at
+  `~/.config/systemd/user/stockai-intraday.timer.bak-2026-09-01`.
+  NOTE `stockai-price-update` (the nightly pipeline) is still `OnCalendar` and
+  still disabled — the user runs it manually — so it carries the same latent
+  skew bug if ever re-enabled.
 - OPS CADENCE: NOTHING new needs running daily. run_price_update.sh (systemd
   timer stockai-price-update, Tue-Sat 00:30 IST, Persistent=true) already
   runs the full pipeline — price update, both S/R loggers, exit/paper/advisor/
@@ -1578,6 +1672,16 @@ stock_ai/
   Entry pricing lives in full_advisor.py's ATR-based entry/stop/target; the
   "level it should not dip below" question is containment_band.py's, and that
   ships as a RISK tool because trading it failed on adverse selection.
+- ANTI-PREDICTIVE-PROBABILITY CAVEAT NOW PRINTS ON THE INTERACTIVE PATH
+  (2026-09-01). The finding that a high S1_prob/R1_prob means a NEAR level —
+  easy to reach AND easy to break, AUC 0.384 for "holds", i.e. mildly
+  ANTI-predictive — lived only in the month-end report, not where the number
+  is actually read before a decision. Both interactive paths now print it:
+  `analyse_table` (default) after the P(touch) legend, and `analyse`
+  (`--verbose`) under the level list. Nothing else imports either function, so
+  the change cannot reach the loggers or the measurement record. Also relabelled
+  `--verbose`'s S1 marker from "← buy zone" to "← nearest support" — it was the
+  exact misreading the new caveat warns against, printed four lines above it.
 - `sr_monthend_analysis.py` checks hit-rate, level drift, probability calibration,
   n-sensitivity, distance-vs-accuracy — run only after 2-3+ weeks of logged data.
   REWORKED 2026-08-31 after the August review above, because the report itself
