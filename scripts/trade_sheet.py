@@ -152,12 +152,19 @@ def build(symbols=None):
         rsi_v = float(compute_rsi(df["Close"]))
         atr = compute_atr(df)
         buy, stop, target, sup, res, rr, _s, _r = fa.get_trade_levels(df, atr)
-        s_lv, r_lv, _, _ = get_levels(df, symbol=sym, fast=True, cur=cur)
+        s_lv, r_lv, s_str, r_str = get_levels(df, symbol=sym, fast=True, cur=cur)
         row.update({
             "Buy": round(buy, 2), "Stop": round(stop, 2),
             "Target": round(target, 2), "RR": round(rr, 2),
-            "S1": round(s_lv, 2) if s_lv else None,
-            "R1": round(r_lv, 2) if r_lv else None,
+            # A `~` marks a PROJECTED level: get_all_levels found no historical
+            # pivot inside the reachable band and projected one from the
+            # containment band instead (strength 0; pivot-derived levels are
+            # >= 1). Measured 2026-09-02: 19/65 supports and 14/65 resistances
+            # on this sheet are projections. They are arithmetic, not
+            # structure, and the whole point of an S/R column is to say which
+            # is which — same reason RSI carries its `!` flag below.
+            "S1": (f"{s_lv:.2f}~" if s_str == 0 else f"{s_lv:.2f}") if s_lv else None,
+            "R1": (f"{r_lv:.2f}~" if r_str == 0 else f"{r_lv:.2f}") if r_lv else None,
             # RSI_OVERBOUGHT is ADVISORY, not a filter (the hardcoded
             # RSI>75 hard-reject was removed from the advisor 2026-08-01) —
             # so flag it, never drop the row for it.
@@ -209,7 +216,12 @@ def print_sheet(df, regime, n_names, state):
     print("  Buy = shallow ATR pullback entry   Stop = ATR, capped at the -18%")
     print("  catastrophic stop   Target = resistance or ATR projection.")
     print("  S1/R1 answer 'how far might it move' — measured NOT to mark")
-    print("  reversals, so never use them as the trigger.")
+    print("  reversals, so never use them as the trigger. A `~` means the")
+    print("  level is PROJECTED from the containment band, not a real pivot:")
+    print("  no historical structure sits within reach on that side.")
+    print("  These are the same levels live_ticker.py shows (one construction,")
+    print("  core.sr_levels) — it just anchors them to a live quote, so its")
+    print("  distances move through the session while these are close-based.")
 
     # Held positions: the actionable number is the exit, not a fresh entry.
     positions = state.get("positions", {})
