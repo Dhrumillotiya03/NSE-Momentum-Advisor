@@ -71,6 +71,11 @@ fi
     "$PYTHON" exit_engine.py
     "$PYTHON" paper_trader.py
     "$PYTHON" full_advisor.py --log
+    # One-row-per-stock sheet of tradeable levels for the watchlist + held +
+    # today's strategy top-N, so the 60-name "what do I trade this at" question
+    # doesn't need full_advisor run per symbol. Read-only apart from its own
+    # ../data/trade_sheet.csv. ~15s.
+    "$PYTHON" trade_sheet.py --csv-only
     "$PYTHON" news_watchdog.py
     "$PYTHON" agent_sim.py
     "$PYTHON" exit_shadow.py

@@ -742,6 +742,37 @@ any forecasting/backtest machinery, mirroring the 2026-09-01 depth gate.
   underlying (index options) would be a NEW strategy needing its own prereg,
   and abandons the per-stock requirement that motivated this.
 
+## TRADE SHEET (trade_sheet.py, 2026-09-02) — the 60-stock "what do I trade this at" view
+User's operational need: they scan a 60+ name watchlist and want tradeable
+levels per name without running full_advisor once per stock. Writes
+`data/trade_sheet.csv` (overwritten, NOT a measurement record) and prints a
+table; wired into run_price_update.sh (~15s, read-only apart from its own CSV).
+- ROWS = strategy top-N UNION held UNION WATCHLIST. Including the top-N is
+  LOAD-BEARING, not cosmetic: the WATCHLIST is the FIXED S/R calibration panel
+  and has no reason to contain what the strategy wants. Measured 2026-09-02 —
+  the live BEAR top-4 (HFCL/WELCORP/RADICO/ATHERENERG) were NONE of them on the
+  watchlist, so a watchlist-only sheet showed 61 names and nothing worth
+  buying, which invites acting on the best merely-ELIGIBLE row instead.
+- LEVELS come from `full_advisor.get_trade_levels` — the single ATR
+  construction (support_resistance delegates to it since 2026-09-01), so the
+  sheet CANNOT drift from what the advisor prints. Top-N reuses
+  `select_top_n_capped` exactly as exit_engine calls it, not a reimplementation.
+- THE `Status` COLUMN IS THE POINT. TOP-N / HELD / ELIGIBLE #k / NOT ELIGIBLE
+  / NOT IN UNIV / STALE. Printing Buy/Stop/Target for 61 names WITHOUT it would
+  recreate advisor-strategy-divergence-2026-08 (advisor recommending names the
+  validated strategy would never buy, zero overlap with its own top-4). Levels
+  on a non-TOP-N row are reference geometry, and the printed legend says so.
+- Stale names (>MAX_STALE_SESSIONS behind the index) get levels SUPPRESSED,
+  not quoted off an old close — same guard as full_advisor.compute_buy_calls.
+- RSI >= RSI_OVERBOUGHT renders as e.g. `85.1!` — a FLAG, never a filter (the
+  hardcoded RSI>75 hard-reject was removed 2026-08-01 and must not return).
+- Separate HELD POSITIONS section prints qty/entry/CMP/P&L and the -18%
+  CATASTROPHIC_STOP level off each position's ACTUAL entry — for a held name
+  the actionable number is the exit, not a fresh entry. Reads `entry_price`
+  (record_fill.py's schema).
+- S1/R1 are carried for range context ONLY. They do not mark reversals
+  (measured, permutation-controlled) — never use them as a trigger.
+
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
   volume profile + wick rejection + delivery volume scoring + reach probability
