@@ -688,6 +688,60 @@ stock_ai/
   bring in an EXTERNAL signal failed), 1 infrastructure build with
   analysis deferred.
 
+## Options range-selling TESTED AND REJECTED 2026-09-02 — line CLOSED
+User asked for S/R levels defining a monthly min/max so they could sell CE+PE
+around them (short strangle: profit if price stays inside to expiry). This is
+a DIFFERENT STRATEGY, not an S/R change — negative-skew payoff, different
+mechanism (the variance risk premium). Pre-registered
+`PREREG_options_range_selling.md`; three feasibility gates run BEFORE building
+any forecasting/backtest machinery, mirroring the 2026-09-01 depth gate.
+- GATE A (`research_vrp_gate.py`, 2433 cycles / 60 symbols / 2021-2026):
+  gross VRP (ATM straddle implied move minus realised move) median **1.53pp,
+  95% CI [1.06, 1.98]** — a real, significant effect, but BELOW the frozen
+  2pp floor. FAILS. 75.9% of expiry dates positive, so not concentration.
+- GATE A2 (`research_strangle_pnl.py`, 2414 cycles): direct P&L of the ACTUAL
+  5% OTM strangle, motivated by volatility SKEW being a distinct mechanism
+  from ATM pricing (a legitimately different question, pre-registered as
+  AMENDMENT 1, not a retune of A's floor). Win rate 68.9% and median cycle
+  **+82.8% of premium** — but mean only **+4.5%, CI [-11.8%, +19.3%]**, and
+  **-0.5% after a generous 5%-of-premium cost haircut**. 2 of 3 criteria FAIL.
+- **THE CI WIDTH IS THE REAL FINDING.** At n=2414 over 58 expiry dates the
+  mean is STILL indistinguishable from zero. That is structural to a
+  tail-dominated payoff, not fixable with more data: you could trade this
+  profitably for a year and not know whether you had an edge or were simply
+  pre-tail. A strategy that cannot tell you it is working is not deployable.
+- **TAIL, in margin terms** (vs Gate C's Rs132,468/lot): p1 = **-97.1% of
+  margin blocked**, p5 = -47.3%. Worst cycle -2627% of premium (ITC).
+- **TAIL CORRELATION KILLS THE DIVERSIFICATION COUNT.** Gate C measured
+  "Rs10L supports ~7 naked names", but the 50 worst cycles span only 21
+  expiry dates, 8 of them sharing ONE date; worst 5 dates = 61% of all
+  negative-date loss; INFY and TCS both in the worst 5 on the SAME expiry.
+  7 positions is NOT 7 independent bets — a bad month breaches many at once.
+- IRON CONDOR DOES NOT RESCUE IT (arithmetic, not preference): the gross mean
+  is already ~zero, and paying for wings converts "occasionally catastrophic,
+  mean zero" into "reliably slightly negative".
+- GATE C (`research_margin_gate.py`) PASSED and was never the constraint:
+  naked strangle median Rs132,468/lot, condor Rs68,369 (1.89x benefit).
+- GATE B (`log_options_depth.py`, live option spreads) is MOOT — no edge left
+  for spreads to eat. Built, briefly wired to stockai-intraday, then UNWIRED
+  same day; kept as a handle. The equity depth collector is untouched.
+- A REAL BUG WAS CAUGHT MID-STUDY: the NSE F&O archive's underlying price is
+  NOT split/bonus-adjusted, so RELIANCE's real 2024 1:1 bonus produced a fake
+  ~55% "crash" (raw 2995.95 -> 1332.10 against a true ~-11% move). Fixed by
+  taking realised_move from price_data/'s adjusted close; implied_move is a
+  same-date ratio and unaffected. Same adjusted-vs-unadjusted trap as
+  fix_stale_bar.py/readjust_archive.py, first seen here in the DERIVATIVES
+  archive. `download_fo_bhavcopy.py` was widened to retain strike/expiry/
+  close/settle (verified byte-identical fo_data/ output, max abs diff 0.0).
+- WHAT THE USER'S UNDERLYING QUESTION STILL MAPS TO: `containment_band.py`
+  already answers "a level price probably won't breach this month" and is
+  calibrated (0/16 cells outside +-10pp). It ships as a RISK/expectation tool.
+  The options APPLICATION is what failed, not the band.
+- DO NOT REOPEN with a different moneyness/tenor — AMENDMENT 1 forecloses a
+  third cut, pre-registered before the result was seen. A genuinely different
+  underlying (index options) would be a NEW strategy needing its own prereg,
+  and abandons the per-stock requirement that motivated this.
+
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
   volume profile + wick rejection + delivery volume scoring + reach probability

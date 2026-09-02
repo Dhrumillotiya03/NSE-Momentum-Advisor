@@ -19,6 +19,16 @@ PCR = Put/Call ratio. Aggregated across all strikes/expiries for that
 underlying on that date (near + far month combined) — a per-date market-wide
 positioning snapshot, not a single-contract read.
 
+PER-CONTRACT DATA (2026-09-02): download_fo_date() now returns strike,
+expiry, close and settlement price alongside the original 6 columns (see
+EXTRA_COLS) — aggregate_by_symbol() ignores the extras, so data/fo_data/'s
+output is unchanged. This is what unlocks the options-range-selling research
+track (PREREG_options_range_selling.md): NSE's F&O archive is the only
+historical source of per-contract option PRICES in this repo, and this
+downloader already handles both archive eras. research_vrp_gate.py consumes
+download_fo_date() directly (small, sampled — one decision date + one expiry
+date per cycle), not this module's aggregate/backfill path.
+
 Usage:
     python download_fo_bhavcopy.py backfill 2015-01-01
     python download_fo_bhavcopy.py backfill 2015-01-01 2020-01-01   # resumable range
@@ -75,6 +85,28 @@ def _fetch_zip_csv(url, retries=3):
     return None
 
 
+# Per-contract columns retained ON TOP OF the original 6 (2026-09-02, for the
+# options-range-selling research track — PREREG_options_range_selling.md).
+# aggregate_by_symbol() only ever reads the original 6 by name, so widening
+# these does not change a single byte of the existing data/fo_data/ output —
+# verified: it groups by Symbol/Instrument/OptionType and sums OI/OIChg/
+# Volume, ignoring any other column present.
+#   Expiry, Strike : NaN for FUTSTK rows (options-only fields)
+#   Close, Settle   : legacy CLOSE is 0.0 for untraded strikes — SETTLE_PR is
+#                     NSE's theoretical/settlement price and is what actually
+#                     prices a position; prefer it, don't average the two
+#   Underlying      : populated ONLY in the UDiFF era (2024-07-15 on) — NSE
+#                     started publishing UndrlygPric directly. Legacy has no
+#                     equivalent column; the underlying spot for a legacy
+#                     date must come from that SAME date's near-month FUTSTK
+#                     settle price (self-consistent, unadjusted, no cross-
+#                     source join) — see research_vrp_gate.py's
+#                     underlying_price(). Do NOT join price_data/ (yfinance-
+#                     ADJUSTED) against this (Kite/NSE-UNADJUSTED) archive —
+#                     the standing trap (NATIONALUM 1.744x in 2016).
+EXTRA_COLS = ["Expiry", "Strike", "Close", "Settle", "Underlying"]
+
+
 def download_legacy(date):
     mo_str = date.strftime("%b").upper()
     url = (f"https://nsearchives.nseindia.com/content/historical/DERIVATIVES/"
@@ -89,8 +121,12 @@ def download_legacy(date):
     df = df.rename(columns={
         "SYMBOL": "Symbol", "INSTRUMENT": "Instrument", "OPTION_TYP": "OptionType",
         "OPEN_INT": "OI", "CHG_IN_OI": "OIChg", "CONTRACTS": "Volume",
+        "EXPIRY_DT": "Expiry", "STRIKE_PR": "Strike", "CLOSE": "Close",
+        "SETTLE_PR": "Settle",
     })
-    return df[["Symbol", "Instrument", "OptionType", "OI", "OIChg", "Volume"]]
+    df["Underlying"] = pd.NA          # not published pre-UDiFF, see EXTRA_COLS note
+    return df[["Symbol", "Instrument", "OptionType", "OI", "OIChg", "Volume"]
+              + EXTRA_COLS]
 
 
 def download_udiff(date):
@@ -106,8 +142,11 @@ def download_udiff(date):
     df = df.rename(columns={
         "TckrSymb": "Symbol", "OptnTp": "OptionType",
         "OpnIntrst": "OI", "ChngInOpnIntrst": "OIChg", "TtlTradgVol": "Volume",
+        "XpryDt": "Expiry", "StrkPric": "Strike", "ClsPric": "Close",
+        "SttlmPric": "Settle", "UndrlygPric": "Underlying",
     })
-    return df[["Symbol", "Instrument", "OptionType", "OI", "OIChg", "Volume"]]
+    return df[["Symbol", "Instrument", "OptionType", "OI", "OIChg", "Volume"]
+              + EXTRA_COLS]
 
 
 def download_fo_date(date):
