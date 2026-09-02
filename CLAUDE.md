@@ -771,7 +771,20 @@ table; wired into run_price_update.sh (~15s, read-only apart from its own CSV).
   the actionable number is the exit, not a fresh entry. Reads `entry_price`
   (record_fill.py's schema).
 - S1/R1 are carried for range context ONLY. They do not mark reversals
-  (measured, permutation-controlled) — never use them as a trigger.
+  (measured, permutation-controlled) — never use them as a trigger. They are
+  BYTE-IDENTICAL to what `live_ticker.py` shows (both go through
+  `core.sr_levels` -> `get_levels`; verified on 5 names 2026-09-02) — the only
+  difference is the ANCHOR: live_ticker passes a live quote fetched once at
+  launch, so its distances move through the session, while the sheet is
+  close-based. Neither is "more realistic" than the other.
+  A `~` SUFFIX MARKS A PROJECTED LEVEL (2026-09-02): `get_all_levels` returns
+  strength 0 when no historical pivot sits inside the reachable band and it
+  projects one off the containment band instead. The sheet used to print those
+  identically to a 6-touch pivot. Measured: 19/65 supports and 14/65
+  resistances are projections — INCLUDING the support on all four TOP-N names,
+  which is structural rather than incidental (a momentum leader near its highs
+  has no pivot below it by construction). Same flag-not-filter precedent as
+  the RSI `!`.
 
 ## S/R subsystem (separate, already tuned — don't touch unless directly asked)
 - `support_resistance.py` — multi-timeframe (monthly+weekly+daily) swing pivots +
