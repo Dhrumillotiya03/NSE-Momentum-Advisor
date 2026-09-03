@@ -520,6 +520,95 @@ stock_ai/
   Production behaviour is UNCHANGED; the deliverable was the documentation fix
   (recommend.py no longer claims a 20% cap, and no longer claims inverse-vol
   sizing either — that was superseded 2026-08-05 and never updated).
+- REBALANCE TIMING LUCK IS THE LARGEST UNMEASURED TERM IN EVERY NUMBER THIS
+  REPO QUOTES (2026-09-02, research_timing_luck.py). The rebalance grid's
+  PHASE — which day of the month the book rotates — is arbitrary, and had
+  never been measured. Running the IDENTICAL strategy on all 21 phases
+  (backtest_portfolio.run_backtest_laggards_only gained a `phase=` argument;
+  phase=0 is byte-identical to every historical number):
+      full panel  CAGR 21.94% .. 33.13%   SPREAD 11.19pp, sd 3.23pp
+                  Sharpe 0.89 .. 1.31     maxDD 23.29% .. 33.49%
+  Same rules, same data, same universe — only the calendar phase differs.
+  **That spread is larger than every effect the research programme has ever
+  adopted or rejected**: conviction sizing +1.85pp (ADOPTED), cap_0.35
+  +0.59pp, sectors.json +0.72pp, trend-quality +1.14pp. Controlled for the
+  obvious confound — a passive Nifty buy-and-hold over the same slicing moves
+  only 0.89pp, so the strategy moves 10x more and this is PHASE, not start
+  date. Mechanism is standard (Newfound Research, "Quantifying Timing Luck"):
+  timing-luck vol scales with turnover x portfolio vol / sqrt(rebalance
+  frequency), and monthly + high-turnover + 3-4 names is the worst case on all
+  three axes, so a large number here is expected, not anomalous.
+  PHASE-AVERAGED WALK-FORWARD (19 windows x 7 phases): mean CAGR **31.51%,
+  sd 2.61pp, range 28.42%-34.50%**. The long-quoted 33.4% is phase 0, which
+  sits near the TOP of that range, and its worst-case DD (30.2%) is the BEST
+  of the seven phases (others reach 35.8%). QUOTE 31.5% +- 2.6pp, not 33.4%.
+  Reassuringly, phase 0 is only the 43rd percentile on the full panel, so the
+  repo has not been quoting a cherry-picked phase — but it has been quoting a
+  point estimate where a distribution was needed.
+  THE LEVELS/DELTAS DISTINCTION, MEASURED — this is the load-bearing caveat and
+  it CORRECTS the alarming first reading. The 11pp applies to LEVELS (absolute
+  CAGR/Sharpe/DD). A PAIRED delta between two configs on the SAME phase largely
+  cancels the phase term: the ADOPTED conviction tilt re-tested across phases
+  0/5/10/15 measures **+1.87/+1.93/+1.65/+1.75pp, PASS on 4/4**, mean +1.80%
+  against the +1.85% recorded on one phase — a 0.28pp spread while the baseline
+  LEVEL underneath it moves 5.3pp (27.27%-32.59%). So **past adopt/reject
+  decisions are NOT invalidated by timing luck**, because they were all paired.
+  What IS true: phase-sensitivity of the DELTA is diagnostic. A real effect
+  barely moves; a null one swings (residual momentum ranged -1.30 to +0.21pp on
+  the same config, and a single-phase test landing on phase 10 would have
+  reported a mild positive). Hence the phase gate is a DISCRIMINATOR to run on
+  anything marginal, not a blanket invalidation.
+  CONSEQUENCES: (1) never quote a LEVEL from one phase — use the phase-averaged
+  figure; for a marginal DELTA (under ~2pp) clear the bar on >=3 phases (now a
+  pre-registered gate, see PREREG_residual_momentum.md, which was its first use
+  and where it worked); (2) part of
+  gate_report's 7.35% per-period sd is timing luck, not market noise; (3) the
+  BACKTEST steps a fixed 21-day grid while LIVE rotates on the last Tuesday —
+  they are not even the same phase, and divergence_check.py cannot see this
+  because it compares selection on a given day, not the rebalance calendar.
+  walk_forward.py now prints this caveat above every run and takes `--phase`.
+  TRANCHING MEASURED, NOT ADOPTED — it conflicts with the fixed mandate.
+  Splitting capital across N sleeves on staggered phases (the Jegadeesh-Titman
+  overlapping-portfolio construction) is exact to compute, since sleeves are
+  self-contained and total wealth is their sum:
+      1 tranche  mean +27.86%  sd 3.35%  spread 11.49%
+      2          mean +27.73%  sd 1.69%  spread  5.70%   (sd -50%)
+      4          mean +28.03%  sd 0.74%  spread  2.53%   (sd -78%)
+      7          mean +28.24%  sd 0.60%  spread  1.37%   (sd -82%)
+  Mean is unchanged — it is a VARIANCE reduction, not alpha, exactly as
+  Jegadeesh-Titman report. But it needs N decision dates per month against the
+  mandated one (last Tuesday), N x the positions on a 3-4 name book, and N x
+  the STCG events. THE MANDATE IS THE USER'S TO RELAX; do not adopt this
+  without them choosing to. (The 3-tranche row is worse than 2 because 21/3=7
+  spaces the phases in a way that happens to correlate on this panel — a
+  small-sample artifact of only 21 offsets, not a real non-monotonicity.)
+- RESIDUAL (IDIOSYNCRATIC) MOMENTUM TESTED AND REJECTED 2026-09-02, 0/12
+  (PREREG_residual_momentum.md, research_residual_momentum.py). Researched
+  from the literature at the user's request rather than proposed from memory:
+  Blitz, Huij & Martens (2011) report residual momentum earning ~2x the
+  risk-adjusted profit of total-return momentum by ranking on the residual of a
+  factor regression. Chosen over any "add an indicator" idea precisely because
+  it is NOT an auxiliary overlay — it recomputes the EXISTING score from data
+  already on disk (prices + nifty50.csv), matching the only pattern that has
+  worked here. FEASIBILITY GATE, recorded in the prereg BEFORE the test: corr
+  with the production score 0.864 Pearson / 0.835 Spearman — HIGHER than
+  trend-quality's 0.77, which was rejected for that collinearity; the one
+  counter-argument was that top-3/top-4 overlap is just 1/3 and 2/4 so the
+  books differ where the strategy trades. True, and irrelevant — they differ,
+  and the difference is not an improvement. RESULT: 3 configs (replace /
+  rank-blend 50 / tiebreak 10%) x 4 phases x 36 windows, every delta negative
+  or trivially positive, TWO cells with CIs excluding zero in the UNFAVOURABLE
+  direction (tiebreak phase 0 -2.00% [-3.31%,-0.67%], phase 15 -1.41%
+  [-2.81%,-0.33%]). Only the market factor is buildable (no point-in-time
+  fundamentals, same blocker as value/quality), so this is the CAPM-residual
+  version and a null here does NOT refute Blitz et al.'s FF3 result — only what
+  is constructible from this repo's data. RECORDED NOT ADOPTED: resid_replace
+  improved mean DD on all four phases (-1.27 to -1.61pp) consistently; the rule
+  is on return, return is negative, and a drawdown-only win is not an adoption
+  (same call as absolute_0.20). This is the 9th consecutive rejection of a
+  change to what the strategy RANKS on — everything touching selection has
+  failed, while the one success touched SIZING. See memory
+  residual-momentum-rejected-2026-09.
 - CORRELATION-AWARE (RISK-PARITY) SIZING and VOLATILITY-TARGETED EXPOSURE
   both tested and REJECTED 2026-08-01 — kept here as the reason conviction
   sizing (above) was framed as a DIFFERENT question, not a re-test of a
