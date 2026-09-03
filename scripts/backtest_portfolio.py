@@ -506,7 +506,7 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
                                skip_days=0, trail_stop=None, sizing_fn=None,
                                regime_fn=None, stage_days=1, score_fn=None,
                                exit_signal_fn=None, max_weight=None,
-                               cap_mode="renormalize"):
+                               cap_mode="renormalize", phase=0):
     """Same selection/sizing/regime logic as run_backtest, but positions
     still in the new top-N carry over (rebalanced to target weight, cost on
     the delta only) instead of being sold and rebought every 21 days.
@@ -526,6 +526,15 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     [0,1] summing to 1}, replacing the production inverse-vol sizing (see
     risk_parity_weights above for a correlation-aware alternative). None =
     production behavior (plain inverse-vol, MAX_WEIGHT-capped).
+
+    phase: shift the rebalance grid forward by this many sessions (0..HOLD-1).
+    The rebalance CALENDAR is arbitrary — production rotates on the last
+    Tuesday while this engine steps a fixed HOLD-day grid, so they are not even
+    the same phase. Measured on the current panel, phase alone moves full-panel
+    CAGR by ~9pp, which is larger than every effect this repo's research
+    programme has adopted or rejected. Use research_timing_luck.py to report
+    across phases rather than quoting one. 0 = the historical default, so every
+    previously-quoted number is reproducible.
 
     max_weight: override strategy_config.MAX_WEIGHT for this run. None =
     production. cap_mode: "renormalize" (production — clip then rescale back
@@ -588,7 +597,7 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     # strategy_config.CASH_YIELD — includes the stop-proceeds approximation)
     cash_growth = (1 + sc.CASH_YIELD) ** (HOLD / 252)
 
-    for i in range(LOOKBACK + 21, n_dates - HOLD, HOLD):
+    for i in range(LOOKBACK + 21 + int(phase), n_dates - HOLD, HOLD):
         date = dates[i]
         regime = regime_of(index, date, breadth)
         gated_symbols = liquid_symbols_at(turnover_matrix, i) & set(matrix.columns)

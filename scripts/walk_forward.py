@@ -108,6 +108,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--years", type=int, default=3, help="window length in years")
     parser.add_argument("--step", type=int, default=6, help="step between windows in months")
+    parser.add_argument("--phase", type=int, default=0,
+                        help="rebalance-grid phase in sessions (0..HOLD-1). The phase is "
+                             "ARBITRARY and worth ~11pp of full-panel CAGR — see "
+                             "research_timing_luck.py. 0 reproduces every historical number.")
     parser.add_argument("--engine", choices=list(ENGINES), default="gold_blend",
                         help="hard_close (legacy, full sell+rebuy every rebalance), "
                              "laggards_only (momentum sleeve only, was production 2026-07-12), or "
@@ -115,10 +119,28 @@ def main():
                              "production default since 2026-07-13)")
     args = parser.parse_args()
     engine = ENGINES[args.engine]
+    if args.phase:
+        import functools as _ft
+        engine = _ft.partial(engine, phase=args.phase)
 
     print("\n==============================")
-    print(f"WALK-FORWARD VALIDATION — {args.years}y windows, {args.step}mo step, engine={args.engine}")
+    print(f"WALK-FORWARD VALIDATION — {args.years}y windows, {args.step}mo step, "
+          f"engine={args.engine}, phase={args.phase}")
     print("==============================")
+    print("READ THIS BEFORE QUOTING ANY NUMBER BELOW. These are ONE rebalance phase.")
+    print("The phase — which day of the month the book rotates — is arbitrary, and")
+    print("production (last Tuesday) is not even the phase this grid uses. Measured")
+    print("2026-09-02 across all 21 phases: full-panel CAGR spans 21.94%-33.13%")
+    print("(spread 11.19pp, sd 3.23pp) and Sharpe 0.89-1.31, on IDENTICAL rules and")
+    print("data. Phase-averaged walk-forward is 31.51% +- 2.61pp, so the phase-0")
+    print("figure below sits near the TOP of that range and its worst-case drawdown")
+    print("is the BEST of seven phases (30.2% vs up to 35.8%).")
+    print("This applies to LEVELS. A PAIRED delta between two configs on the SAME")
+    print("phase largely cancels it — conviction sizing measures +1.65..+1.93pp")
+    print("across four phases — so past adopt/reject calls are NOT invalidated. But")
+    print("phase-sensitivity of the delta is itself diagnostic: a real effect stays")
+    print("put, a null one swings (residual momentum ranged -1.30 to +0.21pp).")
+    print("Run `python research_timing_luck.py --wf` for the distribution.")
 
     matrix = load_price_matrix()
     index = load_index()
