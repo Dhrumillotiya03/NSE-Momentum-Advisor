@@ -230,6 +230,91 @@ wrong twice over.
 
 ---
 
+## 06 — The biggest driver of the reported numbers is the calendar
+**Severity: largest effect ever measured here. QUOTING FIXED; strategy unchanged.**
+
+Finding 04 noted the paper book's 07-28 and 08-03 top-4 shared only 2 of 4
+names. That was a symptom of something nobody had measured. The IDENTICAL
+strategy on all 21 rebalance phases (`research_timing_luck.py`;
+`run_backtest_laggards_only` gained `phase=`, phase 0 byte-identical to every
+historical number):
+
+|  | min | max | spread | sd |
+|---|---|---|---|---|
+| CAGR | +21.94% | +33.13% | **11.19pp** | 3.23pp |
+| Sharpe | 0.89 | 1.31 | 0.42 | 0.11 |
+| max drawdown | 23.29% | 33.49% | 10.21pp | 2.85pp |
+
+Controlled: passive Nifty over the same slicing moves **0.89pp**, so the
+strategy moves 10x more — phase, not start date. Mechanism is textbook
+(Newfound, "Quantifying Timing Luck"): timing-luck vol scales with turnover x
+portfolio vol / sqrt(rebalance frequency); monthly + high-turnover + 3-4 names
+is the worst case on all three axes.
+
+**Phase-averaged walk-forward: 31.51%, sd 2.61pp, range 28.42-34.50%.** The
+long-quoted **33.4% is phase 0** — near the TOP of that range — and its
+worst-case DD (30.2%) is the BEST of seven phases (others reach 35.8%).
+**Quote 31.5% +- 2.6pp.** Phase 0 is the 43rd percentile on the full panel, so
+nothing was cherry-picked; a point estimate was quoted where a distribution was
+needed. Note the BACKTEST steps a fixed 21-day grid while LIVE rotates on the
+last Tuesday — not even the same phase, and `divergence_check.py` cannot see
+it because it compares selection on a given day, not the rebalance calendar.
+
+**THE CAVEAT THAT STOPS THIS BEING ALARMING — measured, not assumed.** The
+11pp applies to LEVELS. Every study here uses a PAIRED comparison on the same
+phase, which cancels most of the phase term. The ADOPTED conviction tilt
+re-tested across phases:
+
+| phase | baseline | tilt 0.50 | delta | wins | |
+|---|---|---|---|---|---|
+| 0 | +29.80% | +31.67% | +1.87% | 27/36 | PASS |
+| 5 | +30.66% | +32.59% | +1.93% | 29/36 | PASS |
+| 10 | +27.27% | +28.92% | +1.65% | 26/36 | PASS |
+| 15 | +27.92% | +29.67% | +1.75% | 28/36 | PASS |
+
+**4/4, mean +1.80% vs +1.85% on record — a 0.28pp spread while the baseline
+LEVEL underneath moves 5.3pp.** Past adopt/reject calls stand. What IS true:
+phase-sensitivity of the delta is diagnostic — a real effect barely moves, a
+null one swings.
+
+**Tranching measured, NOT adopted** (Jegadeesh-Titman overlapping portfolios;
+exact to compute, since sleeves are self-contained and total wealth is their
+sum): sd 3.35% -> 1.69% (2 sleeves) -> 0.74% (4) -> 0.60% (7), mean unchanged
+(27.86% -> 28.24%). A variance reduction, not alpha. It needs N decision dates
+per month against the mandated one, N x positions on a 3-4 name book and N x
+STCG events. **The mandate is the user's to relax.**
+
+---
+
+## 07 — Residual momentum tested and rejected, 0/12
+**Severity: none. A closed line.**
+
+Researched from the literature rather than proposed from memory. Blitz, Huij &
+Martens (2011) report residual momentum earning ~2x the risk-adjusted profit of
+total-return momentum. Chosen over any "add an indicator" idea precisely
+because it is NOT an auxiliary overlay — eight prior studies failed with that
+shape — and instead recomputes the EXISTING score from data already on disk.
+
+Feasibility gate, recorded in the prereg BEFORE the test: corr **0.864**
+Pearson / 0.835 Spearman, HIGHER than trend-quality's 0.77 which was rejected
+for that collinearity. Counter-argument was that top-3/top-4 overlap is only
+1/3 and 2/4. True, and irrelevant: the books differ, and the difference is not
+an improvement.
+
+**0/12** (3 configs x 4 phases x 36 windows). Every delta negative or trivially
+positive; two cells had CIs excluding zero in the UNFAVOURABLE direction.
+
+**The phase gate earned its keep on first use:** `resid_blend_50` ranged
+-1.30% to +0.21% across phases of the SAME config. A single-phase test landing
+on phase 10 would have reported a mild positive and invited a follow-up study.
+
+Recorded NOT adopted: `resid_replace` improved mean DD on all four phases
+(-1.27 to -1.61pp). The rule is on return, return is negative, and a
+drawdown-only win is not an adoption. 9th consecutive rejection of a change to
+what the strategy RANKS on.
+
+---
+
 ## What did not change, and what is still open
 
 No strategy parameter was altered. `MAX_WEIGHT`, `CONVICTION_TILT`,
