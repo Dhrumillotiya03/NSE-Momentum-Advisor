@@ -25,7 +25,8 @@ import pandas as pd
 
 from backtest_portfolio import (load_price_matrix, load_index, load_turnover_matrix,
                                 run_backtest, run_backtest_laggards_only,
-                                run_backtest_gold_blend, performance)
+                                run_backtest_gold_blend, performance,
+                                last_tuesday_rebalance_idx)
 
 ENGINES = {"hard_close": run_backtest, "laggards_only": run_backtest_laggards_only,
            "gold_blend": run_backtest_gold_blend}
@@ -104,6 +105,36 @@ def run_window(matrix, index, turnover_matrix, start, end, engine=_ENGINE_REQUIR
     return performance(equity)
 
 
+def run_window_real_calendar(matrix, index, turnover_matrix, start, end, engine):
+    """Like run_window but rebalances on the ACTUAL last-Tuesday calendar
+    (translated into the window's local index) and takes drawdown from the
+    DAILY curve — 21-day sampling understates it ~5.8pp. Returns the same
+    (total, annual, sharpe, dd, vol, years) tuple, dd being the daily figure."""
+    import numpy as _np
+    import pandas as _pd
+    sub = matrix[(matrix.index >= start) & (matrix.index <= end)]
+    sub = sub.loc[:, sub.isna().mean() <= 0.20]
+    if len(sub) < 300:
+        return None
+    subtv = turnover_matrix.reindex(sub.index)
+    glob = last_tuesday_rebalance_idx(matrix)
+    wd = set(sub.index)
+    local = sorted(sub.index.get_loc(matrix.index[g]) for g in glob if matrix.index[g] in wd)
+    dm = []
+    eq = engine(sub, index, subtv, rebalance_idx=local, daily_marks=dm)
+    if len(eq) < 2 or not dm:
+        return None
+    ser = _pd.Series({k: v for k, v in dm}).sort_index()
+    v = ser.values.astype(float)
+    yrs = (ser.index[-1] - ser.index[0]).days / 365.25
+    gaps = _np.diff(local) if len(local) > 1 else [21]
+    perf = performance(eq, years=yrs, avg_period_days=float(_np.mean(gaps)))
+    total, annual, sharpe, _, vol, y = perf
+    pk = _np.maximum.accumulate(v)
+    dd_daily = float(_np.max((pk - v) / pk))
+    return total, annual, sharpe, dd_daily, vol, y
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--years", type=int, default=3, help="window length in years")
@@ -112,6 +143,10 @@ def main():
                         help="rebalance-grid phase in sessions (0..HOLD-1). The phase is "
                              "ARBITRARY and worth ~11pp of full-panel CAGR — see "
                              "research_timing_luck.py. 0 reproduces every historical number.")
+    parser.add_argument("--real-calendar", action="store_true",
+                        help="rebalance on the ACTUAL last-Tuesday calendar (variable "
+                             "16-25 session periods) + daily-curve drawdown, instead of "
+                             "the fixed 21-day grid. This is the book the user actually trades.")
     parser.add_argument("--engine", choices=list(ENGINES), default="gold_blend",
                         help="hard_close (legacy, full sell+rebuy every rebalance), "
                              "laggards_only (momentum sleeve only, was production 2026-07-12), or "
@@ -152,7 +187,11 @@ def main():
 
     rows = []
     for start, end in windows:
-        result = run_window(matrix, index, turnover_matrix, start, end, engine=engine)
+        if args.real_calendar:
+            result = run_window_real_calendar(matrix, index, turnover_matrix, start, end,
+                                              run_backtest_laggards_only)
+        else:
+            result = run_window(matrix, index, turnover_matrix, start, end, engine=engine)
         if result is None:
             continue
         total, annual, sharpe, dd, vol, yrs = result

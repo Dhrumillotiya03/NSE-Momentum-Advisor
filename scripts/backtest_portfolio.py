@@ -506,7 +506,8 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
                                skip_days=0, trail_stop=None, sizing_fn=None,
                                regime_fn=None, stage_days=1, score_fn=None,
                                exit_signal_fn=None, max_weight=None,
-                               cap_mode="renormalize", phase=0):
+                               cap_mode="renormalize", phase=0, daily_marks=None,
+                               book_log=None, rebalance_idx=None, liquidate_all=False):
     """Same selection/sizing/regime logic as run_backtest, but positions
     still in the new top-N carry over (rebalanced to target weight, cost on
     the delta only) instead of being sold and rebought every 21 days.
@@ -581,7 +582,28 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     OI-based early-warning exit signals on existing holdings — a DIFFERENT
     question from the already-rejected entry-side rank-blend versions of
     the same data). None = production behavior (only the catastrophic stop
-    and, if set, trail_stop fire intra-hold)."""
+    and, if set, trail_stop fire intra-hold).
+
+    rebalance_idx: explicit sorted list of session indices to rebalance on,
+    REPLACING the fixed LOOKBACK+21+phase .. n-HOLD .. HOLD grid. None keeps
+    the fixed grid, so every previously-quoted number is reproducible
+    (verified byte-identical). Pass last_tuesday_rebalance_idx(matrix) to
+    simulate the ACTUAL production calendar (last Tuesday of each month) —
+    the fixed grid steps a rigid 21 sessions while production periods run
+    16-25 (mean 20.6), so no fixed-grid number describes the live book.
+    With an explicit schedule the hold window, the idle-cash accrual and
+    the final mark all run to the NEXT scheduled index, not i+HOLD.
+
+    liquidate_all: at every rebalance, SELL THE ENTIRE BOOK to cash before
+    re-selecting, so every name is bought fresh (COST on the full position
+    both ways, a realised gain/loss on every holding). This is the "empty the
+    holding every last Tuesday" mandate. False = production (laggards-only: a
+    name still in the new top-N is held and only re-weighted, COST on the
+    delta). It is otherwise byte-identical to laggards-only — same conviction
+    sizing, sector cap, regime exposure, -18% stop, all hooks — so a
+    hard-close vs laggards comparison built from it differs in exactly ONE
+    thing, unlike the legacy run_backtest which also still sizes on plain
+    inverse-vol. See PREREG_month_end_liquidation.md."""
     dates = matrix.index
     n_dates = len(dates)
     breadth = compute_breadth_series(matrix)
@@ -597,7 +619,18 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
     # strategy_config.CASH_YIELD — includes the stop-proceeds approximation)
     cash_growth = (1 + sc.CASH_YIELD) ** (HOLD / 252)
 
-    for i in range(LOOKBACK + 21 + int(phase), n_dates - HOLD, HOLD):
+    if rebalance_idx is None:
+        _sched = list(range(LOOKBACK + 21 + int(phase), n_dates - HOLD, HOLD))
+        _variable = False
+    else:
+        _sched = sorted({int(x) for x in rebalance_idx
+                         if LOOKBACK + 21 <= int(x) < n_dates - 1})
+        _variable = True
+
+    for _k, i in enumerate(_sched):
+        _next_i = _sched[_k + 1] if _k + 1 < len(_sched) else min(i + HOLD, n_dates - 1)
+        hold_len = (_next_i - i) if _variable else HOLD
+        cg = ((1 + sc.CASH_YIELD) ** (hold_len / 252)) if _variable else cash_growth
         date = dates[i]
         regime = regime_of(index, date, breadth)
         gated_symbols = liquid_symbols_at(turnover_matrix, i) & set(matrix.columns)
@@ -637,15 +670,20 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
         book_value = sum(p["cur_value"] for p in book.values())
 
         if len(scores) < n:
-            capital *= cash_growth
+            capital *= cg
             equity.append(capital + book_value)
             continue
 
         top = set(select_top_n_capped(scores, n, sector_map, sc.MAX_PER_SECTOR))
         if not top:
-            capital *= cash_growth
+            capital *= cg
             equity.append(capital + book_value)
             continue
+
+        if liquidate_all:
+            for _s in list(book):
+                _pos = book.pop(_s)
+                capital += _pos["cur_value"] * (1 - COST)
 
         held = set(book)
         drop, keep, new_names = held - top, held & top, top - held
@@ -720,6 +758,23 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
             book[s] = {"entry_price": px, "shares": target_val / px,
                        "last_price": px, "cur_value": target_val}
 
+        # DAILY MARKS (2026-09-04) — purely ADDITIVE bookkeeping for multi-sleeve
+        # (tranched) accounting, which needs every sleeve valued on a COMMON
+        # date axis; the returned `equity` array is sampled only at this
+        # sleeve's own rebalance points and so cannot be summed across sleeves
+        # whose grids are offset. Nothing below feeds back into `capital`,
+        # `book` or `equity` — verified byte-identical with daily_marks=None
+        # AND with it enabled.
+        if daily_marks is not None:
+            _pre_book = {s: dict(pos) for s, pos in book.items()}
+            _pre_cash = capital
+            _exits = {}
+
+        # Post-rebalance target composition, for aggregate-concentration
+        # measurement across sleeves (PREREG_tranching.md C1). Read-only.
+        if book_log is not None:
+            book_log.append((date, {s: w[s] * exp for s in top}))
+
         # simulate the hold window: -18% stop can fire on any held name
         for s in list(book):
             pos = book[s]
@@ -730,7 +785,7 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
             # current 21-day window.
             peak = pos.get("peak", entry_ref)
             stopped = False
-            for off in range(1, HOLD + 1):
+            for off in range(1, hold_len + 1):
                 idx = i + off
                 if idx >= n_dates:
                     break
@@ -747,6 +802,8 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
                 if hit:
                     proceeds = pos["shares"] * p * (1 - COST)
                     capital += proceeds
+                    if daily_marks is not None:
+                        _exits[s] = (off, proceeds)
                     del book[s]
                     stopped = True
                     break
@@ -754,13 +811,37 @@ def run_backtest_laggards_only(matrix, index, turnover_matrix=None, exposure_fn=
             if pos_still is not None:
                 pos_still["peak"] = peak
             if not stopped:
-                final_idx = min(i + HOLD, n_dates - 1)
+                final_idx = min(i + hold_len, n_dates - 1)
                 fp = col.iloc[final_idx]
                 if not pd.isna(fp):
                     pos["last_price"] = fp
                     pos["cur_value"] = pos["shares"] * fp
 
-        capital *= cash_growth
+        if daily_marks is not None:
+            # Shares are fixed through the hold window, so a day's equity is
+            # cash (plus any stop proceeds already realised by that day) plus
+            # each surviving position marked at that day's close. Cash yield is
+            # accrued pro-rata across the window rather than in one lump at the
+            # close, so the daily curve does not step.
+            for _off in range(1, hold_len + 1):
+                _idx = i + _off
+                if _idx >= n_dates:
+                    break
+                _cash = _pre_cash
+                _val = 0.0
+                for _s, _p0 in _pre_book.items():
+                    _ex = _exits.get(_s)
+                    if _ex is not None and _off >= _ex[0]:
+                        _cash += _ex[1]
+                        continue
+                    _px = matrix[_s].iloc[_idx]
+                    if pd.isna(_px):
+                        _px = _p0["last_price"]
+                    _val += _p0["shares"] * _px
+                daily_marks.append((dates[_idx],
+                                    _cash * cg ** (_off / hold_len) + _val))
+
+        capital *= cg
         equity.append(capital + sum(p["cur_value"] for p in book.values()))
 
     return np.array(equity)
@@ -833,14 +914,44 @@ def run_backtest_gold_blend(matrix, index, turnover_matrix=None, exposure_fn=Non
 
 # ---------- Performance ----------
 
-def performance(equity):
+def last_tuesday_rebalance_idx(matrix):
+    """Session indices of each month's ACTUAL production rebalance — the last
+    Tuesday of the month, holiday-rolled-back — via the single source of
+    truth exit_engine.rebalance_day -> sr_horizon.last_tuesday_of_month, NOT a
+    reimplementation. The engines otherwise step a rigid 21-session grid that
+    production never trades; pass this as run_backtest_laggards_only(...,
+    rebalance_idx=...). Import is lazy: exit_engine imports backtest_portfolio
+    lazily too, so a module-level import here would be circular."""
+    from exit_engine import rebalance_day
+    dates = pd.DatetimeIndex(matrix.index).normalize()
+    dset = set(dates)
+    out, seen = [], set()
+    for ts in dates:
+        key = (ts.year, ts.month)
+        if key in seen:
+            continue
+        seen.add(key)
+        rd = pd.Timestamp(rebalance_day(ts.year, ts.month, dates))
+        if rd in dset:
+            out.append(int(dates.get_loc(rd)))
+    return sorted(set(out))
+
+
+def performance(equity, years=None, avg_period_days=None):
+    """years / avg_period_days default to the fixed-grid assumption
+    (len*HOLD/252 and HOLD respectively) so every existing caller is
+    byte-identical. Pass both when the rebalance schedule is irregular
+    (last-Tuesday calendar) — periods then run 16-25 sessions, not 21, and
+    the fixed assumption misstates both CAGR and the annualisation factor."""
     if len(equity) < 2:
         return None
     returns       = equity[1:] / equity[:-1] - 1
     total_return  = equity[-1] / equity[0] - 1
-    years         = len(equity) * HOLD / 252
+    if years is None:
+        years = len(equity) * HOLD / 252
     annual_return = (1 + total_return) ** (1 / years) - 1
-    volatility    = np.std(returns) * np.sqrt(252 / HOLD)
+    _ppd          = avg_period_days if avg_period_days else HOLD
+    volatility    = np.std(returns) * np.sqrt(252 / _ppd)
     sharpe        = annual_return / volatility if volatility > 0 else 0
     peak          = np.maximum.accumulate(equity)
     drawdown      = np.max((peak - equity) / peak)
