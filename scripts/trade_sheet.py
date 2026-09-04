@@ -247,8 +247,18 @@ def print_sheet(df, regime, n_names, state):
             stop = avg * sc.CATASTROPHIC_STOP
             note = pos.get("note", "") or ""
             flag = "STOP BREACHED" if cur < stop else ""
+            if not flag:
+                try:
+                    import profit_watch
+                    pf = profit_watch.profit_signals(sym, avg, d, cur=cur)
+                    if pf:
+                        flag = "PROFIT? " + "/".join(sorted({x["trigger"].split("_")[0] for x in pf}))
+                except Exception:
+                    pass
             print(f"  {sym.replace('.NS',''):<14}{qty:>8}{avg:>12.2f}{cur:>12.2f}"
                   f"{pnl:>9.1f}%{stop:>12.2f}{(flag or note)[:27]:>28}")
+        print("  PROFIT? = a discretionary early-exit flag (profit_watch, display only,")
+        print("  NOT a rule — every price-based intra-month exit tested here was rejected)")
 
 
 def main():

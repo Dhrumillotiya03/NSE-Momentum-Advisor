@@ -229,6 +229,24 @@ def main():
                 w.writerow({"date": today, "time": now_hm, "symbol": sym, "type": typ,
                             "severity": sev, "price": round(price, 2), "message": msg})
 
+    # ---- profit-taking flags (DISPLAY ONLY, logged, never a trade signal) ----
+    # profit_watch is display-only infra like news_watchdog: it must never
+    # gate an exit. Surfaced here so a discretionary "sell early if green"
+    # decision has the same 15-min visibility as the -18% stop.
+    try:
+        import profit_watch
+        for _sym, _sig in profit_watch.check_book(positions, sr_levels=sr,
+                                                  quote_fn=get_quote, do_log=True):
+            _key = (today, _sym, "PROFIT_" + _sig["trigger"])
+            if _key in seen:
+                continue
+            new_seen.append({"date": today, "symbol": _sym,
+                             "type": "PROFIT_" + _sig["trigger"]})
+            alerts.append(("INFO", _sym, "PROFIT_" + _sig["trigger"],
+                           "discretionary profit-take flag (NOT a rule): " + _sig["detail"]))
+    except Exception as _e:
+        print(f"[intraday] profit_watch skipped: {_e}")
+
     # ---- book-level drawdown (aggregate, not per-name) ----
     dd, equity, peak, n_live = book_drawdown_check(state)
     if dd is not None:
