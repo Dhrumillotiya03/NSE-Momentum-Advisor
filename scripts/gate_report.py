@@ -407,11 +407,19 @@ def main():
     matrix = bp.load_price_matrix()
     index = bp.load_index()
     turnover = bp.load_turnover_matrix(matrix)
-    eq = bp.run_backtest_gold_blend(matrix, index, turnover)
-    ref = eq[1:] / eq[:-1] - 1   # historical 21d-period returns, production engine
+    # Reference = production engine's per-period returns ON THE REAL
+    # last-Tuesday calendar (2026-09-04), not the fixed 21-day grid — the
+    # paper book rebalances on the last Tuesday (periods 16-25 sessions), so a
+    # fixed-grid reference was scoring last-Tuesday periods against
+    # 21-session-grid periods. rebalance_idx=None would reproduce the old
+    # (mismatched) reference.
+    ridx = [x for x in bp.last_tuesday_rebalance_idx(matrix)
+            if sc.LOOKBACK + 21 <= x < len(matrix) - 1]
+    eq = bp.run_backtest_laggards_only(matrix, index, turnover, rebalance_idx=ridx)
+    ref = eq[1:] / eq[:-1] - 1   # historical per-period returns, real calendar
 
-    print(f"DEPLOYMENT GATE — paper rebalance periods vs backtest 21d-return "
-          f"distribution (n={len(ref)} periods)")
+    print(f"DEPLOYMENT GATE — paper rebalance periods vs backtest per-period "
+          f"return distribution, real last-Tuesday calendar (n={len(ref)} periods)")
     print(f"  reference: p5 {np.percentile(ref,5):+.2%}  p10 {np.percentile(ref,10):+.2%}  "
           f"median {np.percentile(ref,50):+.2%}  p90 {np.percentile(ref,90):+.2%}")
     print("  periods run rebalance-day -> rebalance-day (last Tuesday), matching")

@@ -1454,6 +1454,13 @@ table; wired into run_price_update.sh (~15s, read-only apart from its own CSV).
   feasibility gate measured at ~2 bps/side at carve-out order sizes, roughly
   half what K=5 predicts. The paper gate's job is to catch the failure those
   three cannot see: an operational break between signal and fill.
+  REFERENCE DISTRIBUTION NOW ON THE REAL LAST-TUESDAY CALENDAR (2026-09-04):
+  the reference per-period returns were built on the fixed 21-day grid while
+  the paper book rebalances on the last Tuesday (16-25 session periods), so
+  last-Tuesday periods were scored against grid periods. Now built via
+  run_backtest_laggards_only(rebalance_idx=last_tuesday_rebalance_idx(...)).
+  Verdict unchanged on current data (per-period sd 7.35%->6.79%, the one
+  scored period 66th->71st pctile, still "consistent", still low power).
   PERIODS, NOT CALENDAR MONTHS (2026-08-11): it used to group by calendar
   month, which measures a DIFFERENT object than the reference distribution —
   the book rotates on the last Tuesday, so calendar-August (07-31→08-31)
