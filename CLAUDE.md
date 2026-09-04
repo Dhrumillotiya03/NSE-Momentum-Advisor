@@ -478,9 +478,20 @@ stock_ai/
   New production baseline (python walk_forward.py --engine laggards_only,
   standard 19-window/6mo-step config): mean CAGR 33.4%, median 36.0%, mean
   Sharpe 1.25, mean max DD 21.5%, worst DD 30.2%, 1/19 negative windows.
+  THESE ARE FIXED-GRID, ONE-PHASE, 21-DAY-SAMPLED-DRAWDOWN, GROSS — corrected
+  2026-09-04, see the REAL CALENDAR entry below. The honest figures (real
+  last-Tuesday calendar, daily-curve drawdown, `python walk_forward.py
+  --real-calendar`): mean CAGR ~30%, Sharpe ~1.2, worst-case DD ~37%, 2/19
+  negative. Net of STCG + measured impact ~25% mean. FULL PANEL on the real
+  calendar is only +20.6% — a compounding-path artifact (see below), NOT the
+  number to quote. And the ERA SPLIT is the load-bearing caveat: real-calendar
+  non-overlapping eras are 2015-2018 +13.9% / 2019-2021 +64.0% / 2022-2026
+  +3.0% — the strategy has made low-single-digit CAGR since 2022 against a 41%
+  drawdown, and the ~30% walk-forward mean is 2019-2021 propagating through
+  overlapping windows.
   (Prior baseline before this change: 27.18% single-run CAGR/Sharpe
   1.09/DD 27.65%, wf mean 31.47%/1.24 — see the 2026-08-01 universe-coverage
-  entry above. Re-run before quoting either number; they drift with every
+  entry above. Re-run before quoting any number; they drift with every
   data pull.) `core.position_size` (rupee allocation given an already-known
   weight) is UNCHANGED — it never computed the weight itself, so no
   behavior to fix there. `full_advisor.py`'s ATR-based per-trade risk
@@ -578,10 +589,85 @@ stock_ai/
   Mean is unchanged — it is a VARIANCE reduction, not alpha, exactly as
   Jegadeesh-Titman report. But it needs N decision dates per month against the
   mandated one (last Tuesday), N x the positions on a 3-4 name book, and N x
-  the STCG events. THE MANDATE IS THE USER'S TO RELAX; do not adopt this
-  without them choosing to. (The 3-tranche row is worse than 2 because 21/3=7
+  the STCG events. MANDATE CONFIRMED 2026-09-04 (one last-Tuesday rebalance,
+  not relaxed) so this is NOT ADOPTED — and simulating the real last-Tuesday
+  calendar (see below) removes the timing-luck problem tranching solved.
+  Also measured: tranching does NOT reduce single-name concentration (every
+  sleeve converges on the same momentum leader). (The 3-tranche row is worse than 2 because 21/3=7
   spaces the phases in a way that happens to correlate on this panel — a
   small-sample artifact of only 21 offsets, not a real non-monotonicity.)
+- THE BACKTEST NOW SIMULATES THE REAL LAST-TUESDAY CALENDAR (2026-09-04,
+  research_real_calendar.py, research_turn_of_month.py,
+  real-rebalance-calendar-2026-09). `run_backtest_laggards_only` gained
+  `rebalance_idx=<session indices>` — an explicit schedule replacing the fixed
+  `LOOKBACK+21+phase .. n-HOLD .. HOLD` grid. `None` = fixed grid, verified
+  EXACT under PYTHONHASHSEED=0 (13665296.343058722 — the engine has
+  pre-existing set-iteration nondeterminism at ~1e-8 relative, so pin the seed
+  for any byte-identical check). `backtest_portfolio.last_tuesday_rebalance_idx
+  (matrix)` builds the real schedule via `exit_engine.rebalance_day` (133
+  rebalances, session gaps 16-25, mean 20.6, vs the grid's rigid 21).
+  `performance()` gained `years=`/`avg_period_days=` (both None = old formula,
+  every existing caller byte-identical). `walk_forward.py --real-calendar`
+  runs it with daily-curve drawdown.
+  WHY: the fixed grid is not the calendar the user trades, and its PHASE is
+  worth 11pp of CAGR (timing luck). Under a firm last-Tuesday rule there is
+  exactly ONE calendar, so the phase stops being a free parameter — this is
+  the real fix for timing luck, and it is why tranching was measured and then
+  dropped rather than adopted.
+  NUMBERS (real calendar, daily drawdown): walk-forward mean CAGR ~30%, Sharpe
+  ~1.2, worst-case DD ~37%, 2/19 negative. Full panel is only +20.6% — a
+  COMPOUNDING-PATH artifact: the 4 recent windows where the real calendar lags
+  the fixed grid (-27 to -34pp, 2020-2021 vintages) are the large-capital
+  windows and dominate the compound. Do NOT quote +20.6%; quote the
+  walk-forward.
+  TURN-OF-THE-MONTH: sweeping the rebalance day across the month shows a sharp
+  full-panel U-trough — the last ~5 calendar days are the WORST (+20.6%),
+  mid-month the best (+30-35%). Looks like 11pp free. IT IS NOT — walk-forward,
+  mid-month beats last-Tuesday only 8/19 windows (+1.42%), failing the >=14/19
+  bar. Same lesson as timing luck (full-panel CAGR is compounding path, not
+  edge). The rebalance day STAYS on the last Tuesday.
+- EVERY PUBLISHED DRAWDOWN WAS ~5.8pp TOO LOW (2026-09-04,
+  drawdown-understated-by-sampling-2026-09). The engines return equity sampled
+  ONLY at ~21-day rebalance points, and `performance()` took max drawdown from
+  that array, so any drawdown that formed AND recovered inside a holding period
+  was invisible. Measured across phases 0/5/10/15: period-sampled vs daily-curve
+  maxDD = 28.80->36.93, 29.01->34.59, 25.26->32.98, 24.32->26.04 (mean +5.79pp,
+  worst +8.14pp). The `daily_marks=` hook (additive, byte-identical)
+  reconstructs the daily curve. Real-calendar walk-forward worst-case DD is
+  37%, not the long-quoted 30%. gate_report's reference distribution still uses
+  period sampling — flagged, not yet propagated.
+- FULL-LIQUIDATION-EVERY-LAST-TUESDAY COSTS -1.21%/yr GROSS vs laggards-only
+  (2026-09-04, PREREG_month_end_liquidation.md, research_month_end_liquidation.py,
+  month-end-liquidation-cost-2026-09). User's mandate empties the whole book
+  each last Tuesday; production is laggards-only (hold names still in the
+  top-N). `run_backtest_laggards_only(liquidate_all=True)` — byte-identical
+  otherwise, a TRUE one-difference comparison (unlike legacy run_backtest which
+  also still sizes on plain inverse-vol). Walk-forward real calendar: mean
+  delta -1.21%/yr, 95% CI [-1.61%,-0.78%], loses 18/19 windows, plus a modest
+  STCG-deferral penalty (laggards defers tax on the ~13% of names it keeps;
+  both realise ~0 LTCG). USER'S CALL 2026-09-04: keep laggards-only — it
+  re-scores every name every last Tuesday, so nothing rides unreviewed; the
+  only difference is a round-trip on a name that would be rebought anyway, and
+  discretionary early profit-taking narrows the gap further. Engine default
+  stays `liquidate_all=False`; the switch exists to quote the number.
+- REGIME_NAMES BREADTH RE-TEST — REJECTED 0/5 + 0/4 (2026-09-04,
+  PREREG_regime_names.md, regime-names-breadth-rejected-2026-09). Widening
+  SIDEWAYS 3->5/6/8 and BEAR 4->6/8/10 costs 2-4pp/yr CAGR for 5-7pp less
+  drawdown; crossing it with a harder CONVICTION_TILT (so MAX_WEIGHT=0.20
+  finally binds at n>=5) still fails (best C tilt 1.00 at 2/4 phases, needed
+  >=3). Breadth STAYS 3/4. The 25%-of-total-capital maximum single-name weight
+  (n=3 -> 33.3%, n=4 -> 25.0%) is a DELIBERATE, PRICED risk, not an oversight.
+- PROFIT-TAKING WATCH — DISPLAY ONLY (2026-09-04, profit_watch.py,
+  PREREG_profit_taking_trigger.md, profit-taking-watch-2026-09). Surfaces four
+  profit-take flags (BIG_GAIN >=+25%, GIVEBACK_IN_PROFIT, RESISTANCE_IN_PROFIT,
+  RSI_EXHAUSTION — all require the position GREEN) in intraday_watch.py (INFO,
+  no notify) and trade_sheet.py ("PROFIT?" flag). Logs every fire to
+  data/profit_exit_log.csv for later scoring vs the laggards-only
+  counterfactual (pre-registered gate: >=30 independent (symbol,month) fires,
+  symbol-clustered bootstrap, phase gate). SAME HARD RULE as chart_analysis /
+  news_watchdog: no import by exit_engine / paper_trader / agent_sim. Prior is
+  LOW (every price-based intra-month exit tested here was rejected) — the
+  untested part is the profit-ONLY asymmetry.
 - RESIDUAL (IDIOSYNCRATIC) MOMENTUM TESTED AND REJECTED 2026-09-02, 0/12
   (PREREG_residual_momentum.md, research_residual_momentum.py). Researched
   from the literature at the user's request rather than proposed from memory:
@@ -1356,7 +1442,10 @@ table; wired into run_price_update.sh (~15s, read-only apart from its own CSV).
   clearance to deploy capital.
   WHAT THE DEPLOYMENT CASE ACTUALLY RESTS ON, in descending order of
   evidential weight: (1) the walk-forward distribution (19 windows, mean CAGR
-  33.4%, 1/19 negative) — this is the edge evidence and always was;
+  ~30% mean / Sharpe ~1.2 / worst DD ~37% on the REAL last-Tuesday calendar
+  with daily drawdown, 2/19 negative — corrected 2026-09-04 from the
+  fixed-grid 33.4%/30.2%; and note the era split, 2022-2026 is only +3%) —
+  this is the edge evidence and always was;
   (2) divergence_check.py showing the LIVE path selects identically to the
   BACKTEST path (deterministic, daily, and this repo has shipped that drift
   three times, so it is a real check rather than a formality); (3) the cost

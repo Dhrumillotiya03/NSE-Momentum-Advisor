@@ -155,6 +155,12 @@ MAX_WEIGHT = 0.20               # single-name cap — BUT SEE BELOW, IT DOES NOT
 # headroom) while concentration ALONE is a drag (-1.19%), and they nearly
 # cancel. Do not raise the cap to "unblock" the tilt; find a lever that does
 # not buy concentration at the same time, and pre-register it.
+# THAT FOLLOW-UP WAS RUN AND REJECTED 2026-09-04 (PREREG_regime_names.md):
+# widening REGIME_NAMES (the "tilt the NUMBER of names" lever) costs 2-4pp/yr
+# CAGR for 5-7pp less drawdown, 0/5 alone and 0/4 crossed with a harder
+# CONVICTION_TILT (best C tilt 1.00 = 2/4 phases, needed >=3). Breadth STAYS
+# 3/4 and the 25%-of-total-capital max single-name weight is now a DELIBERATE,
+# PRICED risk, disclosed in the README. See regime-names-breadth-rejected-2026-09.
 
 
 # CONVICTION-WEIGHTED SIZING — ADOPTED 2026-08-05 (research_conviction_sizing.py,
