@@ -72,6 +72,11 @@ ETF_SYMBOLS = ["GOLDBEES", "MON100"]
 # mapping here would append another company's prices into this one's history.
 SYMBOL_ALIASES = {
     "RELINFRA": "RELINFRA-BE",
+    # Verified 2026-09-08: splice-point close agrees to 0.0000% (236.64 both
+    # sides on 2026-09-01) — same trade-for-trade move as RELINFRA, not a
+    # delisting. HFCL was silently frozen 5 sessions while sitting as the
+    # LIVE #1 strategy pick (trade_sheet.py TOP-N).
+    "HFCL": "HFCL-BE",
 }
 
 OHLC = ["Open", "High", "Low", "Close"]
